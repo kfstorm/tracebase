@@ -87,9 +87,6 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "lf"
 
-[tool.vulture]
-paths = ["src", "tests"]
-
 [tool.pymarkdown.plugins.md013]
 enabled = false
 
