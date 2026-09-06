@@ -18,6 +18,7 @@ _DIFF_ACCEPT = "application/vnd.github.diff"
 _SUCCESS_STATUS_LOWER = 200
 _SUCCESS_STATUS_UPPER = 300
 _SEARCH_RESULT_LIMIT = 1000
+_REQUEST_TIMEOUT_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,14 @@ class _Candidate:
     queries: frozenset[str]
 
 
+@dataclass(frozen=True)
+class _Evidence:
+    path: str
+    endpoint: str
+    accept: str
+    response: _Response
+
+
 class _GitHub:
     def request(self, endpoint: str, accept: str = _API_ACCEPT) -> _Response:
         try:
@@ -43,8 +52,9 @@ class _GitHub:
                 ["gh", "api", "--include", "-H", f"Accept: {accept}", endpoint],
                 capture_output=True,
                 check=False,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
             )
-        except OSError as error:
+        except (OSError, subprocess.TimeoutExpired) as error:
             raise ArchiveError("GitHub request failed") from error
         if completed.returncode != 0:
             raise ArchiveError("GitHub request failed")
@@ -177,6 +187,8 @@ def _discover(
             total_count, items = value.get("total_count"), value.get("items")
             if not isinstance(total_count, int) or not isinstance(items, list):
                 raise ArchiveError("GitHub discovery response was invalid")
+            if value.get("incomplete_results") is True:
+                raise ArchiveError("GitHub discovery was incomplete")
             if total_count > _SEARCH_RESULT_LIMIT:
                 raise ArchiveError("GitHub discovery exceeded the 1,000 result limit")
             for item in items:
@@ -247,6 +259,7 @@ def _hydrate(
     actor_id: str,
     queries: dict[str, str],
 ) -> bool:
+    observed_from = _observed_at()
     base = f"/repos/{candidate.repository}"
     issue_endpoint = f"{base}/issues/{candidate.number}"
     issue_response = github.request(issue_endpoint)
@@ -255,8 +268,8 @@ def _hydrate(
         raise ArchiveError("GitHub Artifact payload was invalid")
     if ("pull_request" in issue) != (candidate.object_kind == "pull-request"):
         raise ArchiveError("GitHub Artifact kind changed during hydration")
-    evidence: list[tuple[str, str, str, _Response]] = [
-        ("issue.json", issue_endpoint, _API_ACCEPT, issue_response)
+    evidence: list[_Evidence] = [
+        _Evidence("issue.json", issue_endpoint, _API_ACCEPT, issue_response)
     ]
     comments: list[Any] = []
     comments_endpoint = f"{issue_endpoint}/comments"
@@ -265,14 +278,16 @@ def _hydrate(
     ):
         comments.extend(_as_list(github.json(response)))
         evidence.append(
-            (f"comments/page-{page_number:03d}.json", page, _API_ACCEPT, response)
+            _Evidence(
+                f"comments/page-{page_number:03d}.json", page, _API_ACCEPT, response
+            )
         )
     timeline_endpoint = f"{issue_endpoint}/timeline"
     for page_number, (page, response) in enumerate(
         _pages(github, timeline_endpoint, _TIMELINE_ACCEPT), start=1
     ):
         evidence.append(
-            (
+            _Evidence(
                 f"timeline/page-{page_number:03d}.json",
                 page,
                 _TIMELINE_ACCEPT,
@@ -284,7 +299,7 @@ def _hydrate(
         pull_endpoint = f"{base}/pulls/{candidate.number}"
         pull_response = github.request(pull_endpoint)
         evidence.append(
-            ("pull-request.json", pull_endpoint, _API_ACCEPT, pull_response)
+            _Evidence("pull-request.json", pull_endpoint, _API_ACCEPT, pull_response)
         )
         reviews_endpoint = f"{pull_endpoint}/reviews"
         for page_number, (page, response) in enumerate(
@@ -292,14 +307,16 @@ def _hydrate(
         ):
             reviews.extend(_as_list(github.json(response)))
             evidence.append(
-                (f"reviews/page-{page_number:03d}.json", page, _API_ACCEPT, response)
+                _Evidence(
+                    f"reviews/page-{page_number:03d}.json", page, _API_ACCEPT, response
+                )
             )
         review_comments_endpoint = f"{pull_endpoint}/comments"
         for page_number, (page, response) in enumerate(
             _pages(github, review_comments_endpoint), start=1
         ):
             evidence.append(
-                (
+                _Evidence(
                     f"review-comments/page-{page_number:03d}.json",
                     page,
                     _API_ACCEPT,
@@ -308,7 +325,7 @@ def _hydrate(
             )
         diff_response = github.request(pull_endpoint, _DIFF_ACCEPT)
         evidence.append(
-            ("pull-request.diff", pull_endpoint, _DIFF_ACCEPT, diff_response)
+            _Evidence("pull-request.diff", pull_endpoint, _DIFF_ACCEPT, diff_response)
         )
     eligibility = []
     if _actor_id(issue.get("user")) == actor_id:
@@ -341,16 +358,16 @@ def _hydrate(
         source_kind="github",
         object_kind=candidate.object_kind,
         source_id=candidate.source_id,
-        observation_window={"from": _observed_at(), "to": _observed_at()},
+        observation_window={"from": observed_from, "to": _observed_at()},
         evidence_files=tuple(
-            _evidence_file(path, endpoint, accept, response)
-            for path, endpoint, accept, response in evidence
+            _evidence_file(item.path, item.endpoint, item.accept, item.response)
+            for item in evidence
         ),
         selection_provenance=provenance,
     )
     snapshot_root = run.write_snapshot(snapshot)
-    for path, _endpoint, _accept, response in evidence:
-        run.write_evidence(snapshot_root, path, response.body)
+    for item in evidence:
+        run.write_evidence(snapshot_root, item.path, item.response.body)
     return True
 
 

@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -519,3 +520,70 @@ def test_github_collect_failure_keeps_run_unpublished(
 
         assert run.staging.exists()
         assert not (Path(directory) / "runs").exists()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_github_cli_uses_synthetic_gh_and_publishes_atomically(
+    fail: bool, tmp_path: Path
+) -> None:
+    gh = tmp_path / "gh"
+    gh.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import sys
+
+endpoint = sys.argv[-1]
+if {fail!r}:
+    raise SystemExit(1)
+if endpoint == "/user":
+    body = json.dumps({{"node_id": "actor-node", "login": "actor"}}).encode()
+elif endpoint.startswith("/search/issues?"):
+    body = b'{{"total_count":0,"incomplete_results":false,"items":[]}}'
+else:
+    raise SystemExit(2)
+headers = b"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n"
+sys.stdout.buffer.write(headers + body)
+""",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    archive = tmp_path / "archive"
+    environment = os.environ | {"PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]}
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tracebase",
+            "collect",
+            "github",
+            "--archive",
+            str(archive),
+            "--from",
+            "2026-01-01T00:00:00+00:00",
+            "--to",
+            "2026-01-02T00:00:00+00:00",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    if fail:
+        assert result.returncode == 1
+        assert not (archive / "runs").exists()
+    else:
+        assert result.returncode == 0
+        run = next((archive / "runs").iterdir())
+        manifest = json.loads((run / "run.json").read_text())
+        assert manifest["source"] == {"kind": "github", "scope_id": "actor-node"}
+        assert manifest["snapshots"] == []
+        assert [
+            entry["name"] for entry in manifest["coverage"]["discovery_matrix"]
+        ] == [
+            "authored",
+            "ordinary-commented",
+            "submitted-reviewed",
+        ]
