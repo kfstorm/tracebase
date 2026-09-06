@@ -66,6 +66,7 @@ class TestOpenCodeCollectionCli:
         executable = directory / "opencode"
         executable.write_text(
             """#!/usr/bin/env python3
+import base64
 import json
 import os
 import sys
@@ -90,6 +91,11 @@ elif arguments == [
             if (
                 parsed.path != "/experimental/session"
                 or parse_qs(parsed.query) != expected
+                or self.headers.get("Authorization")
+                != "Basic "
+                + base64.b64encode(
+                    f"opencode:{os.environ['OPENCODE_SERVER_PASSWORD']}".encode()
+                ).decode()
             ):
                 self.send_response(400)
                 self.end_headers()

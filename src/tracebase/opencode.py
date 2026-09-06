@@ -9,11 +9,12 @@ import secrets
 import select
 import subprocess
 import time
+from base64 import b64encode
 from datetime import UTC, datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from .archive import ArchiveError, CollectionRun, Snapshot
 
@@ -38,8 +39,9 @@ def _run_opencode(arguments: list[str]) -> bytes:
     return result.stdout
 
 
-def _start_server() -> tuple[subprocess.Popen[str], str]:
-    environment = os.environ | {"OPENCODE_SERVER_PASSWORD": secrets.token_urlsafe()}
+def _start_server() -> tuple[subprocess.Popen[str], str, str]:
+    password = secrets.token_urlsafe()
+    environment = os.environ | {"OPENCODE_SERVER_PASSWORD": password}
     try:
         process = subprocess.Popen(
             [
@@ -71,7 +73,7 @@ def _start_server() -> tuple[subprocess.Popen[str], str]:
             break
         match = _SERVER_URL_PATTERN.search(process.stdout.readline())
         if match:
-            return process, match.group()
+            return process, match.group(), password
         if process.poll() is not None:
             break
     _stop_server(process)
@@ -89,7 +91,9 @@ def _stop_server(process: subprocess.Popen[str]) -> None:
         process.wait()
 
 
-def _discover_sessions(server_url: str, run: CollectionRun) -> list[dict[str, Any]]:
+def _discover_sessions(
+    server_url: str, password: str, run: CollectionRun
+) -> list[dict[str, Any]]:
     query = urlencode(
         {
             "start": int(run.collection_range.start.timestamp() * 1000),
@@ -97,11 +101,13 @@ def _discover_sessions(server_url: str, run: CollectionRun) -> list[dict[str, An
             "limit": _DISCOVERY_LIMIT,
         }
     )
+    credentials = b64encode(f"opencode:{password}".encode()).decode()
+    request = Request(
+        f"{server_url}/experimental/session?{query}",
+        headers={"Authorization": f"Basic {credentials}"},
+    )
     try:
-        with urlopen(
-            f"{server_url}/experimental/session?{query}",
-            timeout=_SERVER_START_TIMEOUT_SECONDS,
-        ) as response:
+        with urlopen(request, timeout=_SERVER_START_TIMEOUT_SECONDS) as response:
             content = response.read()
             next_cursor = response.headers.get("x-next-cursor")
     except HTTPError, URLError, OSError:
@@ -147,9 +153,9 @@ def collect(run: CollectionRun) -> int:
 
     opencode_version = _run_opencode(["--version"]).decode("utf-8", "replace").strip()
     list_started_at = _observation_time()
-    server, server_url = _start_server()
+    server, server_url, password = _start_server()
     try:
-        sessions = _discover_sessions(server_url, run)
+        sessions = _discover_sessions(server_url, password, run)
     finally:
         _stop_server(server)
     list_completed_at = _observation_time()
