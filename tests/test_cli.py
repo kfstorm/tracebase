@@ -92,6 +92,26 @@ class TestCollectionCli:
             assert secret not in result.stderr
             assert secret not in result.stdout
 
+    def test_option_abbreviation_is_not_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli(
+                "collect",
+                "opencode",
+                "--arch",
+                directory,
+                "--instance-id",
+                "instance-1",
+                "--from",
+                "2026-01-01T00:00:00+00:00",
+                "--to",
+                "2026-01-01T01:00:00+00:00",
+            )
+
+            assert result.returncode == 1
+            assert result.stdout == ""
+            assert "invalid command arguments" in result.stderr
+            assert not (Path(directory) / ".staging").exists()
+
     @pytest.mark.parametrize(
         ("from_text", "to_text"),
         [
@@ -196,6 +216,7 @@ def test_collection_run_publishes_empty_run_and_snapshot_manifest() -> None:
             "to": "2026-01-01T01:00:00+00:00",
         }
         assert manifest["snapshots"] == []
+        assert (published / "snapshots").is_dir()
         assert not run.staging.exists()
 
         next_run = CollectionRun(

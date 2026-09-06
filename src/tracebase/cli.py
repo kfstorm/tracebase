@@ -15,13 +15,15 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _ArgumentParser(prog="tracebase", add_help=True)
+    parser = _ArgumentParser(prog="tracebase", add_help=True, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
-    collect = commands.add_parser("collect", add_help=True)
+    collect = commands.add_parser("collect", add_help=True, allow_abbrev=False)
     source_commands = collect.add_subparsers(dest="source", required=True)
 
     for source in ("github", "opencode"):
-        source_parser = source_commands.add_parser(source, add_help=True)
+        source_parser = source_commands.add_parser(
+            source, add_help=True, allow_abbrev=False
+        )
         source_parser.add_argument("--archive", required=True)
         source_parser.add_argument("--from", dest="from_text", required=True)
         source_parser.add_argument("--to", dest="to_text", required=True)
@@ -39,8 +41,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if arguments.source == "opencode":
             scope_id = arguments.instance_id
-            if archive.has_overlap("opencode", scope_id, collection_range):
-                raise ArchiveError("collection range overlaps a published run")
             CollectionRun(
                 archive,
                 "opencode",

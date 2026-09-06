@@ -192,7 +192,10 @@ class CollectionRun:
         self.collector_version = collector_version
         self.effective_options = effective_options
         self.started_at = _utc_now()
+        if archive.has_overlap(source_kind, scope_id, collection_range):
+            raise ArchiveError("collection range overlaps a published run")
         self.staging = archive.create_staging(self.run_id)
+        (self.staging / "snapshots").mkdir()
         self._snapshots: list[dict[str, Any]] = []
 
     def write_snapshot(self, snapshot: Snapshot) -> Path:
@@ -210,8 +213,9 @@ class CollectionRun:
             "observation_window": snapshot.observation_window,
             "evidence_files": list(snapshot.evidence_files),
         }
-        if snapshot.selection_provenance:
-            manifest["selection_provenance"] = list(snapshot.selection_provenance)
+        provenance = list(snapshot.selection_provenance)
+        if provenance:
+            manifest["selection_provenance"] = provenance
         self._write_json(snapshot_root / "snapshot.json", manifest)
         relative_path = str(snapshot_root.relative_to(self.staging))
         entry: dict[str, Any] = {
@@ -219,8 +223,8 @@ class CollectionRun:
             "source_id": snapshot.source_id,
             "path": relative_path,
         }
-        if snapshot.selection_provenance:
-            entry["selection_provenance"] = list(snapshot.selection_provenance)
+        if provenance:
+            entry["selection_provenance"] = provenance
         self._snapshots.append(entry)
         return snapshot_root
 
