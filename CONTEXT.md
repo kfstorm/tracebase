@@ -5,8 +5,12 @@ This context defines the evidence and observation language for a historical, rep
 ## Language
 
 **Artifact**:
-A source-owned GitHub Issue or Pull Request identified by its stable provider identifier. An Artifact is not its related-object graph.
+A GitHub Issue or Pull Request that passed Eligibility and is identified by its stable provider identifier. An Artifact is not its related-object graph.
 _Avoid_: Record, work item
+
+**Eligibility**:
+The direct-participation gate for a GitHub Artifact: the tracked actor is its author, wrote an ordinary comment, or submitted a review. Mentions, assignments, review requests, and line-level review comments are discovery context, not independent eligibility.
+_Avoid_: Discovery result, involvement
 
 **Source-native Evidence**:
 Unmodified bytes provided by a source and preserved in the private v0 archive. It is distinct from any later redacted or derived content.
