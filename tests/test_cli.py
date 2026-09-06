@@ -365,6 +365,18 @@ def test_symlinked_snapshot_area_cannot_escape_staging() -> None:
             outside.rmdir()
 
 
+def test_archive_root_symlink_is_caller_boundary() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "target"
+        target.mkdir()
+        archive_root = Path(directory) / "archive"
+        archive_root.symlink_to(target, target_is_directory=True)
+
+        run = build_run(Archive(archive_root))
+
+        assert run.staging.is_dir()
+
+
 def test_overlap_registry_uses_published_runs_and_half_open_ranges() -> None:
     with tempfile.TemporaryDirectory() as directory:
         archive = Archive(directory)

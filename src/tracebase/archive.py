@@ -191,7 +191,8 @@ class Archive:
 
     def create_staging(self, run_id: str) -> Path:
         staging_root = self.root / ".staging"
-        _ensure_inside(staging_root, self.root)
+        if staging_root.is_symlink():
+            raise ArchiveError(".staging cannot be a symlink")
         staging_root.mkdir(parents=True, exist_ok=True)
         staging = staging_root / run_id
         _ensure_inside(staging, staging_root)
