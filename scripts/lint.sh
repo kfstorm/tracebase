@@ -28,7 +28,6 @@ else
 fi
 
 uv run mypy
-uv run vulture src vulture_whitelist.py
-uv run vulture
+uv run vulture src tests vulture_whitelist.py
 uv run tach check-external
 uv run pymarkdown --strict-config scan -r AGENTS.md CONTEXT.md docs
