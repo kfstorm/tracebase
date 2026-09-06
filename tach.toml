@@ -1,0 +1,12 @@
+exclude = [
+    "**/__pycache__",
+    "**/.mypy_cache",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/.venv",
+    "tests",
+]
+source_roots = ["src"]
+
+[rules]
+unused_external_dependencies = "error"

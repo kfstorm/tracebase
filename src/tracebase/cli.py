@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
 
 
 class _ArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, _message: str) -> Never:
         raise ArchiveError("invalid command arguments")
 
 
@@ -51,7 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=run_id,
             )
         else:
-            # GitHub scope identity is obtained by its future collector, not this fail-closed path.
+            # The future GitHub collector resolves its scope identity.
             archive.create_staging(run_id)
         raise ArchiveError(f"{arguments.source} collector is not implemented")
     except ArchiveError as error:

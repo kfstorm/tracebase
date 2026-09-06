@@ -1,0 +1,21 @@
+{
+  "ignore": [
+    ".agents/**",
+    ".github/workflows/**",
+    "docs/**",
+    "**/.git/**",
+    "**/.mypy_cache/**",
+    "**/.pytest_cache/**",
+    "**/.ruff_cache/**",
+    "**/.venv/**",
+    "**/coverage/**",
+    "**/dist/**",
+    "**/node_modules/**",
+    "**/*.lock"
+  ],
+  "format": ["python"],
+  "minLines": 5,
+  "threshold": 0,
+  "reporters": ["ai"],
+  "noTips": true
+}
