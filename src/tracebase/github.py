@@ -21,6 +21,7 @@ _SEARCH_RESULT_LIMIT = 1000
 _REQUEST_TIMEOUT_SECONDS = 60
 _API_VERSION = "2022-11-28"
 _MINIMUM_PARTITION = timedelta(seconds=1)
+_DISCOVERY_MATRIX_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -186,9 +187,9 @@ def _discovery_queries(
         f"updated:>={collection_range.from_text} updated:<{collection_range.to_text}"
     )
     return [
-        ("authored", f"author:{login} {updated}"),
-        ("ordinary-commented", f"commenter:{login} {updated}"),
-        ("submitted-reviewed", f"is:pr reviewed-by:{login} {updated}"),
+        ("authorship", f"author:{login} {updated}"),
+        ("ordinary_comment", f"commenter:{login} {updated}"),
+        ("submitted_review", f"is:pr reviewed-by:{login} {updated}"),
     ]
 
 
@@ -203,7 +204,7 @@ def _search_response(value: dict[str, Any] | list[Any]) -> tuple[int, list[Any]]
     return total_count, items
 
 
-def _discover(
+def _discover(  # noqa: PLR0915
     github: _GitHub, login: str, collection_range: CollectionRange
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]]]:
     candidates: dict[str, _Candidate] = {}
@@ -234,10 +235,23 @@ def _discover(
                         "GitHub discovery exceeded the 1,000 result limit"
                     )
                 midpoint = start + (end - start) / 2
+                coverage_queries.append(
+                    {
+                        "reason": name,
+                        "partition": {"from": start_text, "to": end_text},
+                        "query": query,
+                        "result_count": total_count,
+                        "result_source_ids": _source_ids(items),
+                        "pages": 1,
+                        "pagination_complete": False,
+                        "disposition": "split",
+                    }
+                )
                 partitions[0:0] = [(start, midpoint), (midpoint, end)]
                 continue
             page = 1
             result_count = 0
+            result_source_ids: list[str] = []
             while True:
                 if page > 1:
                     response = github.request(_page_endpoint(endpoint, page))
@@ -292,15 +306,19 @@ def _discover(
                             "GitHub discovery returned inconsistent Artifact IDs"
                         )
                     result_count += 1
+                    if source_id not in result_source_ids:
+                        result_source_ids.append(source_id)
                 if not _has_next(response):
                     coverage_queries.append(
                         {
-                            "name": name,
+                            "reason": name,
                             "partition": {"from": start_text, "to": end_text},
                             "query": query,
                             "pages": page,
-                            "results": result_count,
+                            "result_count": result_count,
+                            "result_source_ids": result_source_ids,
                             "pagination_complete": True,
+                            "disposition": "complete",
                         }
                     )
                     break
@@ -308,24 +326,24 @@ def _discover(
     return candidates, coverage_queries
 
 
+def _source_ids(items: list[Any]) -> list[str]:
+    source_ids: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("node_id"), str):
+            raise ArchiveError("GitHub discovery response was invalid")
+        source_ids.append(item["node_id"])
+    return source_ids
+
+
 def _timestamp(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
-
-
-def _actor_id(value: Any) -> str | None:
-    return (
-        value.get("node_id")
-        if isinstance(value, dict) and isinstance(value.get("node_id"), str)
-        else None
-    )
 
 
 def _hydrate(
     run: CollectionRun,
     github: _GitHub,
     candidate: _Candidate,
-    actor_id: str,
-) -> bool:
+) -> None:
     observed_from = _observed_at()
     base = f"/repos/{candidate.repository}"
     issue_endpoint = f"{base}/issues/{candidate.number}"
@@ -338,16 +356,13 @@ def _hydrate(
     evidence: list[_Evidence] = [
         _Evidence("issue.json", issue_endpoint, _API_ACCEPT, issue_response)
     ]
-    comments: list[Any] = []
     comments_endpoint = f"{issue_endpoint}/comments"
     for page_number, (page, response) in enumerate(
         _pages(github, comments_endpoint), start=1
     ):
-        comments.extend(_as_list(github.json(response)))
+        _as_list(github.json(response))
         evidence.append(
-            _Evidence(
-                f"comments/page-{page_number:03d}.json", page, _API_ACCEPT, response
-            )
+            _Evidence(f"comments.{page_number:03d}.json", page, _API_ACCEPT, response)
         )
     timeline_endpoint = f"{issue_endpoint}/timeline"
     for page_number, (page, response) in enumerate(
@@ -355,16 +370,18 @@ def _hydrate(
     ):
         evidence.append(
             _Evidence(
-                f"timeline/page-{page_number:03d}.json",
+                f"timeline.{page_number:03d}.json",
                 page,
                 _TIMELINE_ACCEPT,
                 response,
             )
         )
-    reviews: list[Any] = []
     if candidate.object_kind == "pull-request":
         pull_endpoint = f"{base}/pulls/{candidate.number}"
         pull_response = github.request(pull_endpoint)
+        pull = github.json(pull_response)
+        if not isinstance(pull, dict) or pull.get("node_id") != candidate.source_id:
+            raise ArchiveError("GitHub Pull Request payload was invalid")
         evidence.append(
             _Evidence("pull-request.json", pull_endpoint, _API_ACCEPT, pull_response)
         )
@@ -372,10 +389,10 @@ def _hydrate(
         for page_number, (page, response) in enumerate(
             _pages(github, reviews_endpoint), start=1
         ):
-            reviews.extend(_as_list(github.json(response)))
+            _as_list(github.json(response))
             evidence.append(
                 _Evidence(
-                    f"reviews/page-{page_number:03d}.json", page, _API_ACCEPT, response
+                    f"reviews.{page_number:03d}.json", page, _API_ACCEPT, response
                 )
             )
         review_comments_endpoint = f"{pull_endpoint}/comments"
@@ -384,7 +401,7 @@ def _hydrate(
         ):
             evidence.append(
                 _Evidence(
-                    f"review-comments/page-{page_number:03d}.json",
+                    f"review-comments.{page_number:03d}.json",
                     page,
                     _API_ACCEPT,
                     response,
@@ -394,37 +411,14 @@ def _hydrate(
         evidence.append(
             _Evidence("pull-request.diff", pull_endpoint, _DIFF_ACCEPT, diff_response)
         )
-    eligibility = []
-    if _actor_id(issue.get("user")) == actor_id:
-        eligibility.append("authored")
-    if any(
-        _actor_id(comment.get("user")) == actor_id
-        for comment in comments
-        if isinstance(comment, dict)
-    ):
-        eligibility.append("ordinary-commented")
-    if any(
-        _actor_id(review.get("user")) == actor_id
-        and review.get("submitted_at") is not None
-        for review in reviews
-        if isinstance(review, dict)
-    ):
-        eligibility.append("submitted-reviewed")
-    discovered_eligibility = {
-        entry.eligibility for entry in candidate.discovery_entries
-    }
-    selected = sorted(set(eligibility) & discovered_eligibility)
-    if not selected:
-        return False
-    selected_entries = [
-        entry for entry in candidate.discovery_entries if entry.eligibility in selected
-    ]
+    selected_entries = list(candidate.discovery_entries)
+    selected = sorted({entry.eligibility for entry in selected_entries})
     provenance = (
         {
             "eligibility": selected,
             "discovery_query_entries": [
                 {
-                    "name": entry.eligibility,
+                    "reason": entry.eligibility,
                     "query": entry.query,
                     "partition": {
                         "from": entry.partition_from,
@@ -449,7 +443,6 @@ def _hydrate(
     snapshot_root = run.write_snapshot(snapshot)
     for item in evidence:
         run.write_evidence(snapshot_root, item.path, item.response.body)
-    return True
 
 
 def _as_list(value: dict[str, Any] | list[Any]) -> list[Any]:
@@ -466,10 +459,12 @@ def collect(run: CollectionRun, actor: tuple[str, str] | None = None) -> dict[st
     candidates, discovery = _discover(github, login, run.collection_range)
     selected = 0
     for candidate in candidates.values():
-        selected += _hydrate(run, github, candidate, actor_id)
+        _hydrate(run, github, candidate)
+        selected += 1
     return {
         "actor": {"node_id": actor_id, "login": login},
-        "discovery_matrix": discovery,
+        "discovery_matrix_version": _DISCOVERY_MATRIX_VERSION,
+        "queries": discovery,
         "permission_boundary": "responses visible to the authenticated GitHub actor",
         "pagination_complete": True,
         "selected_artifacts": selected,

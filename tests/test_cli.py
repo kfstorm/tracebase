@@ -21,7 +21,15 @@ from tracebase.archive import (
     encode_path_id,
     uuid7,
 )
-from tracebase.github import _discover, _GitHub, _Response, collect
+from tracebase.github import (
+    _Candidate,
+    _discover,
+    _DiscoveryEntry,
+    _GitHub,
+    _hydrate,
+    _Response,
+    collect,
+)
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -53,7 +61,10 @@ def build_github_run(archive: Archive) -> CollectionRun:
 
 
 def run_github_cli(
-    archive: Path, fixture_directory: Path
+    archive: Path,
+    fixture_directory: Path,
+    from_text: str = "2026-01-01T00:00:00+00:00",
+    to_text: str = "2026-01-02T00:00:00+00:00",
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -65,9 +76,9 @@ def run_github_cli(
             "--archive",
             str(archive),
             "--from",
-            "2026-01-01T00:00:00+00:00",
+            from_text,
             "--to",
-            "2026-01-02T00:00:00+00:00",
+            to_text,
         ],
         cwd=PROJECT_ROOT,
         text=True,
@@ -76,6 +87,32 @@ def run_github_cli(
         env=os.environ
         | {"PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"]},
     )
+
+
+def write_failure_gh(fixture_directory: Path, mode: str) -> None:
+    (fixture_directory / "gh").write_text(
+        f"""#!/usr/bin/env python3
+import sys
+
+endpoint = sys.argv[-1]
+if endpoint == "/user":
+    body = b'{{"node_id":"actor-node","login":"actor"}}'
+elif {mode!r} == "unresolved" and endpoint.startswith("/search/issues?"):
+    body = b'{{"total_count":1001,"incomplete_results":false,"items":[]}}'
+elif {mode!r} == "later-page" and endpoint.endswith("page=1"):
+    body = b'{{"total_count":1,"incomplete_results":false,"items":[]}}'
+    headers = b"HTTP/1.1 200 OK\\r\\nLink: <next>; rel=\\\"next\\\"\\r\\n\\r\\n"
+    sys.stdout.buffer.write(headers + body)
+    raise SystemExit(0)
+elif {mode!r} == "later-page" and endpoint.endswith("page=2"):
+    body = b'{{"total_count":1,"incomplete_results":true,"items":[]}}'
+else:
+    raise SystemExit(1)
+sys.stdout.buffer.write(b"HTTP/1.1 200 OK\\r\\n\\r\\n" + body)
+""",
+        encoding="utf-8",
+    )
+    (fixture_directory / "gh").chmod(0o755)
 
 
 class TestCollectionCli:
@@ -513,17 +550,33 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
         manifest = json.loads((snapshot / "snapshot.json").read_text())
 
         assert coverage["selected_artifacts"] == 1
-        assert [entry["name"] for entry in coverage["discovery_matrix"]] == [
-            "authored",
-            "ordinary-commented",
-            "submitted-reviewed",
+        assert coverage["discovery_matrix_version"] == 1
+        assert [entry["reason"] for entry in coverage["queries"]] == [
+            "authorship",
+            "ordinary_comment",
+            "submitted_review",
         ]
         assert manifest["selection_provenance"][0]["eligibility"] == [
-            "authored",
-            "ordinary-commented",
-            "submitted-reviewed",
+            "authorship",
+            "ordinary_comment",
+            "submitted_review",
         ]
-        assert (snapshot / "comments/page-002.json").read_bytes() == b"[]"
+        assert {
+            entry["reason"]
+            for entry in manifest["selection_provenance"][0]["discovery_query_entries"]
+        } == {"authorship", "ordinary_comment", "submitted_review"}
+        assert all(
+            entry["partition"]
+            == {
+                "from": "2026-01-01T00:00:00Z",
+                "to": "2026-01-02T00:00:00Z",
+            }
+            for entry in manifest["selection_provenance"][0]["discovery_query_entries"]
+        )
+        assert (snapshot / "comments.002.json").read_bytes() == b"[]"
+        assert (snapshot / "timeline.001.json").exists()
+        assert (snapshot / "reviews.001.json").exists()
+        assert (snapshot / "review-comments.001.json").exists()
         assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
         assert (
             json.loads((published / "run.json").read_text())["snapshots"][0][
@@ -548,6 +601,43 @@ def test_github_collect_failure_keeps_run_unpublished(
 
         assert run.staging.exists()
         assert not (Path(directory) / "runs").exists()
+
+
+def test_github_hydration_keeps_discovery_selection_when_payload_disagrees() -> None:
+    class HydrationFixture(_GitHub):
+        def request(self, endpoint: str, _accept: str = "") -> _Response:
+            if endpoint.endswith("/issues/1"):
+                body = b'{"node_id":"issue-node","user":{"node_id":"other"}}'
+            else:
+                body = b"[]"
+            return _Response(body, 200, {})
+
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+        _hydrate(
+            run,
+            HydrationFixture(),
+            _Candidate(
+                "issue-node",
+                "octo/example",
+                1,
+                "issue",
+                (
+                    _DiscoveryEntry(
+                        "authorship",
+                        "author:actor updated:>=x updated:<y",
+                        "x",
+                        "y",
+                    ),
+                ),
+            ),
+        )
+
+        published = run.publish({})
+        snapshot = next((published / "snapshots/issue").iterdir())
+        assert json.loads((snapshot / "snapshot.json").read_text())[
+            "selection_provenance"
+        ][0]["eligibility"] == ["authorship"]
 
 
 @pytest.mark.parametrize("fail", [False, True])
@@ -587,13 +677,12 @@ sys.stdout.buffer.write(headers + body)
         run = next((archive / "runs").iterdir())
         manifest = json.loads((run / "run.json").read_text())
         assert manifest["source"] == {"kind": "github", "scope_id": "actor-node"}
+        assert manifest["coverage"]["discovery_matrix_version"] == 1
         assert manifest["snapshots"] == []
-        assert [
-            entry["name"] for entry in manifest["coverage"]["discovery_matrix"]
-        ] == [
-            "authored",
-            "ordinary-commented",
-            "submitted-reviewed",
+        assert [entry["reason"] for entry in manifest["coverage"]["queries"]] == [
+            "authorship",
+            "ordinary_comment",
+            "submitted_review",
         ]
 
 
@@ -630,11 +719,34 @@ sys.stdout.buffer.write(headers + body)
     assert result.returncode == 0
     run = next((archive / "runs").iterdir())
     snapshot = next((run / "snapshots/pull-request").iterdir())
-    assert (snapshot / "comments/page-002.json").read_bytes() == b"[]"
+    assert (snapshot / "comments.002.json").read_bytes() == b"[]"
     assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
     assert json.loads((snapshot / "snapshot.json").read_text())["selection_provenance"][
         0
-    ]["eligibility"] == ["authored", "ordinary-commented", "submitted-reviewed"]
+    ]["eligibility"] == ["authorship", "ordinary_comment", "submitted_review"]
+
+
+@pytest.mark.parametrize("mode", ["later-page", "unresolved"])
+def test_github_cli_source_failures_keep_staging_unpublished(
+    mode: str, tmp_path: Path
+) -> None:
+    write_failure_gh(tmp_path, mode)
+    archive = tmp_path / "archive"
+    result = run_github_cli(
+        archive,
+        tmp_path,
+        to_text=(
+            "2026-01-01T00:00:01+00:00"
+            if mode == "unresolved"
+            else "2026-01-02T00:00:00+00:00"
+        ),
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "incomplete" in result.stderr or "1,000" in result.stderr
+    assert not (archive / "runs").exists()
+    assert len(list((archive / ".staging").iterdir())) == 1
 
 
 def test_github_discovery_partitions_over_limit_results() -> None:
@@ -662,8 +774,13 @@ def test_github_discovery_partitions_over_limit_results() -> None:
     )
 
     assert candidates == {}
-    assert len(coverage) == 6
-    assert all(entry["pagination_complete"] for entry in coverage)
+    assert len(coverage) == 9
+    assert sum(entry["disposition"] == "split" for entry in coverage) == 3
+    assert all(
+        entry["pagination_complete"]
+        for entry in coverage
+        if entry["disposition"] == "complete"
+    )
 
 
 def test_github_discovery_rejects_incomplete_later_page() -> None:
