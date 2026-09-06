@@ -176,7 +176,7 @@ else:
             }
             assert metadata["session"]["directory"] == "/gamma"
             assert metadata["session"]["parentID"] == "overlaps-start"
-            assert metadata["session"]["archived"] is True
+            assert metadata["session"]["time"]["archived"] == 1767228400000
 
     def test_empty_range_publishes_manifest_only_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -214,7 +214,7 @@ else:
             root = Path(directory)
             discovery = root / "invalid-sessions.json"
             discovery.write_text(
-                '[{"id":"invalid","created":true,"updated":1767225600000}]',
+                '[{"id":"invalid","time":{"created":true,"updated":1767225600000}}]',
                 encoding="utf-8",
             )
             result = self.run_cli(

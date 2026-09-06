@@ -133,9 +133,12 @@ def _parse_sessions(content: bytes) -> list[dict[str, Any]]:
             raise ArchiveError("OpenCode session list is invalid")
         if not isinstance(session.get("id"), str) or not session["id"]:
             raise ArchiveError("OpenCode session list is invalid")
+        time_data = session.get("time")
+        if not isinstance(time_data, dict):
+            raise ArchiveError("OpenCode session list is invalid")
         for field in ("created", "updated"):
-            if isinstance(session.get(field), bool) or not isinstance(
-                session.get(field), int
+            if isinstance(time_data.get(field), bool) or not isinstance(
+                time_data.get(field), int
             ):
                 raise ArchiveError("OpenCode session list is invalid")
     return sessions
@@ -143,8 +146,9 @@ def _parse_sessions(content: bytes) -> list[dict[str, Any]]:
 
 def _session_interval(session: dict[str, Any]) -> tuple[datetime, datetime]:
     try:
-        created = datetime.fromtimestamp(session["created"] / 1000, UTC)
-        updated = datetime.fromtimestamp(session["updated"] / 1000, UTC)
+        time_data = session["time"]
+        created = datetime.fromtimestamp(time_data["created"] / 1000, UTC)
+        updated = datetime.fromtimestamp(time_data["updated"] / 1000, UTC)
     except OverflowError, OSError, TypeError, ValueError:
         raise ArchiveError("OpenCode session timestamps are invalid") from None
     if updated < created:
