@@ -58,20 +58,48 @@ class _Evidence:
 
 
 class _GitHub:
-    def request(self, endpoint: str, accept: str = _API_ACCEPT) -> _Response:
+    def __init__(self) -> None:
+        self._supports_allow_escape_sequences: bool | None = None
+
+    def _supports_escape_sequences(self) -> bool:
+        if self._supports_allow_escape_sequences is not None:
+            return self._supports_allow_escape_sequences
         try:
             completed = subprocess.run(
-                [
-                    "gh",
-                    "api",
-                    "--include",
-                    "--allow-escape-sequences",
-                    "-H",
-                    f"Accept: {accept}",
-                    "-H",
-                    f"X-GitHub-Api-Version: {_API_VERSION}",
-                    endpoint,
-                ],
+                ["gh", "api", "--help"],
+                capture_output=True,
+                check=False,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ArchiveError("GitHub CLI capability probe failed") from error
+        if completed.returncode != 0:
+            raise ArchiveError("GitHub CLI capability probe failed")
+        self._supports_allow_escape_sequences = (
+            b"--allow-escape-sequences" in completed.stdout
+        )
+        return self._supports_allow_escape_sequences
+
+    def request(self, endpoint: str, accept: str = _API_ACCEPT) -> _Response:
+        arguments = [
+            "gh",
+            "api",
+            "--include",
+        ]
+        if accept == _DIFF_ACCEPT and self._supports_escape_sequences():
+            arguments.append("--allow-escape-sequences")
+        arguments.extend(
+            [
+                "-H",
+                f"Accept: {accept}",
+                "-H",
+                f"X-GitHub-Api-Version: {_API_VERSION}",
+                endpoint,
+            ]
+        )
+        try:
+            completed = subprocess.run(
+                arguments,
                 capture_output=True,
                 check=False,
                 timeout=_REQUEST_TIMEOUT_SECONDS,

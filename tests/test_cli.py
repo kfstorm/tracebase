@@ -74,6 +74,7 @@ def run_github_cli(
     fixture_directory: Path,
     from_text: str = "2026-01-01T00:00:00+00:00",
     to_text: str = "2026-01-02T00:00:00+00:00",
+    extra_environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -94,7 +95,8 @@ def run_github_cli(
         capture_output=True,
         check=False,
         env=os.environ
-        | {"PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"]},
+        | {"PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"]}
+        | (extra_environment or {}),
     )
 
 
@@ -105,6 +107,9 @@ import json
 import sys
 
 endpoint = sys.argv[-1]
+if endpoint == "--help":
+    print("gh api help")
+    raise SystemExit(0)
 if endpoint == "/user":
     body = b'{{"node_id":"actor-node","login":"actor"}}'
 elif {mode!r} == "unresolved" and endpoint.startswith("/search/issues?"):
@@ -696,6 +701,9 @@ import json
 import sys
 
 endpoint = sys.argv[-1]
+if endpoint == "--help":
+    print("gh api help")
+    raise SystemExit(0)
 if {fail!r}:
     raise SystemExit(1)
 if endpoint == "/user":
@@ -734,14 +742,26 @@ sys.stdout.buffer.write(headers + body)
         ]
 
 
-def test_github_cli_hydrates_eligible_pr_from_synthetic_gh(tmp_path: Path) -> None:
+@pytest.mark.parametrize("capability", ["legacy", "modern"])
+def test_github_cli_hydrates_eligible_pr_from_synthetic_gh(
+    capability: str, tmp_path: Path
+) -> None:
     gh = tmp_path / "gh"
     gh.write_text(
         """#!/usr/bin/env python3
 import json
+import os
 import sys
 
 endpoint = sys.argv[-1]
+capability = os.environ["TRACEBASE_FIXTURE_CAPABILITY"]
+if endpoint == "--help":
+    print("gh api help" + (" --allow-escape-sequences" if capability == "modern" else ""))
+    raise SystemExit(0)
+has_escape_flag = "--allow-escape-sequences" in sys.argv
+is_diff = any("application/vnd.github.diff" in arg for arg in sys.argv)
+if has_escape_flag != (capability == "modern" and is_diff):
+    raise SystemExit(1)
 assert "X-GitHub-Api-Version: 2022-11-28" in sys.argv
 headers = b"HTTP/1.1 200 OK\\r\\n\\r\\n"
 item = {"node_id": "pr-node", "number": 7, "repository_url": "https://api.github.com/repos/octo/example", "pull_request": {}}
@@ -763,7 +783,11 @@ sys.stdout.buffer.write(headers + body)
     )
     gh.chmod(0o755)
     archive = tmp_path / "archive"
-    result = run_github_cli(archive, tmp_path)
+    result = run_github_cli(
+        archive,
+        tmp_path,
+        extra_environment={"TRACEBASE_FIXTURE_CAPABILITY": capability},
+    )
     assert result.returncode == 0
     run = next((archive / "runs").iterdir())
     snapshot = next((run / "snapshots/pull-request").iterdir())
