@@ -6,7 +6,7 @@ import json
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
 
@@ -19,6 +19,8 @@ _SUCCESS_STATUS_LOWER = 200
 _SUCCESS_STATUS_UPPER = 300
 _SEARCH_RESULT_LIMIT = 1000
 _REQUEST_TIMEOUT_SECONDS = 60
+_API_VERSION = "2022-11-28"
+_MINIMUM_PARTITION = timedelta(seconds=1)
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,7 @@ class _Response:
     body: bytes
     status: int
     headers: dict[str, str]
+    observed_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -49,7 +52,16 @@ class _GitHub:
     def request(self, endpoint: str, accept: str = _API_ACCEPT) -> _Response:
         try:
             completed = subprocess.run(
-                ["gh", "api", "--include", "-H", f"Accept: {accept}", endpoint],
+                [
+                    "gh",
+                    "api",
+                    "--include",
+                    "-H",
+                    f"Accept: {accept}",
+                    "-H",
+                    f"X-GitHub-Api-Version: {_API_VERSION}",
+                    endpoint,
+                ],
                 capture_output=True,
                 check=False,
                 timeout=_REQUEST_TIMEOUT_SECONDS,
@@ -58,10 +70,10 @@ class _GitHub:
             raise ArchiveError("GitHub request failed") from error
         if completed.returncode != 0:
             raise ArchiveError("GitHub request failed")
-        return self._parse_response(completed.stdout)
+        return self._parse_response(completed.stdout, _observed_at())
 
     @staticmethod
-    def _parse_response(raw: bytes) -> _Response:
+    def _parse_response(raw: bytes, observed_at: str = "") -> _Response:
         separator = b"\r\n\r\n" if b"\r\n\r\n" in raw else b"\n\n"
         try:
             header_block, body = raw.split(separator, maxsplit=1)
@@ -76,7 +88,9 @@ class _GitHub:
                 headers[key.lower()] = value.strip()
         if not _SUCCESS_STATUS_LOWER <= status < _SUCCESS_STATUS_UPPER:
             raise ArchiveError("GitHub request failed")
-        return _Response(body=body, status=status, headers=headers)
+        return _Response(
+            body=body, status=status, headers=headers, observed_at=observed_at
+        )
 
     @staticmethod
     def json(response: _Response) -> dict[str, Any] | list[Any]:
@@ -108,11 +122,13 @@ def _evidence_file(
         "path": path,
         "request": {
             "endpoint": endpoint,
+            "method": "GET",
             "api": "GitHub REST API",
+            "api_version": _API_VERSION,
             "accept": accept,
             "response_status": response.status,
             "response_headers": _response_headers(response.headers),
-            "observed_at": _observed_at(),
+            "observed_at": response.observed_at or _observed_at(),
         },
     }
 
@@ -167,20 +183,29 @@ def _discovery_queries(
     ]
 
 
-def _discover(
+def _discover(  # noqa: PLR0915
     github: _GitHub, login: str, collection_range: CollectionRange
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]]]:
     candidates: dict[str, _Candidate] = {}
     coverage_queries: list[dict[str, Any]] = []
-    for name, query in _discovery_queries(login, collection_range):
-        endpoint = "/search/issues?" + urlencode(
-            {"q": query, "sort": "updated", "order": "asc"}
-        )
-        page = 1
-        result_count = 0
-        while True:
-            page_endpoint = _page_endpoint(endpoint, page)
-            response = github.request(page_endpoint)
+    for name, base_query in _discovery_queries(login, collection_range):
+        partitions = [(collection_range.start, collection_range.end)]
+        while partitions:
+            start, end = partitions.pop(0)
+            start_text = _timestamp(start)
+            end_text = _timestamp(end)
+            original_range = (
+                f"updated:>={collection_range.from_text} "
+                f"updated:<{collection_range.to_text}"
+            )
+            query = base_query.replace(
+                original_range,
+                f"updated:>={start_text} updated:<{end_text}",
+            )
+            endpoint = "/search/issues?" + urlencode(
+                {"q": query, "sort": "updated", "order": "asc"}
+            )
+            response = github.request(_page_endpoint(endpoint, 1))
             value = github.json(response)
             if not isinstance(value, dict):
                 raise ArchiveError("GitHub discovery response was invalid")
@@ -190,58 +215,84 @@ def _discover(
             if value.get("incomplete_results") is True:
                 raise ArchiveError("GitHub discovery was incomplete")
             if total_count > _SEARCH_RESULT_LIMIT:
-                raise ArchiveError("GitHub discovery exceeded the 1,000 result limit")
-            for item in items:
-                if not isinstance(item, dict):
-                    raise ArchiveError("GitHub discovery response was invalid")
-                source_id = item.get("node_id")
-                repository = item.get("repository_url")
-                number = item.get("number")
-                if (
-                    not isinstance(source_id, str)
-                    or not isinstance(repository, str)
-                    or not isinstance(number, int)
-                ):
-                    raise ArchiveError("GitHub discovery response was invalid")
-                repository = repository.removeprefix("https://api.github.com/repos/")
-                if "/" not in repository:
-                    raise ArchiveError("GitHub discovery response was invalid")
-                object_kind = "pull-request" if "pull_request" in item else "issue"
-                prior = candidates.get(source_id)
-                if prior is None:
-                    candidates[source_id] = _Candidate(
-                        source_id, repository, number, object_kind, frozenset({name})
+                if end - start <= _MINIMUM_PARTITION:
+                    raise ArchiveError(
+                        "GitHub discovery exceeded the 1,000 result limit"
                     )
-                elif (prior.repository, prior.number, prior.object_kind) == (
-                    repository,
-                    number,
-                    object_kind,
-                ):
-                    candidates[source_id] = _Candidate(
-                        source_id,
+                midpoint = start + (end - start) / 2
+                partitions[0:0] = [(start, midpoint), (midpoint, end)]
+                continue
+            page = 1
+            result_count = 0
+            while True:
+                if page > 1:
+                    response = github.request(_page_endpoint(endpoint, page))
+                    value = github.json(response)
+                    if not isinstance(value, dict) or not isinstance(
+                        value.get("items"), list
+                    ):
+                        raise ArchiveError("GitHub discovery response was invalid")
+                    items = value["items"]
+                for item in items:
+                    if not isinstance(item, dict):
+                        raise ArchiveError("GitHub discovery response was invalid")
+                    source_id = item.get("node_id")
+                    repository = item.get("repository_url")
+                    number = item.get("number")
+                    if (
+                        not isinstance(source_id, str)
+                        or not isinstance(repository, str)
+                        or not isinstance(number, int)
+                    ):
+                        raise ArchiveError("GitHub discovery response was invalid")
+                    repository = repository.removeprefix(
+                        "https://api.github.com/repos/"
+                    )
+                    object_kind = "pull-request" if "pull_request" in item else "issue"
+                    prior = candidates.get(source_id)
+                    if prior is None:
+                        candidates[source_id] = _Candidate(
+                            source_id,
+                            repository,
+                            number,
+                            object_kind,
+                            frozenset({name}),
+                        )
+                    elif (prior.repository, prior.number, prior.object_kind) == (
                         repository,
                         number,
                         object_kind,
-                        prior.queries | {name},
+                    ):
+                        candidates[source_id] = _Candidate(
+                            source_id,
+                            repository,
+                            number,
+                            object_kind,
+                            prior.queries | {name},
+                        )
+                    else:
+                        raise ArchiveError(
+                            "GitHub discovery returned inconsistent Artifact IDs"
+                        )
+                    result_count += 1
+                if not _has_next(response):
+                    coverage_queries.append(
+                        {
+                            "name": name,
+                            "partition": {"from": start_text, "to": end_text},
+                            "query": query,
+                            "pages": page,
+                            "results": result_count,
+                            "pagination_complete": True,
+                        }
                     )
-                else:
-                    raise ArchiveError(
-                        "GitHub discovery returned inconsistent Artifact IDs"
-                    )
-                result_count += 1
-            if not _has_next(response):
-                coverage_queries.append(
-                    {
-                        "name": name,
-                        "query": query,
-                        "pages": page,
-                        "results": result_count,
-                        "pagination_complete": True,
-                    }
-                )
-                break
-            page += 1
+                    break
+                page += 1
     return candidates, coverage_queries
+
+
+def _timestamp(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def _actor_id(value: Any) -> str | None:

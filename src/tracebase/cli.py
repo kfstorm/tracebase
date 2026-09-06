@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
-from .github import _GitHub, _actor, collect as collect_github
+from .github import _actor, _GitHub
+from .github import collect as collect_github
 from .opencode import collect as collect_opencode
 
 
@@ -77,7 +78,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{run.run_id}  {coverage['selected_artifacts']} snapshots  {published}"
             )
             return 0
-        raise ArchiveError(f"{arguments.source} collector is not implemented")
     except ArchiveError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

@@ -21,7 +21,7 @@ from tracebase.archive import (
     encode_path_id,
     uuid7,
 )
-from tracebase.github import _Response, collect
+from tracebase.github import _discover, _GitHub, _Response, collect
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -605,6 +605,7 @@ import json
 import sys
 
 endpoint = sys.argv[-1]
+assert "X-GitHub-Api-Version: 2022-11-28" in sys.argv
 headers = b"HTTP/1.1 200 OK\\r\\n\\r\\n"
 item = {"node_id": "pr-node", "number": 7, "repository_url": "https://api.github.com/repos/octo/example", "pull_request": {}}
 if endpoint == "/user": body = b'{"node_id":"actor-node","login":"actor"}'
@@ -634,3 +635,32 @@ sys.stdout.buffer.write(headers + body)
     assert json.loads((snapshot / "snapshot.json").read_text())["selection_provenance"][
         0
     ]["eligibility"] == ["authored", "ordinary-commented", "submitted-reviewed"]
+
+
+def test_github_discovery_partitions_over_limit_results() -> None:
+    class SearchFixture(_GitHub):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def request(self, _endpoint: str, _accept: str = "") -> _Response:
+            self.calls += 1
+            total = 1001 if self.calls % 3 == 1 else 0
+            return _Response(
+                json.dumps(
+                    {"total_count": total, "incomplete_results": False, "items": []}
+                ).encode(),
+                200,
+                {},
+                f"2026-01-01T00:00:0{self.calls}Z",
+            )
+
+    fixture = SearchFixture()
+    candidates, coverage = _discover(
+        fixture,
+        "actor",
+        CollectionRange.parse("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:02+00:00"),
+    )
+
+    assert candidates == {}
+    assert len(coverage) == 6
+    assert all(entry["pagination_complete"] for entry in coverage)
