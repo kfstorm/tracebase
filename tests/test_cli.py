@@ -605,17 +605,21 @@ import json
 import sys
 
 endpoint = sys.argv[-1]
+headers = b"HTTP/1.1 200 OK\\r\\n\\r\\n"
 item = {"node_id": "pr-node", "number": 7, "repository_url": "https://api.github.com/repos/octo/example", "pull_request": {}}
 if endpoint == "/user": body = b'{"node_id":"actor-node","login":"actor"}'
 elif endpoint.startswith("/search/issues?"): body = json.dumps({"total_count": 1, "incomplete_results": False, "items": [item]}).encode()
 elif endpoint == "/repos/octo/example/issues/7": body = b'{"node_id":"pr-node","user":{"node_id":"actor-node"},"pull_request":{}}'
-elif endpoint.endswith("/issues/7/comments?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"}}]'
+elif endpoint.endswith("/issues/7/comments?per_page=100&page=1"):
+    body = b'[{"user":{"node_id":"actor-node"}}]'
+    headers = b"HTTP/1.1 200 OK\\r\\nLink: <next>; rel=\\\"next\\\"\\r\\n\\r\\n"
+elif endpoint.endswith("/issues/7/comments?per_page=100&page=2"): body = b"[]"
 elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1") or endpoint.endswith("/pulls/7/comments?per_page=100&page=1"): body = b"[]"
 elif endpoint.endswith("/pulls/7/reviews?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"},"submitted_at":"x"}]'
 elif endpoint == "/repos/octo/example/pulls/7" and any("application/vnd.github.diff" in arg for arg in sys.argv): body = b"diff --git a/a b/a\\n"
 elif endpoint == "/repos/octo/example/pulls/7": body = b'{"node_id":"pr-node"}'
 else: raise SystemExit(2)
-sys.stdout.buffer.write(b"HTTP/1.1 200 OK\\r\\n\\r\\n" + body)
+sys.stdout.buffer.write(headers + body)
 """,
         encoding="utf-8",
     )
@@ -625,6 +629,7 @@ sys.stdout.buffer.write(b"HTTP/1.1 200 OK\\r\\n\\r\\n" + body)
     assert result.returncode == 0
     run = next((archive / "runs").iterdir())
     snapshot = next((run / "snapshots/pull-request").iterdir())
+    assert (snapshot / "comments/page-002.json").read_bytes() == b"[]"
     assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
     assert json.loads((snapshot / "snapshot.json").read_text())["selection_provenance"][
         0
