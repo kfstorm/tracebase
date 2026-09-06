@@ -64,6 +64,7 @@ elif len(arguments) == 2 and arguments[0] == "export":
         print("sensitive-session-payload", file=sys.stderr)
         sys.exit(9)
     filenames = {
+        "ends-at-start": "ends-at-start.json",
         "overlaps-start": "overlaps-start.json",
         "session/unsafe:1": "session-unsafe-1.json",
     }
@@ -91,8 +92,9 @@ else:
                 "kind": "opencode",
                 "scope_id": "opaque-global-instance",
             }
-            assert run_manifest["coverage"]["selected_session_count"] == 2
+            assert run_manifest["coverage"]["selected_session_count"] == 3
             assert {entry["source_id"] for entry in run_manifest["snapshots"]} == {
+                "ends-at-start",
                 "overlaps-start",
                 "session/unsafe:1",
             }

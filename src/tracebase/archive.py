@@ -101,6 +101,16 @@ def _normalize_evidence_files(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ArchiveError("Snapshot metadata must be an object")
+    try:
+        json.dumps(value, allow_nan=False)
+    except TypeError, ValueError:
+        raise ArchiveError("Snapshot metadata must be JSON-serializable") from None
+    return value
+
+
 def _ensure_inside(path: Path, root: Path) -> None:
     _ensure_no_symlink(path, root)
     try:
@@ -275,6 +285,11 @@ class CollectionRun:
         if snapshot.source_kind != self.source_kind:
             raise ArchiveError("Snapshot source kind must match its Collection Run")
         evidence_files = _normalize_evidence_files(snapshot.evidence_files)
+        metadata = (
+            _normalize_metadata(snapshot.metadata)
+            if snapshot.metadata is not None
+            else None
+        )
         snapshots_root = self.staging / "snapshots"
         _ensure_inside(snapshots_root, self.staging)
         if not snapshots_root.is_dir():
@@ -299,8 +314,8 @@ class CollectionRun:
         provenance = list(snapshot.selection_provenance)
         if provenance:
             manifest["selection_provenance"] = provenance
-        if snapshot.metadata is not None:
-            manifest["metadata"] = snapshot.metadata
+        if metadata is not None:
+            manifest["metadata"] = metadata
         self._write_json(snapshot_root / "snapshot.json", manifest)
         relative_path = snapshot_root.relative_to(self.staging).as_posix()
         entry: dict[str, Any] = {

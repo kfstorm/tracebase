@@ -39,7 +39,9 @@ def _parse_sessions(content: bytes) -> list[dict[str, Any]]:
         if not isinstance(session.get("id"), str) or not session["id"]:
             raise ArchiveError("OpenCode session list is invalid")
         for field in ("created", "updated"):
-            if not isinstance(session.get(field), int):
+            if isinstance(session.get(field), bool) or not isinstance(
+                session.get(field), int
+            ):
                 raise ArchiveError("OpenCode session list is invalid")
     return sessions
 
@@ -65,7 +67,7 @@ def collect(run: CollectionRun) -> int:
     selected: list[dict[str, Any]] = []
     for session in sessions:
         created, updated = _session_interval(session)
-        if created < run.collection_range.end and run.collection_range.start < updated:
+        if created < run.collection_range.end and run.collection_range.start <= updated:
             selected.append(session)
 
     for session in selected:

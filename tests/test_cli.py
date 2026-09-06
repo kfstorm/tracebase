@@ -282,6 +282,24 @@ def test_publish_rejects_unlisted_evidence() -> None:
         assert not (Path(directory) / "runs").exists()
 
 
+def test_write_snapshot_rejects_non_json_metadata_before_creating_files() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_run(Archive(directory))
+
+        with pytest.raises(ArchiveError, match="metadata"):
+            run.write_snapshot(
+                Snapshot(
+                    source_kind="opencode",
+                    object_kind="session",
+                    source_id="session-1",
+                    observation_window={},
+                    metadata={"invalid": {"set"}},
+                )
+            )
+
+        assert list((run.staging / "snapshots").iterdir()) == []
+
+
 def test_manifest_paths_are_posix_and_object_kind_is_an_archive_identifier() -> None:
     with tempfile.TemporaryDirectory() as directory:
         archive = Archive(directory)
