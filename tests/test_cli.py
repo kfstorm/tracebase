@@ -290,3 +290,34 @@ def test_overlap_registry_uses_published_runs_and_half_open_ranges() -> None:
                 "2026-01-01T00:30:00+00:00", "2026-01-01T01:30:00+00:00"
             ),
         )
+
+
+def test_publish_rechecks_overlap_for_runs_staged_before_another_publish() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        collection_range = CollectionRange.parse(
+            "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"
+        )
+        first = CollectionRun(
+            archive,
+            "opencode",
+            "instance-1",
+            collection_range,
+            collector_version="test",
+            effective_options={},
+        )
+        second = CollectionRun(
+            archive,
+            "opencode",
+            "instance-1",
+            collection_range,
+            collector_version="test",
+            effective_options={},
+        )
+
+        first.publish({})
+        with pytest.raises(ValueError, match="overlaps"):
+            second.publish({})
+
+        assert second.staging.exists()
+        assert not (Path(directory) / "runs" / second.run_id).exists()

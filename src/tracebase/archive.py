@@ -240,6 +240,10 @@ class CollectionRun:
         return destination
 
     def publish(self, coverage: dict[str, Any]) -> Path:
+        if self.archive.has_overlap(
+            self.source_kind, self.scope_id, self.collection_range
+        ):
+            raise ArchiveError("collection range overlaps a published run")
         runs_root = self.archive.root / "runs"
         runs_root.mkdir(parents=True, exist_ok=True)
         published = runs_root / self.run_id
