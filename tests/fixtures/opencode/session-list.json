@@ -1,0 +1,7 @@
+[
+  {"id": "before", "projectID": "old", "directory": "/old", "time": {"created": 1767222000000, "updated": 1767223800000}},
+  {"id": "ends-at-start", "projectID": "alpha", "directory": "/alpha", "time": {"created": 1767223800000, "updated": 1767225600000}},
+  {"id": "overlaps-start", "projectID": "beta", "directory": "/beta", "time": {"created": 1767223800000, "updated": 1767227400000}},
+  {"id": "session/unsafe:1", "projectID": "gamma", "directory": "/gamma", "parentID": "overlaps-start", "time": {"created": 1767226500000, "updated": 1767228300000, "archived": 1767228400000}},
+  {"id": "at-end", "projectID": "gamma", "directory": "/gamma", "time": {"created": 1767229200000, "updated": 1767231000000}}
+]

@@ -67,27 +67,6 @@ class TestCollectionCli:
             assert "explicit offset" in result.stderr
             assert not (Path(directory) / ".staging").exists()
 
-    def test_unimplemented_opencode_collection_keeps_staging(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            result = self.run_cli(
-                "collect",
-                "opencode",
-                "--archive",
-                directory,
-                "--instance-id",
-                "instance-1",
-                "--from",
-                "2026-01-01T00:00:00+00:00",
-                "--to",
-                "2026-01-01T01:00:00+00:00",
-            )
-
-            assert result.returncode == 1
-            assert result.stdout == ""
-            assert "collector is not implemented" in result.stderr
-            assert len(list((Path(directory) / ".staging").iterdir())) == 1
-            assert not (Path(directory) / "runs").exists()
-
     def test_unsupported_option_does_not_echo_secret(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             secret = "authorization-secret"
@@ -301,6 +280,24 @@ def test_publish_rejects_unlisted_evidence() -> None:
 
         assert run.staging.exists()
         assert not (Path(directory) / "runs").exists()
+
+
+def test_write_snapshot_rejects_non_json_metadata_before_creating_files() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_run(Archive(directory))
+
+        with pytest.raises(ArchiveError, match="metadata"):
+            run.write_snapshot(
+                Snapshot(
+                    source_kind="opencode",
+                    object_kind="session",
+                    source_id="session-1",
+                    observation_window={},
+                    metadata={"invalid": {1: "numeric", "1": "text"}},
+                )
+            )
+
+        assert list((run.staging / "snapshots").iterdir()) == []
 
 
 def test_manifest_paths_are_posix_and_object_kind_is_an_archive_identifier() -> None:

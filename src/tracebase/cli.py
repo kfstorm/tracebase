@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
+from .opencode import collect as collect_opencode
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -42,15 +43,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if arguments.source == "opencode":
             scope_id = arguments.instance_id
-            CollectionRun(
+            run = CollectionRun(
                 archive,
                 "opencode",
                 scope_id,
                 collection_range,
-                collector_version="0",
+                collector_version="0.1.0",
                 effective_options={"instance_id": scope_id},
                 run_id=run_id,
             )
+            snapshot_count = collect_opencode(run)
+            print(
+                f"collected run {run.run_id} with {snapshot_count} snapshots "
+                f"at {archive.root / 'runs' / run.run_id}"
+            )
+            return 0
         else:
             # The future GitHub collector resolves its scope identity.
             archive.create_staging(run_id)
