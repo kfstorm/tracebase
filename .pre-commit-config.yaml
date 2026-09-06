@@ -1,0 +1,44 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-docstring-first
+      - id: debug-statements
+      - id: check-ast
+      - id: name-tests-test
+        args: [--pytest-test-first]
+
+  - repo: local
+    hooks:
+      - id: quality-checks
+        name: Python lint and checks
+        entry: scripts/lint.sh --check
+        language: system
+        files: ^(src/|tests/|AGENTS\.md|CONTEXT\.md|docs/|pyproject\.toml$|uv\.lock$|tach\.toml$|vulture_whitelist\.py$|scripts/lint\.sh$)
+        pass_filenames: false
+
+      - id: unit-tests
+        name: Unit tests
+        entry: scripts/run-unit-tests.sh
+        language: system
+        files: ^(src/|tests/|pyproject\.toml$|uv\.lock$|scripts/run-unit-tests\.sh$)
+        pass_filenames: false
+
+      - id: duplication
+        name: Duplication check
+        entry: npx --yes jscpd
+        language: system
+        files: ^(src/|tests/|\.jscpd\.json$)
+        pass_filenames: false
+
+default_stages: [pre-commit]
+fail_fast: false

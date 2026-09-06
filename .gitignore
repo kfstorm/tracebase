@@ -1,5 +1,13 @@
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 __pycache__/
 *.py[cod]
 .venv/
+.coverage*
+htmlcov/
+coverage.xml
+build/
+dist/
+*.egg-info/
+.DS_Store
