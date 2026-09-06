@@ -340,6 +340,31 @@ def test_manifest_paths_are_posix_and_object_kind_is_an_archive_identifier() -> 
         )
 
 
+def test_symlinked_snapshot_area_cannot_escape_staging() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        run = build_run(archive)
+        outside = Path(directory).parent / f"{Path(directory).name}-outside"
+        outside.mkdir()
+        try:
+            snapshot_area = run.staging / "snapshots"
+            snapshot_area.rmdir()
+            snapshot_area.symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(ArchiveError, match="symlink"):
+                run.write_snapshot(
+                    Snapshot(
+                        source_kind="opencode",
+                        object_kind="session",
+                        source_id="session-1",
+                        observation_window={},
+                    )
+                )
+        finally:
+            snapshot_area.unlink(missing_ok=True)
+            outside.rmdir()
+
+
 def test_overlap_registry_uses_published_runs_and_half_open_ranges() -> None:
     with tempfile.TemporaryDirectory() as directory:
         archive = Archive(directory)

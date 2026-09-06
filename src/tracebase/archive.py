@@ -102,10 +102,25 @@ def _normalize_evidence_files(value: Any) -> list[dict[str, Any]]:
 
 
 def _ensure_inside(path: Path, root: Path) -> None:
+    _ensure_no_symlink(path, root)
     try:
         path.resolve(strict=False).relative_to(root.resolve(strict=False))
     except ValueError:
         raise ArchiveError("archive path escapes its parent") from None
+
+
+def _ensure_no_symlink(path: Path, root: Path) -> None:
+    if root.is_symlink():
+        raise ArchiveError("archive path cannot use a symlink parent")
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise ArchiveError("archive path escapes its parent") from None
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ArchiveError("archive path cannot use a symlink parent")
 
 
 def _is_regular_file(path: Path) -> bool:
@@ -176,8 +191,10 @@ class Archive:
 
     def create_staging(self, run_id: str) -> Path:
         staging_root = self.root / ".staging"
+        _ensure_inside(staging_root, self.root)
         staging_root.mkdir(parents=True, exist_ok=True)
         staging = staging_root / run_id
+        _ensure_inside(staging, staging_root)
         staging.mkdir()
         return staging
 
@@ -256,12 +273,18 @@ class CollectionRun:
         if snapshot.source_kind != self.source_kind:
             raise ArchiveError("Snapshot source kind must match its Collection Run")
         evidence_files = _normalize_evidence_files(snapshot.evidence_files)
-        snapshot_root = (
-            self.staging
-            / "snapshots"
-            / snapshot.object_kind
-            / encode_path_id(snapshot.source_id)
-        )
+        snapshots_root = self.staging / "snapshots"
+        _ensure_inside(snapshots_root, self.staging)
+        if not snapshots_root.is_dir():
+            raise ArchiveError("Snapshot area is not a directory")
+        object_root = snapshots_root / snapshot.object_kind
+        _ensure_inside(object_root, snapshots_root)
+        if object_root.exists():
+            if not object_root.is_dir():
+                raise ArchiveError("Snapshot object area is not a directory")
+        else:
+            object_root.mkdir()
+        snapshot_root = object_root / encode_path_id(snapshot.source_id)
         snapshot_root.mkdir(parents=True, exist_ok=False)
         manifest = {
             "format_version": FORMAT_VERSION,
@@ -330,9 +353,13 @@ class CollectionRun:
         return published
 
     def _validate_snapshots(self) -> None:
+        snapshots_root = self.staging / "snapshots"
+        _ensure_inside(snapshots_root, self.staging)
+        if not snapshots_root.is_dir():
+            raise ArchiveError("Snapshot area is not a directory")
         for entry in self._snapshots:
             snapshot_root = self.staging / PurePosixPath(entry["path"])
-            _ensure_inside(snapshot_root, self.staging / "snapshots")
+            _ensure_inside(snapshot_root, snapshots_root)
             if not snapshot_root.is_dir() or snapshot_root.is_symlink():
                 raise ArchiveError("Snapshot directory is not a regular directory")
             snapshot_manifest_path = snapshot_root / "snapshot.json"
