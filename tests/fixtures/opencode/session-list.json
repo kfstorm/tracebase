@@ -1,0 +1,6 @@
+[
+  {"id": "before", "created": 1767222000000, "updated": 1767223800000, "projectId": "old", "directory": "/old"},
+  {"id": "overlaps-start", "created": 1767223800000, "updated": 1767227400000, "projectId": "alpha", "directory": "/alpha"},
+  {"id": "session/unsafe:1", "created": 1767226500000, "updated": 1767228300000, "projectId": "beta", "directory": "/beta"},
+  {"id": "at-end", "created": 1767229200000, "updated": 1767231000000, "projectId": "gamma", "directory": "/gamma"}
+]

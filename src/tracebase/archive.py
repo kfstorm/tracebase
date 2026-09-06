@@ -178,6 +178,7 @@ class Snapshot:
     observation_window: dict[str, str]
     evidence_files: tuple[dict[str, Any], ...] = ()
     selection_provenance: tuple[dict[str, Any], ...] = ()
+    metadata: dict[str, Any] | None = None
 
 
 class Archive:
@@ -298,6 +299,8 @@ class CollectionRun:
         provenance = list(snapshot.selection_provenance)
         if provenance:
             manifest["selection_provenance"] = provenance
+        if snapshot.metadata is not None:
+            manifest["metadata"] = snapshot.metadata
         self._write_json(snapshot_root / "snapshot.json", manifest)
         relative_path = snapshot_root.relative_to(self.staging).as_posix()
         entry: dict[str, Any] = {
