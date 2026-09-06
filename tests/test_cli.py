@@ -18,6 +18,7 @@ from tracebase.archive import (
     encode_path_id,
     uuid7,
 )
+from tracebase.github import _Response, collect
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -32,6 +33,17 @@ def build_run(
         "opencode",
         "instance-1",
         CollectionRange.parse(from_text, to_text),
+        collector_version="test",
+        effective_options={},
+    )
+
+
+def build_github_run(archive: Archive) -> CollectionRun:
+    return CollectionRun(
+        archive,
+        "github",
+        "actor-node",
+        CollectionRange.parse("2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
         collector_version="test",
         effective_options={},
     )
@@ -415,3 +427,95 @@ def test_publish_rechecks_overlap_for_runs_staged_before_another_publish() -> No
 
         assert second.staging.exists()
         assert not (Path(directory) / "runs" / second.run_id).exists()
+
+
+def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = {"node_id": "actor-node", "login": "actor"}
+    item = {
+        "node_id": "pr-node",
+        "number": 7,
+        "repository_url": "https://api.github.com/repos/octo/example",
+        "pull_request": {},
+    }
+    responses: dict[str, tuple[bytes, dict[str, str]]] = {
+        "/user": (json.dumps(actor).encode(), {}),
+        "/repos/octo/example/issues/7": (
+            json.dumps(
+                {"node_id": "pr-node", "user": actor, "pull_request": {}}
+            ).encode(),
+            {},
+        ),
+        "/repos/octo/example/issues/7/comments?per_page=100&page=1": (
+            b'[{"user":{"node_id":"actor-node"}}]',
+            {"link": '<next>; rel="next"'},
+        ),
+        "/repos/octo/example/issues/7/comments?per_page=100&page=2": (b"[]", {}),
+        "/repos/octo/example/issues/7/timeline?per_page=100&page=1": (b"[]", {}),
+        "/repos/octo/example/pulls/7": (b'{"node_id":"pr-node"}', {}),
+        "/repos/octo/example/pulls/7/reviews?per_page=100&page=1": (
+            b'[{"user":{"node_id":"actor-node"},"submitted_at":"2026-01-01T00:00:00Z"}]',
+            {},
+        ),
+        "/repos/octo/example/pulls/7/comments?per_page=100&page=1": (b"[]", {}),
+    }
+
+    def request(
+        _self: object, endpoint: str, accept: str = "application/vnd.github+json"
+    ) -> _Response:
+        if endpoint.startswith("/search/issues?"):
+            return _Response(
+                json.dumps({"total_count": 1, "items": [item]}).encode(), 200, {}
+            )
+        body, headers = responses[endpoint]
+        if accept == "application/vnd.github.diff":
+            assert endpoint == "/repos/octo/example/pulls/7"
+            return _Response(b"diff --git a/a b/a\n", 200, {})
+        return _Response(body, 200, headers)
+
+    monkeypatch.setattr("tracebase.github._GitHub.request", request)
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+
+        coverage = collect(run)
+        published = run.publish(coverage)
+        snapshot = next((published / "snapshots/pull-request").iterdir())
+        manifest = json.loads((snapshot / "snapshot.json").read_text())
+
+        assert coverage["selected_artifacts"] == 1
+        assert [entry["name"] for entry in coverage["discovery_matrix"]] == [
+            "authored",
+            "ordinary-commented",
+            "submitted-reviewed",
+        ]
+        assert manifest["selection_provenance"][0]["eligibility"] == [
+            "authored",
+            "ordinary-commented",
+            "submitted-reviewed",
+        ]
+        assert (snapshot / "comments/page-002.json").read_bytes() == b"[]"
+        assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
+        assert (
+            json.loads((published / "run.json").read_text())["snapshots"][0][
+                "source_kind"
+            ]
+            == "github"
+        )
+
+
+def test_github_collect_failure_keeps_run_unpublished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def request(_self: object, _endpoint: str, _accept: str = "") -> _Response:
+        raise ArchiveError("GitHub request failed")
+
+    monkeypatch.setattr("tracebase.github._GitHub.request", request)
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+
+        with pytest.raises(ArchiveError, match="request failed"):
+            collect(run)
+
+        assert run.staging.exists()
+        assert not (Path(directory) / "runs").exists()
