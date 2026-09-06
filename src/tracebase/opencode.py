@@ -116,7 +116,7 @@ def _discover_sessions(
             next_cursor = response.headers.get("x-next-cursor")
     except HTTPError, URLError, OSError:
         raise ArchiveError("OpenCode session discovery failed") from None
-    if next_cursor:
+    if next_cursor is not None:
         raise ArchiveError("OpenCode session discovery is incomplete")
     return _parse_sessions(content)
 

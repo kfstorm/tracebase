@@ -21,7 +21,7 @@ class TestOpenCodeCollectionCli:
         fake_bin: Path,
         *arguments: str,
         fail_export: str = "",
-        next_cursor: bool = False,
+        next_cursor: str = "",
         discovery: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         from_text = "2026-01-01T00:00:00+00:00"
@@ -32,7 +32,7 @@ class TestOpenCodeCollectionCli:
             "TRACEBASE_DISCOVERY": str(discovery or FIXTURES / "session-list.json"),
             "TRACEBASE_EXPORT_DIR": str(FIXTURES),
             "TRACEBASE_FAIL_EXPORT": fail_export,
-            "TRACEBASE_NEXT_CURSOR": "1" if next_cursor else "",
+            "TRACEBASE_NEXT_CURSOR": next_cursor,
             "TRACEBASE_EXPECTED_START": str(
                 int(datetime.fromisoformat(from_text).timestamp() * 1000)
             ),
@@ -105,7 +105,8 @@ elif arguments == [
                 return
             self.send_response(200)
             if os.environ["TRACEBASE_NEXT_CURSOR"]:
-                self.send_header("x-next-cursor", "1767227400000")
+                cursor = "" if os.environ["TRACEBASE_NEXT_CURSOR"] == "empty" else "1"
+                self.send_header("x-next-cursor", cursor)
             self.end_headers()
             self.wfile.write(Path(os.environ["TRACEBASE_DISCOVERY"]).read_bytes())
 
@@ -234,7 +235,7 @@ else:
             result = self.run_cli(
                 root / "archive",
                 self.make_fake_opencode(root),
-                next_cursor=True,
+                next_cursor="1",
             )
 
             assert result.returncode == 1
@@ -245,3 +246,14 @@ else:
             server_pid = int((root / "server.pid").read_text())
             with pytest.raises(ProcessLookupError):
                 os.kill(server_pid, 0)
+
+    def test_empty_discovery_cursor_does_not_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = self.run_cli(
+                root / "archive", self.make_fake_opencode(root), next_cursor="empty"
+            )
+
+            assert result.returncode == 1
+            assert "discovery is incomplete" in result.stderr
+            assert not (root / "archive" / "runs").exists()
