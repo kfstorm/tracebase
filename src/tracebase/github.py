@@ -311,7 +311,7 @@ def _discover(  # noqa: PLR0915
                     if source_id not in result_source_ids:
                         result_source_ids.append(source_id)
                 if not _has_next(response):
-                    if total_count > result_count:
+                    if total_count > len(result_source_ids):
                         raise ArchiveError("GitHub discovery pagination incomplete")
                     coverage_queries.append(
                         {

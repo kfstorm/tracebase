@@ -119,6 +119,15 @@ elif {mode!r} == "later-page" and endpoint.endswith("page=2"):
 elif {mode!r} == "count-mismatch" and endpoint.startswith("/search/issues?"):
     items = [{{"node_id": str(index), "repository_url": "https://api.github.com/repos/octo/example", "number": index}} for index in range(100)]
     body = json.dumps({{"total_count": 150, "incomplete_results": False, "items": items}}).encode()
+elif {mode!r} == "duplicate-count" and endpoint.endswith("page=1"):
+    items = [{{"node_id": str(index), "repository_url": "https://api.github.com/repos/octo/example", "number": index}} for index in range(100)]
+    body = json.dumps({{"total_count": 150, "incomplete_results": False, "items": items}}).encode()
+    headers = b"HTTP/1.1 200 OK\\r\\nLink: <next>; rel=\\\"next\\\"\\r\\n\\r\\n"
+    sys.stdout.buffer.write(headers + body)
+    raise SystemExit(0)
+elif {mode!r} == "duplicate-count" and endpoint.endswith("page=2"):
+    items = [{{"node_id": str(index), "repository_url": "https://api.github.com/repos/octo/example", "number": index}} for index in range(130)]
+    body = json.dumps({{"total_count": 150, "incomplete_results": False, "items": items[0:20] + items[100:130]}}).encode()
 else:
     raise SystemExit(1)
 sys.stdout.buffer.write(b"HTTP/1.1 200 OK\\r\\n\\r\\n" + body)
@@ -137,6 +146,29 @@ class TestCollectionCli:
             capture_output=True,
             check=False,
         )
+
+    @pytest.mark.parametrize("source", ["github", "opencode"])
+    def test_fractional_range_fails_before_staging(self, source: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = [
+                "collect",
+                source,
+                "--archive",
+                directory,
+                "--from",
+                "2026-01-01T00:00:00.1Z",
+                "--to",
+                "2026-01-01T01:00:00Z",
+            ]
+            if source == "opencode":
+                arguments.extend(["--instance-id", "instance-1"])
+
+            result = self.run_cli(*arguments)
+
+            assert result.returncode == 1
+            assert result.stdout == ""
+            assert "whole seconds" in result.stderr
+            assert not (Path(directory) / ".staging").exists()
 
     def test_invalid_range_fails_before_staging(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -742,7 +774,9 @@ sys.stdout.buffer.write(headers + body)
     ]["eligibility"] == ["authorship", "ordinary_comment", "submitted_review"]
 
 
-@pytest.mark.parametrize("mode", ["later-page", "unresolved", "count-mismatch"])
+@pytest.mark.parametrize(
+    "mode", ["later-page", "unresolved", "count-mismatch", "duplicate-count"]
+)
 def test_github_cli_source_failures_keep_staging_unpublished(
     mode: str, tmp_path: Path
 ) -> None:
