@@ -16,6 +16,7 @@ from typing import Any
 FORMAT_VERSION = 1
 _PATH_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _ARCHIVE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+_FRACTIONAL_SECOND_PATTERN = re.compile(r"[.,]")
 
 
 class ArchiveError(ValueError):
@@ -171,6 +172,8 @@ class CollectionRange:
             ) from None
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ArchiveError("collection range endpoints require an explicit offset")
+        if _FRACTIONAL_SECOND_PATTERN.search(value):
+            raise ArchiveError("collection range endpoints require whole seconds")
         return parsed
 
     def intersects(self, other: CollectionRange) -> bool:

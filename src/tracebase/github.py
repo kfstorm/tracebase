@@ -234,7 +234,9 @@ def _discover(  # noqa: PLR0915
                     raise ArchiveError(
                         "GitHub discovery exceeded the 1,000 result limit"
                     )
-                midpoint = start + (end - start) / 2
+                midpoint = start + timedelta(
+                    seconds=int((end - start).total_seconds()) // 2
+                )
                 coverage_queries.append(
                     {
                         "reason": name,
@@ -309,6 +311,8 @@ def _discover(  # noqa: PLR0915
                     if source_id not in result_source_ids:
                         result_source_ids.append(source_id)
                 if not _has_next(response):
+                    if total_count > result_count:
+                        raise ArchiveError("GitHub discovery pagination incomplete")
                     coverage_queries.append(
                         {
                             "reason": name,

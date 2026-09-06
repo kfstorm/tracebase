@@ -60,6 +60,15 @@ def build_github_run(archive: Archive) -> CollectionRun:
     )
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    ["2026-01-01T00:00:00.1Z", "2026-01-01T00:00:00.000Z"],
+)
+def test_collection_range_rejects_fractional_seconds(endpoint: str) -> None:
+    with pytest.raises(ArchiveError, match="whole seconds"):
+        CollectionRange.parse(endpoint, "2026-01-01T01:00:00Z")
+
+
 def run_github_cli(
     archive: Path,
     fixture_directory: Path,
@@ -92,6 +101,7 @@ def run_github_cli(
 def write_failure_gh(fixture_directory: Path, mode: str) -> None:
     (fixture_directory / "gh").write_text(
         f"""#!/usr/bin/env python3
+import json
 import sys
 
 endpoint = sys.argv[-1]
@@ -106,6 +116,9 @@ elif {mode!r} == "later-page" and endpoint.endswith("page=1"):
     raise SystemExit(0)
 elif {mode!r} == "later-page" and endpoint.endswith("page=2"):
     body = b'{{"total_count":1,"incomplete_results":true,"items":[]}}'
+elif {mode!r} == "count-mismatch" and endpoint.startswith("/search/issues?"):
+    items = [{{"node_id": str(index), "repository_url": "https://api.github.com/repos/octo/example", "number": index}} for index in range(100)]
+    body = json.dumps({{"total_count": 150, "incomplete_results": False, "items": items}}).encode()
 else:
     raise SystemExit(1)
 sys.stdout.buffer.write(b"HTTP/1.1 200 OK\\r\\n\\r\\n" + body)
@@ -656,6 +669,9 @@ if {fail!r}:
 if endpoint == "/user":
     body = json.dumps({{"node_id": "actor-node", "login": "actor"}}).encode()
 elif endpoint.startswith("/search/issues?"):
+    forbidden = ("mentions%3A", "assignee%3A", "review-requested%3A", "involves%3A", "commits%3A", "commit%3A")
+    if any(term in endpoint for term in forbidden):
+        raise SystemExit(1)
     body = b'{{"total_count":0,"incomplete_results":false,"items":[]}}'
 else:
     raise SystemExit(2)
@@ -726,7 +742,7 @@ sys.stdout.buffer.write(headers + body)
     ]["eligibility"] == ["authorship", "ordinary_comment", "submitted_review"]
 
 
-@pytest.mark.parametrize("mode", ["later-page", "unresolved"])
+@pytest.mark.parametrize("mode", ["later-page", "unresolved", "count-mismatch"])
 def test_github_cli_source_failures_keep_staging_unpublished(
     mode: str, tmp_path: Path
 ) -> None:
@@ -744,7 +760,11 @@ def test_github_cli_source_failures_keep_staging_unpublished(
 
     assert result.returncode == 1
     assert result.stdout == ""
-    assert "incomplete" in result.stderr or "1,000" in result.stderr
+    assert (
+        "incomplete" in result.stderr
+        or "1,000" in result.stderr
+        or "pagination" in result.stderr
+    )
     assert not (archive / "runs").exists()
     assert len(list((archive / ".staging").iterdir())) == 1
 
