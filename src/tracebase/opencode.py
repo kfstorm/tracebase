@@ -21,6 +21,7 @@ from .archive import ArchiveError, CollectionRun, Snapshot
 _SERVER_URL_PATTERN = re.compile(r"http://127\.0\.0\.1:\d+")
 _SERVER_START_TIMEOUT_SECONDS = 5
 _DISCOVERY_LIMIT = 10_000
+_SERVER_USERNAME = "tracebase"
 
 
 def _observation_time() -> str:
@@ -41,7 +42,10 @@ def _run_opencode(arguments: list[str]) -> bytes:
 
 def _start_server() -> tuple[subprocess.Popen[str], str, str]:
     password = secrets.token_urlsafe()
-    environment = os.environ | {"OPENCODE_SERVER_PASSWORD": password}
+    environment = os.environ | {
+        "OPENCODE_SERVER_USERNAME": _SERVER_USERNAME,
+        "OPENCODE_SERVER_PASSWORD": password,
+    }
     try:
         process = subprocess.Popen(
             [
@@ -101,7 +105,7 @@ def _discover_sessions(
             "limit": _DISCOVERY_LIMIT,
         }
     )
-    credentials = b64encode(f"opencode:{password}".encode()).decode()
+    credentials = b64encode(f"{_SERVER_USERNAME}:{password}".encode()).decode()
     request = Request(
         f"{server_url}/experimental/session?{query}",
         headers={"Authorization": f"Basic {credentials}"},

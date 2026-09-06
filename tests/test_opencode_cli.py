@@ -94,7 +94,10 @@ elif arguments == [
                 or self.headers.get("Authorization")
                 != "Basic "
                 + base64.b64encode(
-                    f"opencode:{os.environ['OPENCODE_SERVER_PASSWORD']}".encode()
+                    (
+                        f"{os.environ['OPENCODE_SERVER_USERNAME']}:"
+                        f"{os.environ['OPENCODE_SERVER_PASSWORD']}"
+                    ).encode()
                 ).decode()
             ):
                 self.send_response(400)
