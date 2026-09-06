@@ -293,7 +293,7 @@ def test_write_snapshot_rejects_non_json_metadata_before_creating_files() -> Non
                     object_kind="session",
                     source_id="session-1",
                     observation_window={},
-                    metadata={"invalid": {"set"}},
+                    metadata={"invalid": {1: "numeric", "1": "text"}},
                 )
             )
 

@@ -105,7 +105,7 @@ def _normalize_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ArchiveError("Snapshot metadata must be an object")
     try:
-        json.dumps(value, allow_nan=False)
+        json.dumps(value, allow_nan=False, sort_keys=True)
     except TypeError, ValueError:
         raise ArchiveError("Snapshot metadata must be JSON-serializable") from None
     return value
