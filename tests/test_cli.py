@@ -664,3 +664,31 @@ def test_github_discovery_partitions_over_limit_results() -> None:
     assert candidates == {}
     assert len(coverage) == 6
     assert all(entry["pagination_complete"] for entry in coverage)
+
+
+def test_github_discovery_rejects_incomplete_later_page() -> None:
+    class IncompleteFixture(_GitHub):
+        calls = 0
+
+        def request(self, endpoint: str, _accept: str = "") -> _Response:
+            self.calls += 1
+            if self.calls == 1:
+                return _Response(
+                    b'{"total_count":1,"incomplete_results":false,"items":[]}',
+                    200,
+                    {"link": '<next>; rel="next"'},
+                )
+            return _Response(
+                b'{"total_count":1,"incomplete_results":true,"items":[]}',
+                200,
+                {},
+            )
+
+    with pytest.raises(ArchiveError, match="incomplete"):
+        _discover(
+            IncompleteFixture(),
+            "actor",
+            CollectionRange.parse(
+                "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"
+            ),
+        )

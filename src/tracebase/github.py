@@ -32,12 +32,20 @@ class _Response:
 
 
 @dataclass(frozen=True)
+class _DiscoveryEntry:
+    eligibility: str
+    query: str
+    partition_from: str
+    partition_to: str
+
+
+@dataclass(frozen=True)
 class _Candidate:
     source_id: str
     repository: str
     number: int
     object_kind: str
-    queries: frozenset[str]
+    discovery_entries: tuple[_DiscoveryEntry, ...]
 
 
 @dataclass(frozen=True)
@@ -56,6 +64,7 @@ class _GitHub:
                     "gh",
                     "api",
                     "--include",
+                    "--allow-escape-sequences",
                     "-H",
                     f"Accept: {accept}",
                     "-H",
@@ -183,7 +192,18 @@ def _discovery_queries(
     ]
 
 
-def _discover(  # noqa: PLR0915
+def _search_response(value: dict[str, Any] | list[Any]) -> tuple[int, list[Any]]:
+    if not isinstance(value, dict):
+        raise ArchiveError("GitHub discovery response was invalid")
+    total_count, items = value.get("total_count"), value.get("items")
+    if not isinstance(total_count, int) or not isinstance(items, list):
+        raise ArchiveError("GitHub discovery response was invalid")
+    if value.get("incomplete_results") is True:
+        raise ArchiveError("GitHub discovery was incomplete")
+    return total_count, items
+
+
+def _discover(
     github: _GitHub, login: str, collection_range: CollectionRange
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]]]:
     candidates: dict[str, _Candidate] = {}
@@ -202,18 +222,12 @@ def _discover(  # noqa: PLR0915
                 original_range,
                 f"updated:>={start_text} updated:<{end_text}",
             )
+            discovery_entry = _DiscoveryEntry(name, query, start_text, end_text)
             endpoint = "/search/issues?" + urlencode(
                 {"q": query, "sort": "updated", "order": "asc"}
             )
             response = github.request(_page_endpoint(endpoint, 1))
-            value = github.json(response)
-            if not isinstance(value, dict):
-                raise ArchiveError("GitHub discovery response was invalid")
-            total_count, items = value.get("total_count"), value.get("items")
-            if not isinstance(total_count, int) or not isinstance(items, list):
-                raise ArchiveError("GitHub discovery response was invalid")
-            if value.get("incomplete_results") is True:
-                raise ArchiveError("GitHub discovery was incomplete")
+            total_count, items = _search_response(github.json(response))
             if total_count > _SEARCH_RESULT_LIMIT:
                 if end - start <= _MINIMUM_PARTITION:
                     raise ArchiveError(
@@ -227,12 +241,11 @@ def _discover(  # noqa: PLR0915
             while True:
                 if page > 1:
                     response = github.request(_page_endpoint(endpoint, page))
-                    value = github.json(response)
-                    if not isinstance(value, dict) or not isinstance(
-                        value.get("items"), list
-                    ):
-                        raise ArchiveError("GitHub discovery response was invalid")
-                    items = value["items"]
+                total_count, items = _search_response(github.json(response))
+                if total_count > _SEARCH_RESULT_LIMIT:
+                    raise ArchiveError(
+                        "GitHub discovery exceeded the 1,000 result limit"
+                    )
                 for item in items:
                     if not isinstance(item, dict):
                         raise ArchiveError("GitHub discovery response was invalid")
@@ -256,7 +269,7 @@ def _discover(  # noqa: PLR0915
                             repository,
                             number,
                             object_kind,
-                            frozenset({name}),
+                            (discovery_entry,),
                         )
                     elif (prior.repository, prior.number, prior.object_kind) == (
                         repository,
@@ -268,7 +281,11 @@ def _discover(  # noqa: PLR0915
                             repository,
                             number,
                             object_kind,
-                            prior.queries | {name},
+                            tuple(
+                                dict.fromkeys(
+                                    (*prior.discovery_entries, discovery_entry)
+                                )
+                            ),
                         )
                     else:
                         raise ArchiveError(
@@ -308,7 +325,6 @@ def _hydrate(
     github: _GitHub,
     candidate: _Candidate,
     actor_id: str,
-    queries: dict[str, str],
 ) -> bool:
     observed_from = _observed_at()
     base = f"/repos/{candidate.repository}"
@@ -394,14 +410,28 @@ def _hydrate(
         if isinstance(review, dict)
     ):
         eligibility.append("submitted-reviewed")
-    selected = sorted(set(eligibility) & candidate.queries)
+    discovered_eligibility = {
+        entry.eligibility for entry in candidate.discovery_entries
+    }
+    selected = sorted(set(eligibility) & discovered_eligibility)
     if not selected:
         return False
+    selected_entries = [
+        entry for entry in candidate.discovery_entries if entry.eligibility in selected
+    ]
     provenance = (
         {
             "eligibility": selected,
             "discovery_query_entries": [
-                {"name": name, "query": queries[name]} for name in selected
+                {
+                    "name": entry.eligibility,
+                    "query": entry.query,
+                    "partition": {
+                        "from": entry.partition_from,
+                        "to": entry.partition_to,
+                    },
+                }
+                for entry in selected_entries
             ],
         },
     )
@@ -434,10 +464,9 @@ def collect(run: CollectionRun, actor: tuple[str, str] | None = None) -> dict[st
     github = _GitHub()
     actor_id, login = actor or _actor(github)
     candidates, discovery = _discover(github, login, run.collection_range)
-    queries = dict(_discovery_queries(login, run.collection_range))
     selected = 0
     for candidate in candidates.values():
-        selected += _hydrate(run, github, candidate, actor_id, queries)
+        selected += _hydrate(run, github, candidate, actor_id)
     return {
         "actor": {"node_id": actor_id, "login": login},
         "discovery_matrix": discovery,
