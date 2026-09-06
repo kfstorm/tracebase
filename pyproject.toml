@@ -89,3 +89,15 @@ line-ending = "lf"
 
 [tool.vulture]
 paths = ["src", "tests"]
+
+[tool.pymarkdown.plugins.md013]
+enabled = false
+
+[tool.pymarkdown.plugins.md036]
+enabled = false
+
+[tool.pymarkdown.plugins.md040]
+enabled = false
+
+[tool.pymarkdown.plugins.md041]
+enabled = false

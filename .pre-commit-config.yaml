@@ -23,15 +23,7 @@ repos:
         name: Python lint and checks
         entry: scripts/lint.sh --check
         language: system
-        files: ^(src/|tests/|pyproject\.toml$|uv\.lock$|tach\.toml$|vulture_whitelist\.py$|scripts/lint\.sh$)
-        pass_filenames: false
-
-      - id: markdown-lint
-        name: Markdown lint
-        entry: uv run pymarkdown -d MD013,MD036,MD040,MD041 scan -r AGENTS.md CONTEXT.md docs
-        language: system
-        types: [markdown]
-        files: ^(AGENTS\.md|CONTEXT\.md|docs/)
+        files: ^(src/|tests/|AGENTS\.md|CONTEXT\.md|docs/|pyproject\.toml$|uv\.lock$|tach\.toml$|vulture_whitelist\.py$|scripts/lint\.sh$)
         pass_filenames: false
 
       - id: unit-tests
