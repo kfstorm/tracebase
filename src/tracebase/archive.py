@@ -10,11 +10,12 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 FORMAT_VERSION = 1
 _PATH_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+_ARCHIVE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 class ArchiveError(ValueError):
@@ -62,6 +63,55 @@ def decode_path_id(path_id: str) -> str:
     return source_id
 
 
+def _validate_archive_type(value: str, label: str) -> str:
+    if not isinstance(value, str) or not _ARCHIVE_TYPE_PATTERN.fullmatch(value):
+        raise ArchiveError(f"{label} must be a lowercase archive type identifier")
+    return value
+
+
+def _archive_relative_path(value: str | Path) -> PurePosixPath:
+    if isinstance(value, Path):
+        value = value.as_posix()
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise ArchiveError("archive paths must be non-empty POSIX paths")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or path == PurePosixPath("."):
+        raise ArchiveError("archive paths must stay within their Snapshot")
+    return path
+
+
+def _normalize_evidence_files(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        raise ArchiveError("Snapshot evidence_files must be a list")
+    normalized: list[dict[str, Any]] = []
+    paths: set[str] = set()
+    for evidence_file in value:
+        if not isinstance(evidence_file, dict) or "path" not in evidence_file:
+            raise ArchiveError("every evidence file must declare a path")
+        path = _archive_relative_path(evidence_file["path"])
+        if path == PurePosixPath("snapshot.json"):
+            raise ArchiveError("snapshot.json is reserved for the Snapshot manifest")
+        path_text = path.as_posix()
+        if path_text in paths:
+            raise ArchiveError("Snapshot evidence paths must be unique")
+        paths.add(path_text)
+        normalized_file = dict(evidence_file)
+        normalized_file["path"] = path_text
+        normalized.append(normalized_file)
+    return normalized
+
+
+def _ensure_inside(path: Path, root: Path) -> None:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        raise ArchiveError("archive path escapes its parent") from None
+
+
+def _is_regular_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -107,6 +157,7 @@ class CollectionRange:
 
 @dataclass(frozen=True)
 class Snapshot:
+    source_kind: str
     object_kind: str
     source_id: str
     observation_window: dict[str, str]
@@ -184,6 +235,7 @@ class CollectionRun:
     ):
         if not source_kind or not scope_id:
             raise ArchiveError("source kind and scope ID are required")
+        _validate_archive_type(source_kind, "source kind")
         self.archive = archive
         self.run_id = run_id or archive.new_run_id()
         self.source_kind = source_kind
@@ -199,6 +251,11 @@ class CollectionRun:
         self._snapshots: list[dict[str, Any]] = []
 
     def write_snapshot(self, snapshot: Snapshot) -> Path:
+        _validate_archive_type(snapshot.source_kind, "source kind")
+        _validate_archive_type(snapshot.object_kind, "object kind")
+        if snapshot.source_kind != self.source_kind:
+            raise ArchiveError("Snapshot source kind must match its Collection Run")
+        evidence_files = _normalize_evidence_files(snapshot.evidence_files)
         snapshot_root = (
             self.staging
             / "snapshots"
@@ -208,17 +265,19 @@ class CollectionRun:
         snapshot_root.mkdir(parents=True, exist_ok=False)
         manifest = {
             "format_version": FORMAT_VERSION,
+            "source_kind": snapshot.source_kind,
             "object_kind": snapshot.object_kind,
             "source_id": snapshot.source_id,
             "observation_window": snapshot.observation_window,
-            "evidence_files": list(snapshot.evidence_files),
+            "evidence_files": evidence_files,
         }
         provenance = list(snapshot.selection_provenance)
         if provenance:
             manifest["selection_provenance"] = provenance
         self._write_json(snapshot_root / "snapshot.json", manifest)
-        relative_path = str(snapshot_root.relative_to(self.staging))
+        relative_path = snapshot_root.relative_to(self.staging).as_posix()
         entry: dict[str, Any] = {
+            "source_kind": snapshot.source_kind,
             "object_kind": snapshot.object_kind,
             "source_id": snapshot.source_id,
             "path": relative_path,
@@ -229,12 +288,14 @@ class CollectionRun:
         return snapshot_root
 
     def write_evidence(
-        self, snapshot_root: Path, relative_path: str, content: bytes
+        self, snapshot_root: Path, relative_path: str | Path, content: bytes
     ) -> Path:
-        relative = Path(relative_path)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ArchiveError("evidence path must stay within the Snapshot")
-        destination = snapshot_root / relative
+        _ensure_inside(snapshot_root, self.staging / "snapshots")
+        relative = _archive_relative_path(relative_path)
+        if relative == PurePosixPath("snapshot.json"):
+            raise ArchiveError("snapshot.json is reserved for the Snapshot manifest")
+        destination = snapshot_root.joinpath(*relative.parts)
+        _ensure_inside(destination, snapshot_root)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
         return destination
@@ -244,6 +305,7 @@ class CollectionRun:
             self.source_kind, self.scope_id, self.collection_range
         ):
             raise ArchiveError("collection range overlaps a published run")
+        self._validate_snapshots()
         runs_root = self.archive.root / "runs"
         runs_root.mkdir(parents=True, exist_ok=True)
         published = runs_root / self.run_id
@@ -266,6 +328,54 @@ class CollectionRun:
         self._write_json(self.staging / "run.json", manifest)
         self.staging.rename(published)
         return published
+
+    def _validate_snapshots(self) -> None:
+        for entry in self._snapshots:
+            snapshot_root = self.staging / PurePosixPath(entry["path"])
+            _ensure_inside(snapshot_root, self.staging / "snapshots")
+            if not snapshot_root.is_dir() or snapshot_root.is_symlink():
+                raise ArchiveError("Snapshot directory is not a regular directory")
+            snapshot_manifest_path = snapshot_root / "snapshot.json"
+            if not _is_regular_file(snapshot_manifest_path):
+                raise ArchiveError("Snapshot manifest is not a regular file")
+            try:
+                snapshot_manifest = json.loads(
+                    snapshot_manifest_path.read_text(encoding="utf-8")
+                )
+            except OSError, json.JSONDecodeError:
+                raise ArchiveError("Snapshot manifest is unreadable") from None
+            if not isinstance(snapshot_manifest, dict):
+                raise ArchiveError("Snapshot manifest is invalid")
+            for field in ("source_kind", "object_kind", "source_id"):
+                if snapshot_manifest.get(field) != entry[field]:
+                    raise ArchiveError(f"Snapshot {field} is inconsistent")
+            declared = _normalize_evidence_files(
+                snapshot_manifest.get("evidence_files")
+            )
+            declared_paths = {evidence_file["path"] for evidence_file in declared}
+            for evidence_file in declared:
+                evidence_path = snapshot_root.joinpath(
+                    *PurePosixPath(evidence_file["path"]).parts
+                )
+                _ensure_inside(evidence_path, snapshot_root)
+                if not _is_regular_file(evidence_path):
+                    raise ArchiveError(
+                        "declared evidence file is missing or not regular"
+                    )
+
+            actual_paths: set[str] = set()
+            for path in snapshot_root.rglob("*"):
+                if path == snapshot_manifest_path:
+                    continue
+                if path.is_symlink():
+                    raise ArchiveError("Snapshot contains a non-regular evidence entry")
+                if path.is_dir():
+                    continue
+                if not path.is_file():
+                    raise ArchiveError("Snapshot contains a non-regular evidence entry")
+                actual_paths.add(path.relative_to(snapshot_root).as_posix())
+            if actual_paths != declared_paths:
+                raise ArchiveError("Snapshot evidence files do not match its manifest")
 
     @staticmethod
     def _write_json(path: Path, value: dict[str, Any]) -> None:

@@ -10,6 +10,7 @@ import pytest
 
 from tracebase.archive import (
     Archive,
+    ArchiveError,
     CollectionRange,
     CollectionRun,
     Snapshot,
@@ -19,6 +20,21 @@ from tracebase.archive import (
 )
 
 PROJECT_ROOT = Path(__file__).parents[1]
+
+
+def build_run(
+    archive: Archive,
+    from_text: str = "2026-01-01T00:00:00+00:00",
+    to_text: str = "2026-01-01T01:00:00+00:00",
+) -> CollectionRun:
+    return CollectionRun(
+        archive,
+        "opencode",
+        "instance-1",
+        CollectionRange.parse(from_text, to_text),
+        collector_version="test",
+        effective_options={},
+    )
 
 
 class TestCollectionCli:
@@ -144,16 +160,7 @@ class TestCollectionCli:
     def test_published_overlap_is_rejected_without_new_staging(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             archive = Archive(directory)
-            run = CollectionRun(
-                archive,
-                "opencode",
-                "instance-1",
-                CollectionRange.parse(
-                    "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"
-                ),
-                collector_version="test",
-                effective_options={},
-            )
+            run = build_run(archive)
             run.publish({})
 
             result = self.run_cli(
@@ -195,17 +202,7 @@ def test_uuid7_has_uuid7_version_and_rfc_variant() -> None:
 def test_collection_run_publishes_empty_run_and_snapshot_manifest() -> None:
     with tempfile.TemporaryDirectory() as directory:
         archive = Archive(directory)
-        collection_range = CollectionRange.parse(
-            "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"
-        )
-        run = CollectionRun(
-            archive,
-            "opencode",
-            "instance-1",
-            collection_range,
-            collector_version="test",
-            effective_options={"instance_id": "instance-1"},
-        )
+        run = build_run(archive)
         published = run.publish({"observed": True})
 
         manifest = json.loads((published / "run.json").read_text())
@@ -219,19 +216,15 @@ def test_collection_run_publishes_empty_run_and_snapshot_manifest() -> None:
         assert (published / "snapshots").is_dir()
         assert not run.staging.exists()
 
-        next_run = CollectionRun(
+        next_run = build_run(
             archive,
-            "opencode",
-            "instance-1",
-            CollectionRange.parse(
-                "2026-01-01T01:00:00+00:00", "2026-01-01T02:00:00+00:00"
-            ),
-            collector_version="test",
-            effective_options={},
+            "2026-01-01T01:00:00+00:00",
+            "2026-01-01T02:00:00+00:00",
         )
         snapshot_root = next_run.write_snapshot(
             Snapshot(
-                object_kind="opencode_session",
+                source_kind="opencode",
+                object_kind="session",
                 source_id="session/id:unsafe",
                 observation_window={
                     "from": "2026-01-01T01:00:00+00:00",
@@ -243,30 +236,114 @@ def test_collection_run_publishes_empty_run_and_snapshot_manifest() -> None:
         next_run.write_evidence(snapshot_root, "session.json", b"source-native")
         published = next_run.publish({"observed": True})
 
-        snapshot_directory = (
-            published / "snapshots/opencode_session/c2Vzc2lvbi9pZDp1bnNhZmU"
-        )
+        snapshot_directory = published / "snapshots/session/c2Vzc2lvbi9pZDp1bnNhZmU"
         snapshot_manifest = json.loads(
             (snapshot_directory / "snapshot.json").read_text()
         )
+        assert snapshot_manifest["source_kind"] == "opencode"
+        assert snapshot_manifest["object_kind"] == "session"
         assert snapshot_manifest["source_id"] == "session/id:unsafe"
+        assert snapshot_manifest["evidence_files"] == [{"path": "session.json"}]
         assert (snapshot_directory / "session.json").read_bytes() == b"source-native"
+        assert manifest["snapshots"] == []
+        next_manifest = json.loads(
+            (published.parent / next_run.run_id / "run.json").read_text()
+        )
+        assert next_manifest["snapshots"] == [
+            {
+                "object_kind": "session",
+                "path": "snapshots/session/c2Vzc2lvbi9pZDp1bnNhZmU",
+                "source_id": "session/id:unsafe",
+                "source_kind": "opencode",
+            }
+        ]
+
+
+def test_publish_rejects_missing_declared_evidence_and_keeps_staging() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        run = build_run(archive)
+        run.write_snapshot(
+            Snapshot(
+                source_kind="opencode",
+                object_kind="session",
+                source_id="session-1",
+                observation_window={},
+                evidence_files=({"path": "session.json"},),
+            )
+        )
+
+        with pytest.raises(ArchiveError, match="evidence"):
+            run.publish({})
+
+        assert run.staging.exists()
+        assert not (Path(directory) / "runs").exists()
+
+
+def test_publish_rejects_unlisted_evidence() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        run = build_run(archive)
+        snapshot_root = run.write_snapshot(
+            Snapshot(
+                source_kind="opencode",
+                object_kind="session",
+                source_id="session-1",
+                observation_window={},
+                evidence_files=({"path": "session.json"},),
+            )
+        )
+        run.write_evidence(snapshot_root, "session.json", b"session")
+        run.write_evidence(snapshot_root, "unexpected.json", b"unexpected")
+
+        with pytest.raises(ArchiveError, match="evidence"):
+            run.publish({})
+
+        assert run.staging.exists()
+        assert not (Path(directory) / "runs").exists()
+
+
+def test_manifest_paths_are_posix_and_object_kind_is_an_archive_identifier() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        run = build_run(archive)
+        with pytest.raises(ArchiveError, match="object kind"):
+            run.write_snapshot(
+                Snapshot(
+                    source_kind="opencode",
+                    object_kind="../session",
+                    source_id="session-1",
+                    observation_window={},
+                )
+            )
+
+        snapshot_root = run.write_snapshot(
+            Snapshot(
+                source_kind="opencode",
+                object_kind="session",
+                source_id="session-2",
+                observation_window={},
+                evidence_files=({"path": "nested/session.json"},),
+            )
+        )
+        run.write_evidence(snapshot_root, Path("nested") / "session.json", b"session")
+        published = run.publish({})
+        snapshot_directory = published / "snapshots/session/c2Vzc2lvbi0y"
+        snapshot_manifest = json.loads(
+            (snapshot_directory / "snapshot.json").read_text()
+        )
+
+        assert snapshot_manifest["evidence_files"] == [{"path": "nested/session.json"}]
+        assert (
+            json.loads((published / "run.json").read_text())["snapshots"][0]["path"]
+            == "snapshots/session/c2Vzc2lvbi0y"
+        )
 
 
 def test_overlap_registry_uses_published_runs_and_half_open_ranges() -> None:
     with tempfile.TemporaryDirectory() as directory:
         archive = Archive(directory)
-        published_range = CollectionRange.parse(
-            "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"
-        )
-        run = CollectionRun(
-            archive,
-            "opencode",
-            "instance-1",
-            published_range,
-            collector_version="test",
-            effective_options={},
-        )
+        run = build_run(archive)
         run.publish({})
 
         assert archive.has_overlap(
@@ -295,25 +372,8 @@ def test_overlap_registry_uses_published_runs_and_half_open_ranges() -> None:
 def test_publish_rechecks_overlap_for_runs_staged_before_another_publish() -> None:
     with tempfile.TemporaryDirectory() as directory:
         archive = Archive(directory)
-        collection_range = CollectionRange.parse(
-            "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"
-        )
-        first = CollectionRun(
-            archive,
-            "opencode",
-            "instance-1",
-            collection_range,
-            collector_version="test",
-            effective_options={},
-        )
-        second = CollectionRun(
-            archive,
-            "opencode",
-            "instance-1",
-            collection_range,
-            collector_version="test",
-            effective_options={},
-        )
+        first = build_run(archive)
+        second = build_run(archive)
 
         first.publish({})
         with pytest.raises(ValueError, match="overlaps"):
