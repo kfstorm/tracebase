@@ -1,3 +1,5 @@
+# ruff: noqa: E501
+
 import base64
 import json
 import os
@@ -47,6 +49,32 @@ def build_github_run(archive: Archive) -> CollectionRun:
         CollectionRange.parse("2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
         collector_version="test",
         effective_options={},
+    )
+
+
+def run_github_cli(
+    archive: Path, fixture_directory: Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tracebase",
+            "collect",
+            "github",
+            "--archive",
+            str(archive),
+            "--from",
+            "2026-01-01T00:00:00+00:00",
+            "--to",
+            "2026-01-02T00:00:00+00:00",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=os.environ
+        | {"PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"]},
     )
 
 
@@ -548,28 +576,8 @@ sys.stdout.buffer.write(headers + body)
     )
     gh.chmod(0o755)
     archive = tmp_path / "archive"
-    environment = os.environ | {"PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]}
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "tracebase",
-            "collect",
-            "github",
-            "--archive",
-            str(archive),
-            "--from",
-            "2026-01-01T00:00:00+00:00",
-            "--to",
-            "2026-01-02T00:00:00+00:00",
-        ],
-        cwd=PROJECT_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-        env=environment,
-    )
+    result = run_github_cli(archive, tmp_path)
 
     if fail:
         assert result.returncode == 1
@@ -587,3 +595,37 @@ sys.stdout.buffer.write(headers + body)
             "ordinary-commented",
             "submitted-reviewed",
         ]
+
+
+def test_github_cli_hydrates_eligible_pr_from_synthetic_gh(tmp_path: Path) -> None:
+    gh = tmp_path / "gh"
+    gh.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+endpoint = sys.argv[-1]
+item = {"node_id": "pr-node", "number": 7, "repository_url": "https://api.github.com/repos/octo/example", "pull_request": {}}
+if endpoint == "/user": body = b'{"node_id":"actor-node","login":"actor"}'
+elif endpoint.startswith("/search/issues?"): body = json.dumps({"total_count": 1, "incomplete_results": False, "items": [item]}).encode()
+elif endpoint == "/repos/octo/example/issues/7": body = b'{"node_id":"pr-node","user":{"node_id":"actor-node"},"pull_request":{}}'
+elif endpoint.endswith("/issues/7/comments?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"}}]'
+elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1") or endpoint.endswith("/pulls/7/comments?per_page=100&page=1"): body = b"[]"
+elif endpoint.endswith("/pulls/7/reviews?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"},"submitted_at":"x"}]'
+elif endpoint == "/repos/octo/example/pulls/7" and any("application/vnd.github.diff" in arg for arg in sys.argv): body = b"diff --git a/a b/a\\n"
+elif endpoint == "/repos/octo/example/pulls/7": body = b'{"node_id":"pr-node"}'
+else: raise SystemExit(2)
+sys.stdout.buffer.write(b"HTTP/1.1 200 OK\\r\\n\\r\\n" + body)
+""",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    archive = tmp_path / "archive"
+    result = run_github_cli(archive, tmp_path)
+    assert result.returncode == 0
+    run = next((archive / "runs").iterdir())
+    snapshot = next((run / "snapshots/pull-request").iterdir())
+    assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
+    assert json.loads((snapshot / "snapshot.json").read_text())["selection_provenance"][
+        0
+    ]["eligibility"] == ["authored", "ordinary-commented", "submitted-reviewed"]
