@@ -13,11 +13,18 @@ FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 
 class TestOpenCodeCollectionCli:
     def run_cli(
-        self, archive: Path, fake_bin: Path, *arguments: str, fail_export: str = ""
+        self,
+        archive: Path,
+        fake_bin: Path,
+        *arguments: str,
+        fail_export: str = "",
+        session_list: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         environment = os.environ | {
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-            "TRACEBASE_SESSION_LIST": str(FIXTURES / "session-list.json"),
+            "TRACEBASE_SESSION_LIST": str(
+                session_list or FIXTURES / "session-list.json"
+            ),
             "TRACEBASE_EXPORT_DIR": str(FIXTURES),
             "TRACEBASE_FAIL_EXPORT": fail_export,
         }
@@ -140,5 +147,25 @@ else:
             assert result.returncode == 1
             assert result.stdout == ""
             assert "sensitive-session-payload" not in result.stderr
+            assert len(list((root / "archive" / ".staging").iterdir())) == 1
+            assert not (root / "archive" / "runs").exists()
+
+    def test_invalid_boolean_session_timestamp_does_not_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session_list = root / "invalid-sessions.json"
+            session_list.write_text(
+                '[{"id":"invalid","created":true,"updated":1767225600000}]',
+                encoding="utf-8",
+            )
+            result = self.run_cli(
+                root / "archive",
+                self.make_fake_opencode(root),
+                session_list=session_list,
+            )
+
+            assert result.returncode == 1
+            assert result.stdout == ""
+            assert "session list is invalid" in result.stderr
             assert len(list((root / "archive" / ".staging").iterdir())) == 1
             assert not (root / "archive" / "runs").exists()
