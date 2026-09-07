@@ -259,13 +259,10 @@ _REVIEW_COMMENT_FIELDS = """
                 originalLine
                 startLine
                 originalStartLine
-                diffSide
-                startDiffSide
                 diffHunk
                 createdAt
                 updatedAt
                 author {
-                  id
                   login
                 }
               }
