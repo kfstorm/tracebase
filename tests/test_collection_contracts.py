@@ -239,10 +239,6 @@ def _run_collect(
         "TRACEBASE_FAIL_SOURCE": "1" if fail_source else "",
         "TRACEBASE_PASSWORD_CAPTURE": str(archive.parent / "opencode-password.capture"),
     }
-    if source == "opencode":
-        environment["PYTHONPATH"] = (
-            str(fixture_directory) + os.pathsep + os.environ.get("PYTHONPATH", "")
-        )
     return subprocess.run(
         arguments,
         cwd=PROJECT_ROOT,
