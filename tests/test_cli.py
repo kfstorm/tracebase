@@ -29,6 +29,7 @@ from tracebase.github import (
     _GitHub,
     _hydrate,
     _Response,
+    _updated_range,
     collect,
 )
 
@@ -80,8 +81,19 @@ def test_github_discovery_uses_one_updated_range_qualifier() -> None:
     assert len(queries) == 3
     assert all(query.count("updated:") == 1 for _reason, query in queries)
     assert all(
-        "updated:2026-09-06T00:00:00+08:00..2026-09-07T00:00:00+08:00" in query
+        "updated:2026-09-06T00:00:00+08:00..2026-09-06T23:59:59+08:00" in query
         for _reason, query in queries
+    )
+
+
+def test_updated_range_maps_half_open_range_to_inclusive_search_range() -> None:
+    collection_range = CollectionRange.parse(
+        "2026-01-01T00:00:00Z", "2026-01-01T00:00:03Z"
+    )
+
+    assert (
+        _updated_range(collection_range.start, collection_range.end)
+        == "updated:2026-01-01T00:00:00Z..2026-01-01T00:00:02Z"
     )
 
 
@@ -875,6 +887,19 @@ def test_github_discovery_partitions_over_limit_results() -> None:
         for entry in coverage
         if entry["disposition"] == "complete"
     )
+    authorship_leaves = [
+        entry
+        for entry in coverage
+        if entry["reason"] == "authorship" and entry["disposition"] == "complete"
+    ]
+    assert [entry["partition"] for entry in authorship_leaves] == [
+        {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T00:00:01Z"},
+        {"from": "2026-01-01T00:00:01Z", "to": "2026-01-01T00:00:02Z"},
+    ]
+    assert [entry["query"] for entry in authorship_leaves] == [
+        "author:actor updated:2026-01-01T00:00:00Z..2026-01-01T00:00:00Z",
+        "author:actor updated:2026-01-01T00:00:01Z..2026-01-01T00:00:01Z",
+    ]
 
 
 def test_github_discovery_rejects_incomplete_later_page() -> None:

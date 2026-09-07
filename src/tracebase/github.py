@@ -211,7 +211,7 @@ def _actor(github: _GitHub) -> tuple[str, str]:
 def _discovery_queries(
     login: str, collection_range: CollectionRange
 ) -> list[tuple[str, str]]:
-    updated = f"updated:{collection_range.from_text}..{collection_range.to_text}"
+    updated = _updated_range(collection_range.start, collection_range.end)
     return [
         ("authorship", f"author:{login} {updated}"),
         ("ordinary_comment", f"commenter:{login} {updated}"),
@@ -241,12 +241,12 @@ def _discover(  # noqa: PLR0915
             start, end = partitions.pop(0)
             start_text = _timestamp(start)
             end_text = _timestamp(end)
-            original_range = (
-                f"updated:{collection_range.from_text}..{collection_range.to_text}"
+            original_range = _updated_range(
+                collection_range.start, collection_range.end
             )
             query = base_query.replace(
                 original_range,
-                f"updated:{start_text}..{end_text}",
+                _updated_range(start, end),
             )
             discovery_entry = _DiscoveryEntry(name, query, start_text, end_text)
             endpoint = "/search/issues?" + urlencode(
@@ -366,6 +366,16 @@ def _source_ids(items: list[Any]) -> list[str]:
 
 def _timestamp(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
+
+
+def _updated_range(start: datetime, end: datetime) -> str:
+    # GitHub Search's `a..b` range is inclusive at both ends, while
+    # Tracebase Collection Ranges are half-open [start, end). Since
+    # Collection Range endpoints are restricted to whole seconds,
+    # subtracting one second from `end` gives an exact, gap-free,
+    # non-overlapping representation of the Tracebase interval.
+    inclusive_end = end - timedelta(seconds=1)
+    return f"updated:{_timestamp(start)}..{_timestamp(inclusive_end)}"
 
 
 def _hydrate(
