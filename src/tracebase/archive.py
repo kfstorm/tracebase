@@ -288,6 +288,14 @@ class CollectionRun:
 
         return len(self._snapshots)
 
+    def has_staged_snapshot(self, object_kind: str, source_id: str) -> bool:
+        """Return whether this run already staged an Artifact snapshot."""
+
+        return any(
+            entry["object_kind"] == object_kind and entry["source_id"] == source_id
+            for entry in self._snapshots
+        )
+
     def write_snapshot(self, snapshot: Snapshot) -> Path:
         _validate_archive_type(snapshot.source_kind, "source kind")
         _validate_archive_type(snapshot.object_kind, "object kind")

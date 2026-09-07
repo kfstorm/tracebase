@@ -76,6 +76,21 @@ class _GitHub:
     def __init__(self) -> None:
         self._supports_allow_escape_sequences: bool | None = None
 
+    @staticmethod
+    def _execute(arguments: list[str], failure_message: str) -> _Response:
+        try:
+            completed = subprocess.run(
+                arguments,
+                capture_output=True,
+                check=False,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ArchiveError(failure_message) from error
+        if completed.returncode != 0:
+            raise ArchiveError(failure_message)
+        return _GitHub._parse_response(completed.stdout, _observed_at())
+
     def _supports_escape_sequences(self) -> bool:
         if self._supports_allow_escape_sequences is not None:
             return self._supports_allow_escape_sequences
@@ -112,18 +127,7 @@ class _GitHub:
                 endpoint,
             ]
         )
-        try:
-            completed = subprocess.run(
-                arguments,
-                capture_output=True,
-                check=False,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise ArchiveError("GitHub request failed") from error
-        if completed.returncode != 0:
-            raise ArchiveError("GitHub request failed")
-        return self._parse_response(completed.stdout, _observed_at())
+        return self._execute(arguments, "GitHub request failed")
 
     def graphql(self, query: str) -> _Response:
         arguments = [
@@ -138,18 +142,7 @@ class _GitHub:
             "-f",
             f"query={query}",
         ]
-        try:
-            completed = subprocess.run(
-                arguments,
-                capture_output=True,
-                check=False,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise ArchiveError("GitHub GraphQL request failed") from error
-        if completed.returncode != 0:
-            raise ArchiveError("GitHub GraphQL request failed")
-        return self._parse_response(completed.stdout, _observed_at())
+        return self._execute(arguments, "GitHub GraphQL request failed")
 
     @staticmethod
     def _parse_response(raw: bytes, observed_at: str = "") -> _Response:
@@ -677,6 +670,8 @@ def _hydrate(
     github: _GitHub,
     candidate: _Candidate,
 ) -> None:
+    if run.has_staged_snapshot(candidate.object_kind, candidate.source_id):
+        return
     observed_from = _observed_at()
     base = f"/repos/{candidate.repository}"
     issue_endpoint = f"{base}/issues/{candidate.number}"

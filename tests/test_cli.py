@@ -775,9 +775,16 @@ def test_github_collect_preserves_review_thread_source_native_responses(
                                     "path": "src/example.py",
                                     "line": 10,
                                     "originalLine": 10,
+                                    "startLine": 8,
+                                    "originalStartLine": 8,
+                                    "diffSide": "RIGHT",
+                                    "startDiffSide": "RIGHT",
                                     "isResolved": True,
                                     "isOutdated": False,
-                                    "resolvedBy": {"login": "reviewer"},
+                                    "resolvedBy": {
+                                        "id": "reviewer-id",
+                                        "login": "reviewer",
+                                    },
                                     "comments": {
                                         "nodes": [
                                             {"id": "comment-1", "body": "first"},
@@ -794,6 +801,10 @@ def test_github_collect_preserves_review_thread_source_native_responses(
                                     "path": "src/old.py",
                                     "line": None,
                                     "originalLine": 20,
+                                    "startLine": None,
+                                    "originalStartLine": 20,
+                                    "diffSide": "RIGHT",
+                                    "startDiffSide": "RIGHT",
                                     "isResolved": False,
                                     "isOutdated": True,
                                     "resolvedBy": None,
@@ -863,6 +874,58 @@ def test_github_collect_preserves_review_thread_source_native_responses(
             {"id": "comment-1", "body": "first"},
             {"id": "comment-2", "body": "second"},
         ]
+        threads = json.loads((snapshot / "review-threads.001.json").read_bytes())[
+            "data"
+        ]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        assert [
+            (
+                thread["id"],
+                thread["path"],
+                thread["line"],
+                thread["originalLine"],
+                thread["startLine"],
+                thread["originalStartLine"],
+                thread["isResolved"],
+                thread["isOutdated"],
+                thread["resolvedBy"],
+            )
+            for thread in threads
+        ] == [
+            (
+                "thread-resolved-current",
+                "src/example.py",
+                10,
+                10,
+                8,
+                8,
+                True,
+                False,
+                {"id": "reviewer-id", "login": "reviewer"},
+            ),
+            (
+                "thread-unresolved-outdated",
+                "src/old.py",
+                None,
+                20,
+                None,
+                20,
+                False,
+                True,
+                None,
+            ),
+        ]
+        _hydrate(
+            run,
+            _GitHub(),
+            _Candidate(
+                "pr-node",
+                "octo/example",
+                7,
+                "pull-request",
+                (),
+            ),
+        )
+        assert run.snapshot_count == 1
 
 
 def test_github_collect_failure_keeps_run_unpublished(
@@ -1003,7 +1066,7 @@ elif endpoint.endswith("/issues/7/comments?per_page=100&page=1"):
 elif endpoint.endswith("/issues/7/comments?per_page=100&page=2"): body = b"[]"
 elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1") or endpoint.endswith("/pulls/7/comments?per_page=100&page=1"): body = b"[]"
 elif endpoint.endswith("/pulls/7/reviews?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"},"submitted_at":"x"}]'
-elif endpoint.startswith("query=query PullRequestReviewThreads"): body = b'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+elif endpoint.startswith("query=query PullRequestReviewThreads"): body = b'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread-cli","path":"src/example.py","line":4,"originalLine":4,"isResolved":true,"isOutdated":false,"resolvedBy":{"id":"reviewer-id","login":"reviewer"},"comments":{"nodes":[{"id":"comment-cli-1","body":"first"},{"id":"comment-cli-2","body":"second"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
 elif endpoint == "/repos/octo/example/pulls/7" and any("application/vnd.github.diff" in arg for arg in sys.argv): body = b"diff --git a/a b/a\\n"
 elif endpoint == "/repos/octo/example/pulls/7": body = b'{"node_id":"pr-node"}'
 else: raise SystemExit(2)
@@ -1022,6 +1085,14 @@ sys.stdout.buffer.write(headers + body)
     run = next((archive / "runs").iterdir())
     snapshot = next((run / "snapshots/pull-request").iterdir())
     assert (snapshot / "comments.002.json").read_bytes() == b"[]"
+    thread = json.loads((snapshot / "review-threads.001.json").read_bytes())["data"][
+        "repository"
+    ]["pullRequest"]["reviewThreads"]["nodes"][0]
+    assert thread["id"] == "thread-cli"
+    assert [comment["id"] for comment in thread["comments"]["nodes"]] == [
+        "comment-cli-1",
+        "comment-cli-2",
+    ]
     assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
     assert json.loads((snapshot / "snapshot.json").read_text())["selection_provenance"][
         0
