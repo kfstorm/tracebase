@@ -216,7 +216,6 @@ class RichProgressSink:
             updates["status"] = _join_status(event.phase, event.current, event.message)
         if updates:
             self._progress.update(task_id, **updates)
-            self._progress.refresh()
 
     def _finish(self, event: ProgressEvent) -> None:
         task_id = self._tasks.get(event.task_id)

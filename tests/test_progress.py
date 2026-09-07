@@ -61,6 +61,7 @@ def test_rich_progress_renders_complete_lifecycle_after_removed_task() -> None:
                 current="octo/example#7",
             )
         )
+        progress._progress.refresh()
         progress.emit(
             ProgressEvent(
                 kind="finish",
