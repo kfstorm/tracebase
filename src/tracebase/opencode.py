@@ -174,7 +174,7 @@ def collect(
     run: CollectionRun,
     reporter: ProgressReporter,
 ) -> CollectionResult:
-    """Export every session whose lifecycle intersects the Collection Range."""
+    """Export complete evidence for sessions updated within the Collection Range."""
 
     reporter.emit(
         ProgressEvent(
@@ -194,6 +194,8 @@ def collect(
     selected: list[dict[str, Any]] = []
     for session in sessions:
         created, updated = _session_interval(session)
+        # The API bounds updated timestamps with start/cursor. Keep this
+        # predicate defensive in case a server does not honor those filters.
         if created < run.collection_range.end and run.collection_range.start <= updated:
             selected.append(session)
 
