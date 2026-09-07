@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -31,12 +33,16 @@ _TIMELINE_ACCEPT = "application/vnd.github+json"
 _DIFF_ACCEPT = "application/vnd.github.diff"
 _SUCCESS_STATUS_LOWER = 200
 _SUCCESS_STATUS_UPPER = 300
+_SERVER_ERROR_STATUS_LOWER = 500
 _SEARCH_RESULT_LIMIT = 1000
 _REQUEST_TIMEOUT_SECONDS = 60
+_REQUEST_RETRIES = 2
+_RETRY_DELAYS = (0.5, 1.0)
 _API_VERSION = "2022-11-28"
 _MINIMUM_PARTITION = timedelta(seconds=1)
 _DISCOVERY_MATRIX_VERSION = 1
 _REVIEW_COMMENT_JOIN_RETRIES = 2
+_sleep = time.sleep
 
 
 @dataclass(frozen=True)
@@ -78,19 +84,76 @@ class _GitHub:
         self._supports_allow_escape_sequences: bool | None = None
 
     @staticmethod
-    def _execute(arguments: list[str], failure_message: str) -> _Response:
-        try:
-            completed = subprocess.run(
-                arguments,
-                capture_output=True,
-                check=False,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+    def _execute(
+        arguments: list[str], failure_message: str, endpoint: str
+    ) -> _Response:
+        last_returncode: int | str = "unknown"
+        last_stderr = ""
+        last_body = ""
+        last_status: int | None = None
+
+        def failure() -> ArchiveError:
+            return ArchiveError(
+                _request_failure(
+                    endpoint,
+                    attempt,
+                    last_returncode,
+                    last_stderr,
+                    last_status,
+                    last_body,
+                )
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise ArchiveError(failure_message) from error
-        if completed.returncode != 0:
-            raise ArchiveError(failure_message)
-        return _GitHub._parse_response(completed.stdout, _observed_at())
+
+        for attempt in range(1, _REQUEST_RETRIES + 2):
+            last_status = None
+            last_body = ""
+            if attempt > 1:
+                _sleep(_RETRY_DELAYS[attempt - 2])
+            try:
+                completed = subprocess.run(
+                    arguments,
+                    capture_output=True,
+                    check=False,
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as error:
+                last_returncode = "timeout"
+                last_stderr = str(error)
+                if attempt <= _REQUEST_RETRIES:
+                    continue
+                raise failure() from error
+            except OSError as error:
+                last_returncode = type(error).__name__
+                last_stderr = str(error)
+                if attempt <= _REQUEST_RETRIES:
+                    continue
+                raise failure() from error
+
+            last_returncode = completed.returncode
+            last_stderr = completed.stderr.decode("utf-8", errors="replace")
+            last_body = completed.stdout.decode("utf-8", errors="replace")
+            try:
+                response = _GitHub._parse_response(completed.stdout, _observed_at())
+            except ArchiveError:
+                if completed.returncode == 0:
+                    raise
+                if attempt <= _REQUEST_RETRIES:
+                    continue
+                raise failure() from None
+
+            last_status = response.status
+            last_body = response.body.decode("utf-8", errors="replace")
+            if response.status >= _SERVER_ERROR_STATUS_LOWER:
+                if attempt <= _REQUEST_RETRIES:
+                    continue
+                raise failure()
+            if completed.returncode != 0:
+                raise ArchiveError(failure_message)
+            if not _SUCCESS_STATUS_LOWER <= response.status < _SUCCESS_STATUS_UPPER:
+                raise ArchiveError("GitHub request failed")
+            return response
+
+        raise AssertionError("GitHub request retry loop did not return")
 
     def _supports_escape_sequences(self) -> bool:
         if self._supports_allow_escape_sequences is not None:
@@ -128,7 +191,7 @@ class _GitHub:
                 endpoint,
             ]
         )
-        return self._execute(arguments, "GitHub request failed")
+        return self._execute(arguments, "GitHub request failed", endpoint)
 
     def graphql(self, query: str) -> _Response:
         arguments = [
@@ -143,7 +206,7 @@ class _GitHub:
             "-f",
             f"query={query}",
         ]
-        return self._execute(arguments, "GitHub GraphQL request failed")
+        return self._execute(arguments, "GitHub GraphQL request failed", "graphql")
 
     @staticmethod
     def _parse_response(raw: bytes, observed_at: str = "") -> _Response:
@@ -159,8 +222,6 @@ class _GitHub:
             if ":" in line:
                 key, value = line.split(":", maxsplit=1)
                 headers[key.lower()] = value.strip()
-        if not _SUCCESS_STATUS_LOWER <= status < _SUCCESS_STATUS_UPPER:
-            raise ArchiveError("GitHub request failed")
         return _Response(
             body=body, status=status, headers=headers, observed_at=observed_at
         )
@@ -178,6 +239,32 @@ class _GitHub:
 
 def _observed_at() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _request_failure(
+    endpoint: str,
+    attempts: int,
+    returncode: int | str,
+    stderr: str,
+    status: int | None,
+    body: str,
+) -> str:
+    details = [f"endpoint={endpoint}", f"attempts={attempts}"]
+    if status is not None:
+        details.append(f"status={status}")
+    else:
+        details.append(f"returncode={returncode}")
+    if stderr:
+        details.append(f"stderr={_diagnostic_text(stderr)}")
+    if body:
+        details.append(f"body={_diagnostic_text(body)}")
+    return "GitHub request failed after retries: " + ", ".join(details)
+
+
+def _diagnostic_text(value: str) -> str:
+    encoded = value.encode("utf-8", errors="replace")
+    digest = hashlib.sha256(encoded).hexdigest()[:16]
+    return f"<redacted bytes={len(encoded)} sha256={digest}>"
 
 
 def _response_headers(headers: dict[str, str]) -> dict[str, str]:

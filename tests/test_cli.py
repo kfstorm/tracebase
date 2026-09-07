@@ -125,6 +125,185 @@ def build_github_request(
     return request
 
 
+def github_response(status: int, body: bytes = b"{}") -> bytes:
+    return f"HTTP/1.1 {status} Test\r\nX-Test: value\r\n\r\n".encode() + body
+
+
+def test_github_request_retries_nonzero_cli_failure_without_http_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = iter(
+        [
+            subprocess.CompletedProcess(
+                ["gh"], 1, stdout=b"", stderr=b"connection reset"
+            ),
+            subprocess.CompletedProcess(
+                ["gh"], 0, stdout=github_response(200, b'{"ok":true}'), stderr=b""
+            ),
+        ]
+    )
+    delays: list[float] = []
+    monkeypatch.setattr(
+        "tracebase.github.subprocess.run", lambda *_args, **_kwargs: next(attempts)
+    )
+    monkeypatch.setattr("tracebase.github._sleep", delays.append)
+
+    response = _GitHub().request("/user")
+
+    assert response.status == 200
+    assert response.body == b'{"ok":true}'
+    assert delays == [0.5]
+
+
+def test_github_request_does_not_retry_http_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            ["gh"],
+            1,
+            stdout=github_response(404, b'{"message":"Not Found"}'),
+            stderr=b"not found",
+        )
+
+    monkeypatch.setattr("tracebase.github.subprocess.run", run)
+    monkeypatch.setattr("tracebase.github._sleep", pytest.fail)
+
+    with pytest.raises(ArchiveError, match="GitHub request failed"):
+        _GitHub().request("/missing")
+
+    assert calls == 1
+
+
+def test_github_request_retries_http_500_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = iter(
+        [
+            subprocess.CompletedProcess(
+                ["gh"],
+                1,
+                stdout=github_response(500, b"temporary"),
+                stderr=b"server error",
+            ),
+            subprocess.CompletedProcess(
+                ["gh"], 0, stdout=github_response(200, b"ok"), stderr=b""
+            ),
+        ]
+    )
+    delays: list[float] = []
+    monkeypatch.setattr(
+        "tracebase.github.subprocess.run", lambda *_args, **_kwargs: next(attempts)
+    )
+    monkeypatch.setattr("tracebase.github._sleep", delays.append)
+
+    response = _GitHub().request("/user")
+
+    assert response.status == 200
+    assert delays == [0.5]
+
+
+def test_github_request_reports_http_500_diagnostics_after_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tracebase.github.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["gh"],
+            1,
+            stdout=github_response(503, b"service unavailable"),
+            stderr=b"server error",
+        ),
+    )
+    delays: list[float] = []
+    monkeypatch.setattr("tracebase.github._sleep", delays.append)
+
+    with pytest.raises(
+        ArchiveError,
+        match=r"endpoint=/user.*attempts=3.*status=503.*stderr=<redacted bytes=12 sha256=[0-9a-f]+>.*body=<redacted bytes=19 sha256=[0-9a-f]+>",
+    ) as error:
+        _GitHub().request("/user")
+
+    message = str(error.value)
+    assert "server error" not in message
+    assert "service unavailable" not in message
+
+    assert delays == [0.5, 1.0]
+
+
+def test_github_request_retries_timeout_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = iter(
+        [
+            subprocess.CompletedProcess(
+                ["gh"], 0, stdout=github_response(200, b"ok"), stderr=b""
+            )
+        ]
+    )
+    timed_out = False
+
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        nonlocal timed_out
+        if not timed_out:
+            timed_out = True
+            raise subprocess.TimeoutExpired(["gh"], 60)
+        return next(attempts)
+
+    delays: list[float] = []
+    monkeypatch.setattr("tracebase.github.subprocess.run", run)
+    monkeypatch.setattr("tracebase.github._sleep", delays.append)
+
+    response = _GitHub().request("/user")
+
+    assert response.status == 200
+    assert delays == [0.5]
+
+
+def test_github_request_reports_transport_diagnostics_after_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tracebase.github.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["gh"], 7, stdout=b"", stderr=b"connection refused"
+        ),
+    )
+    delays: list[float] = []
+    monkeypatch.setattr("tracebase.github._sleep", delays.append)
+
+    with pytest.raises(
+        ArchiveError,
+        match=r"endpoint=/user.*attempts=3.*returncode=7.*stderr=<redacted bytes=18 sha256=[0-9a-f]+>",
+    ):
+        _GitHub().request("/user")
+
+    assert delays == [0.5, 1.0]
+
+
+def test_github_graphql_uses_transport_retry_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = iter(
+        [
+            subprocess.CompletedProcess(["gh"], 1, stdout=b"", stderr=b"network"),
+            subprocess.CompletedProcess(
+                ["gh"], 0, stdout=github_response(200, b'{"data":{}}'), stderr=b""
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "tracebase.github.subprocess.run", lambda *_args, **_kwargs: next(attempts)
+    )
+    monkeypatch.setattr("tracebase.github._sleep", lambda _delay: None)
+
+    assert _GitHub().graphql("query { viewer { login } }").status == 200
+
+
 def test_collection_run_snapshot_count_tracks_written_snapshots() -> None:
     with tempfile.TemporaryDirectory() as directory:
         run = build_github_run(Archive(directory))
