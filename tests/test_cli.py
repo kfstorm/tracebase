@@ -1,5 +1,8 @@
+# ruff: noqa: E501
+
 import base64
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -17,6 +20,17 @@ from tracebase.archive import (
     decode_path_id,
     encode_path_id,
     uuid7,
+)
+from tracebase.github import (
+    _Candidate,
+    _discover,
+    _discovery_queries,
+    _DiscoveryEntry,
+    _GitHub,
+    _hydrate,
+    _Response,
+    _updated_range,
+    collect,
 )
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -37,6 +51,125 @@ def build_run(
     )
 
 
+def build_github_run(archive: Archive) -> CollectionRun:
+    return CollectionRun(
+        archive,
+        "github",
+        "actor-node",
+        CollectionRange.parse("2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
+        collector_version="test",
+        effective_options={},
+    )
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["2026-01-01T00:00:00.1Z", "2026-01-01T00:00:00.000Z"],
+)
+def test_collection_range_rejects_fractional_seconds(endpoint: str) -> None:
+    with pytest.raises(ArchiveError, match="whole seconds"):
+        CollectionRange.parse(endpoint, "2026-01-01T01:00:00Z")
+
+
+def test_github_discovery_uses_one_updated_range_qualifier() -> None:
+    collection_range = CollectionRange.parse(
+        "2026-09-06T00:00:00+08:00", "2026-09-07T00:00:00+08:00"
+    )
+
+    queries = _discovery_queries("actor", collection_range)
+
+    assert len(queries) == 3
+    assert all(query.count("updated:") == 1 for _reason, query in queries)
+    assert all(
+        "updated:2026-09-06T00:00:00+08:00..2026-09-06T23:59:59+08:00" in query
+        for _reason, query in queries
+    )
+
+
+def test_updated_range_maps_half_open_range_to_inclusive_search_range() -> None:
+    collection_range = CollectionRange.parse(
+        "2026-01-01T00:00:00Z", "2026-01-01T00:00:03Z"
+    )
+
+    assert (
+        _updated_range(collection_range.start, collection_range.end)
+        == "updated:2026-01-01T00:00:00Z..2026-01-01T00:00:02Z"
+    )
+
+
+def run_github_cli(
+    archive: Path,
+    fixture_directory: Path,
+    from_text: str = "2026-01-01T00:00:00+00:00",
+    to_text: str = "2026-01-02T00:00:00+00:00",
+    extra_environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tracebase",
+            "collect",
+            "github",
+            "--archive",
+            str(archive),
+            "--from",
+            from_text,
+            "--to",
+            to_text,
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=os.environ
+        | {"PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"]}
+        | (extra_environment or {}),
+    )
+
+
+def write_failure_gh(fixture_directory: Path, mode: str) -> None:
+    (fixture_directory / "gh").write_text(
+        f"""#!/usr/bin/env python3
+import json
+import sys
+
+endpoint = sys.argv[-1]
+if endpoint == "--help":
+    print("gh api help")
+    raise SystemExit(0)
+if endpoint == "/user":
+    body = b'{{"node_id":"actor-node","login":"actor"}}'
+elif {mode!r} == "unresolved" and endpoint.startswith("/search/issues?"):
+    body = b'{{"total_count":1001,"incomplete_results":false,"items":[]}}'
+elif {mode!r} == "later-page" and endpoint.endswith("page=1"):
+    body = b'{{"total_count":1,"incomplete_results":false,"items":[]}}'
+    headers = b"HTTP/1.1 200 OK\\r\\nLink: <next>; rel=\\\"next\\\"\\r\\n\\r\\n"
+    sys.stdout.buffer.write(headers + body)
+    raise SystemExit(0)
+elif {mode!r} == "later-page" and endpoint.endswith("page=2"):
+    body = b'{{"total_count":1,"incomplete_results":true,"items":[]}}'
+elif {mode!r} == "count-mismatch" and endpoint.startswith("/search/issues?"):
+    items = [{{"node_id": str(index), "repository_url": "https://api.github.com/repos/octo/example", "number": index}} for index in range(100)]
+    body = json.dumps({{"total_count": 150, "incomplete_results": False, "items": items}}).encode()
+elif {mode!r} == "duplicate-count" and endpoint.endswith("page=1"):
+    items = [{{"node_id": str(index), "repository_url": "https://api.github.com/repos/octo/example", "number": index}} for index in range(100)]
+    body = json.dumps({{"total_count": 150, "incomplete_results": False, "items": items}}).encode()
+    headers = b"HTTP/1.1 200 OK\\r\\nLink: <next>; rel=\\\"next\\\"\\r\\n\\r\\n"
+    sys.stdout.buffer.write(headers + body)
+    raise SystemExit(0)
+elif {mode!r} == "duplicate-count" and endpoint.endswith("page=2"):
+    items = [{{"node_id": str(index), "repository_url": "https://api.github.com/repos/octo/example", "number": index}} for index in range(130)]
+    body = json.dumps({{"total_count": 150, "incomplete_results": False, "items": items[0:20] + items[100:130]}}).encode()
+else:
+    raise SystemExit(1)
+sys.stdout.buffer.write(b"HTTP/1.1 200 OK\\r\\n\\r\\n" + body)
+""",
+        encoding="utf-8",
+    )
+    (fixture_directory / "gh").chmod(0o755)
+
+
 class TestCollectionCli:
     def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -46,6 +179,29 @@ class TestCollectionCli:
             capture_output=True,
             check=False,
         )
+
+    @pytest.mark.parametrize("source", ["github", "opencode"])
+    def test_fractional_range_fails_before_staging(self, source: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = [
+                "collect",
+                source,
+                "--archive",
+                directory,
+                "--from",
+                "2026-01-01T00:00:00.1Z",
+                "--to",
+                "2026-01-01T01:00:00Z",
+            ]
+            if source == "opencode":
+                arguments.extend(["--instance-id", "instance-1"])
+
+            result = self.run_cli(*arguments)
+
+            assert result.returncode == 1
+            assert result.stdout == ""
+            assert "whole seconds" in result.stderr
+            assert not (Path(directory) / ".staging").exists()
 
     def test_invalid_range_fails_before_staging(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -415,3 +571,360 @@ def test_publish_rechecks_overlap_for_runs_staged_before_another_publish() -> No
 
         assert second.staging.exists()
         assert not (Path(directory) / "runs" / second.run_id).exists()
+
+
+def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = {"node_id": "actor-node", "login": "actor"}
+    item = {
+        "node_id": "pr-node",
+        "number": 7,
+        "repository_url": "https://api.github.com/repos/octo/example",
+        "pull_request": {},
+    }
+    responses: dict[str, tuple[bytes, dict[str, str]]] = {
+        "/user": (json.dumps(actor).encode(), {}),
+        "/repos/octo/example/issues/7": (
+            json.dumps(
+                {"node_id": "pr-node", "user": actor, "pull_request": {}}
+            ).encode(),
+            {},
+        ),
+        "/repos/octo/example/issues/7/comments?per_page=100&page=1": (
+            b'[{"user":{"node_id":"actor-node"}}]',
+            {"link": '<next>; rel="next"'},
+        ),
+        "/repos/octo/example/issues/7/comments?per_page=100&page=2": (b"[]", {}),
+        "/repos/octo/example/issues/7/timeline?per_page=100&page=1": (b"[]", {}),
+        "/repos/octo/example/pulls/7": (b'{"node_id":"pr-node"}', {}),
+        "/repos/octo/example/pulls/7/reviews?per_page=100&page=1": (
+            b'[{"user":{"node_id":"actor-node"},"submitted_at":"2026-01-01T00:00:00Z"}]',
+            {},
+        ),
+        "/repos/octo/example/pulls/7/comments?per_page=100&page=1": (b"[]", {}),
+    }
+
+    def request(
+        _self: object, endpoint: str, accept: str = "application/vnd.github+json"
+    ) -> _Response:
+        if endpoint.startswith("/search/issues?"):
+            return _Response(
+                json.dumps({"total_count": 1, "items": [item]}).encode(), 200, {}
+            )
+        body, headers = responses[endpoint]
+        if accept == "application/vnd.github.diff":
+            assert endpoint == "/repos/octo/example/pulls/7"
+            return _Response(b"diff --git a/a b/a\n", 200, {})
+        return _Response(body, 200, headers)
+
+    monkeypatch.setattr("tracebase.github._GitHub.request", request)
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+
+        coverage = collect(run)
+        published = run.publish(coverage)
+        snapshot = next((published / "snapshots/pull-request").iterdir())
+        manifest = json.loads((snapshot / "snapshot.json").read_text())
+
+        assert coverage["selected_artifacts"] == 1
+        assert coverage["discovery_matrix_version"] == 1
+        assert [entry["reason"] for entry in coverage["queries"]] == [
+            "authorship",
+            "ordinary_comment",
+            "submitted_review",
+        ]
+        assert manifest["selection_provenance"][0]["eligibility"] == [
+            "authorship",
+            "ordinary_comment",
+            "submitted_review",
+        ]
+        assert {
+            entry["reason"]
+            for entry in manifest["selection_provenance"][0]["discovery_query_entries"]
+        } == {"authorship", "ordinary_comment", "submitted_review"}
+        assert all(
+            entry["partition"]
+            == {
+                "from": "2026-01-01T00:00:00Z",
+                "to": "2026-01-02T00:00:00Z",
+            }
+            for entry in manifest["selection_provenance"][0]["discovery_query_entries"]
+        )
+        assert (snapshot / "comments.002.json").read_bytes() == b"[]"
+        assert (snapshot / "timeline.001.json").exists()
+        assert (snapshot / "reviews.001.json").exists()
+        assert (snapshot / "review-comments.001.json").exists()
+        assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
+        assert (
+            json.loads((published / "run.json").read_text())["snapshots"][0][
+                "source_kind"
+            ]
+            == "github"
+        )
+
+
+def test_github_collect_failure_keeps_run_unpublished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def request(_self: object, _endpoint: str, _accept: str = "") -> _Response:
+        raise ArchiveError("GitHub request failed")
+
+    monkeypatch.setattr("tracebase.github._GitHub.request", request)
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+
+        with pytest.raises(ArchiveError, match="request failed"):
+            collect(run)
+
+        assert run.staging.exists()
+        assert not (Path(directory) / "runs").exists()
+
+
+def test_github_hydration_keeps_discovery_selection_when_payload_disagrees() -> None:
+    class HydrationFixture(_GitHub):
+        def request(self, endpoint: str, _accept: str = "") -> _Response:
+            if endpoint.endswith("/issues/1"):
+                body = b'{"node_id":"issue-node","user":{"node_id":"other"}}'
+            else:
+                body = b"[]"
+            return _Response(body, 200, {})
+
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+        _hydrate(
+            run,
+            HydrationFixture(),
+            _Candidate(
+                "issue-node",
+                "octo/example",
+                1,
+                "issue",
+                (
+                    _DiscoveryEntry(
+                        "authorship",
+                        "author:actor updated:>=x updated:<y",
+                        "x",
+                        "y",
+                    ),
+                ),
+            ),
+        )
+
+        published = run.publish({})
+        snapshot = next((published / "snapshots/issue").iterdir())
+        assert json.loads((snapshot / "snapshot.json").read_text())[
+            "selection_provenance"
+        ][0]["eligibility"] == ["authorship"]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_github_cli_uses_synthetic_gh_and_publishes_atomically(
+    fail: bool, tmp_path: Path
+) -> None:
+    gh = tmp_path / "gh"
+    gh.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import sys
+
+endpoint = sys.argv[-1]
+if endpoint == "--help":
+    print("gh api help")
+    raise SystemExit(0)
+if {fail!r}:
+    raise SystemExit(1)
+if endpoint == "/user":
+    body = json.dumps({{"node_id": "actor-node", "login": "actor"}}).encode()
+elif endpoint.startswith("/search/issues?"):
+    forbidden = ("mentions%3A", "assignee%3A", "review-requested%3A", "involves%3A", "commits%3A", "commit%3A")
+    if any(term in endpoint for term in forbidden):
+        raise SystemExit(1)
+    body = b'{{"total_count":0,"incomplete_results":false,"items":[]}}'
+else:
+    raise SystemExit(2)
+headers = b"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n"
+sys.stdout.buffer.write(headers + body)
+""",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    archive = tmp_path / "archive"
+
+    result = run_github_cli(archive, tmp_path)
+
+    if fail:
+        assert result.returncode == 1
+        assert not (archive / "runs").exists()
+    else:
+        assert result.returncode == 0
+        run = next((archive / "runs").iterdir())
+        manifest = json.loads((run / "run.json").read_text())
+        assert manifest["source"] == {"kind": "github", "scope_id": "actor-node"}
+        assert manifest["coverage"]["discovery_matrix_version"] == 1
+        assert manifest["snapshots"] == []
+        assert [entry["reason"] for entry in manifest["coverage"]["queries"]] == [
+            "authorship",
+            "ordinary_comment",
+            "submitted_review",
+        ]
+
+
+@pytest.mark.parametrize("capability", ["legacy", "modern"])
+def test_github_cli_hydrates_eligible_pr_from_synthetic_gh(
+    capability: str, tmp_path: Path
+) -> None:
+    gh = tmp_path / "gh"
+    gh.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+endpoint = sys.argv[-1]
+capability = os.environ["TRACEBASE_FIXTURE_CAPABILITY"]
+if endpoint == "--help":
+    print("gh api help" + (" --allow-escape-sequences" if capability == "modern" else ""))
+    raise SystemExit(0)
+has_escape_flag = "--allow-escape-sequences" in sys.argv
+is_diff = any("application/vnd.github.diff" in arg for arg in sys.argv)
+if has_escape_flag != (capability == "modern" and is_diff):
+    raise SystemExit(1)
+assert "X-GitHub-Api-Version: 2022-11-28" in sys.argv
+headers = b"HTTP/1.1 200 OK\\r\\n\\r\\n"
+item = {"node_id": "pr-node", "number": 7, "repository_url": "https://api.github.com/repos/octo/example", "pull_request": {}}
+if endpoint == "/user": body = b'{"node_id":"actor-node","login":"actor"}'
+elif endpoint.startswith("/search/issues?"): body = json.dumps({"total_count": 1, "incomplete_results": False, "items": [item]}).encode()
+elif endpoint == "/repos/octo/example/issues/7": body = b'{"node_id":"pr-node","user":{"node_id":"actor-node"},"pull_request":{}}'
+elif endpoint.endswith("/issues/7/comments?per_page=100&page=1"):
+    body = b'[{"user":{"node_id":"actor-node"}}]'
+    headers = b"HTTP/1.1 200 OK\\r\\nLink: <next>; rel=\\\"next\\\"\\r\\n\\r\\n"
+elif endpoint.endswith("/issues/7/comments?per_page=100&page=2"): body = b"[]"
+elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1") or endpoint.endswith("/pulls/7/comments?per_page=100&page=1"): body = b"[]"
+elif endpoint.endswith("/pulls/7/reviews?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"},"submitted_at":"x"}]'
+elif endpoint == "/repos/octo/example/pulls/7" and any("application/vnd.github.diff" in arg for arg in sys.argv): body = b"diff --git a/a b/a\\n"
+elif endpoint == "/repos/octo/example/pulls/7": body = b'{"node_id":"pr-node"}'
+else: raise SystemExit(2)
+sys.stdout.buffer.write(headers + body)
+""",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    archive = tmp_path / "archive"
+    result = run_github_cli(
+        archive,
+        tmp_path,
+        extra_environment={"TRACEBASE_FIXTURE_CAPABILITY": capability},
+    )
+    assert result.returncode == 0
+    run = next((archive / "runs").iterdir())
+    snapshot = next((run / "snapshots/pull-request").iterdir())
+    assert (snapshot / "comments.002.json").read_bytes() == b"[]"
+    assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
+    assert json.loads((snapshot / "snapshot.json").read_text())["selection_provenance"][
+        0
+    ]["eligibility"] == ["authorship", "ordinary_comment", "submitted_review"]
+
+
+@pytest.mark.parametrize(
+    "mode", ["later-page", "unresolved", "count-mismatch", "duplicate-count"]
+)
+def test_github_cli_source_failures_keep_staging_unpublished(
+    mode: str, tmp_path: Path
+) -> None:
+    write_failure_gh(tmp_path, mode)
+    archive = tmp_path / "archive"
+    result = run_github_cli(
+        archive,
+        tmp_path,
+        to_text=(
+            "2026-01-01T00:00:01+00:00"
+            if mode == "unresolved"
+            else "2026-01-02T00:00:00+00:00"
+        ),
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert (
+        "incomplete" in result.stderr
+        or "1,000" in result.stderr
+        or "pagination" in result.stderr
+    )
+    assert not (archive / "runs").exists()
+    assert len(list((archive / ".staging").iterdir())) == 1
+
+
+def test_github_discovery_partitions_over_limit_results() -> None:
+    class SearchFixture(_GitHub):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def request(self, _endpoint: str, _accept: str = "") -> _Response:
+            self.calls += 1
+            total = 1001 if self.calls % 3 == 1 else 0
+            return _Response(
+                json.dumps(
+                    {"total_count": total, "incomplete_results": False, "items": []}
+                ).encode(),
+                200,
+                {},
+                f"2026-01-01T00:00:0{self.calls}Z",
+            )
+
+    fixture = SearchFixture()
+    candidates, coverage = _discover(
+        fixture,
+        "actor",
+        CollectionRange.parse("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:02+00:00"),
+    )
+
+    assert candidates == {}
+    assert len(coverage) == 9
+    assert sum(entry["disposition"] == "split" for entry in coverage) == 3
+    assert all(
+        entry["pagination_complete"]
+        for entry in coverage
+        if entry["disposition"] == "complete"
+    )
+    authorship_leaves = [
+        entry
+        for entry in coverage
+        if entry["reason"] == "authorship" and entry["disposition"] == "complete"
+    ]
+    assert [entry["partition"] for entry in authorship_leaves] == [
+        {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T00:00:01Z"},
+        {"from": "2026-01-01T00:00:01Z", "to": "2026-01-01T00:00:02Z"},
+    ]
+    assert [entry["query"] for entry in authorship_leaves] == [
+        "author:actor updated:2026-01-01T00:00:00Z..2026-01-01T00:00:00Z",
+        "author:actor updated:2026-01-01T00:00:01Z..2026-01-01T00:00:01Z",
+    ]
+
+
+def test_github_discovery_rejects_incomplete_later_page() -> None:
+    class IncompleteFixture(_GitHub):
+        calls = 0
+
+        def request(self, endpoint: str, _accept: str = "") -> _Response:
+            self.calls += 1
+            if self.calls == 1:
+                return _Response(
+                    b'{"total_count":1,"incomplete_results":false,"items":[]}',
+                    200,
+                    {"link": '<next>; rel="next"'},
+                )
+            return _Response(
+                b'{"total_count":1,"incomplete_results":true,"items":[]}',
+                200,
+                {},
+            )
+
+    with pytest.raises(ArchiveError, match="incomplete"):
+        _discover(
+            IncompleteFixture(),
+            "actor",
+            CollectionRange.parse(
+                "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"
+            ),
+        )

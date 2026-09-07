@@ -37,7 +37,7 @@ An all-or-nothing manual observation of a Collection Range that publishes its Sn
 _Avoid_: Partial collection, background sync
 
 **Collection Range**:
-The required half-open interval `[from, to)` supplied to a Collection Run as ISO 8601 timestamps with explicit offsets. The endpoints are parsed as instants, must satisfy `from < to`, and successful ranges are compared within the same logical source to prevent unintended overlap.
+The required half-open interval `[from, to)` supplied to a Collection Run as ISO 8601 timestamps with explicit offsets and whole-second precision. The endpoints are parsed as instants, must satisfy `from < to`, and successful ranges are compared within the same logical source to prevent unintended overlap.
 _Avoid_: Run date, observation time
 
 **Observation Window**:

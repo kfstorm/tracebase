@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
+from .github import _actor, _GitHub
+from .github import collect as collect_github
 from .opencode import collect as collect_opencode
 
 
@@ -59,9 +61,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         else:
-            # The future GitHub collector resolves its scope identity.
-            archive.create_staging(run_id)
-        raise ArchiveError(f"{arguments.source} collector is not implemented")
+            # GitHub scope identity is its authenticated actor's stable node ID.
+            scope_id, login = _actor(_GitHub())
+            run = CollectionRun(
+                archive,
+                "github",
+                scope_id,
+                collection_range,
+                collector_version="0.1.0",
+                effective_options={"actor_login": login},
+                run_id=run_id,
+            )
+            coverage = collect_github(run, (scope_id, login))
+            published = run.publish(coverage)
+            print(
+                f"{run.run_id}  {coverage['selected_artifacts']} snapshots  {published}"
+            )
+            return 0
     except ArchiveError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
