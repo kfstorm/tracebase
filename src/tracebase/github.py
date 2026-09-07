@@ -253,7 +253,6 @@ def _repository_parts(repository: str) -> tuple[str, str]:
 _REVIEW_COMMENT_FIELDS = """
               nodes {
                 id
-                databaseId
                 body
                 path
                 line

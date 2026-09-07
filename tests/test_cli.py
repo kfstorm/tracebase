@@ -791,8 +791,8 @@ def test_github_collect_preserves_review_thread_source_native_responses(
                                             {"id": "comment-2", "body": "second"},
                                         ],
                                         "pageInfo": {
-                                            "hasNextPage": False,
-                                            "endCursor": None,
+                                            "hasNextPage": True,
+                                            "endCursor": "comment-cursor-1",
                                         },
                                     },
                                 },
@@ -828,8 +828,9 @@ def test_github_collect_preserves_review_thread_source_native_responses(
         },
         separators=(",", ":"),
     ).encode()
+    nested_comment_page = b'{"data":{"node":{"id":"thread-resolved-current","comments":{"nodes":[{"id":"comment-3","body":"third"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}'
     thread_page_two = b'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
-    graphql_responses = iter(
+    outer_graphql_responses = iter(
         [
             _Response(thread_page_one, 200, {}),
             _Response(thread_page_two, 200, {}),
@@ -839,8 +840,10 @@ def test_github_collect_preserves_review_thread_source_native_responses(
     request = build_github_request(item, responses)
 
     def graphql(_self: object, query: str) -> _Response:
+        if "PullRequestReviewThreadComments" in query:
+            return _Response(nested_comment_page, 200, {})
         assert "reviewThreads" in query
-        return next(graphql_responses)
+        return next(outer_graphql_responses)
 
     monkeypatch.setattr("tracebase.github._GitHub.request", request)
     monkeypatch.setattr("tracebase.github._GitHub.graphql", graphql)
@@ -866,6 +869,9 @@ def test_github_collect_preserves_review_thread_source_native_responses(
 
         assert (snapshot / "review-threads.001.json").read_bytes() == thread_page_one
         assert (snapshot / "review-threads.002.json").read_bytes() == thread_page_two
+        assert (
+            snapshot / "review-thread-comments.001.002.json"
+        ).read_bytes() == nested_comment_page
         thread_entries = [
             entry
             for entry in manifest["evidence_files"]
@@ -880,6 +886,15 @@ def test_github_collect_preserves_review_thread_source_native_responses(
             entry["request"]["api"] == "GitHub GraphQL API" for entry in thread_entries
         )
         assert all("GH_TOKEN" not in json.dumps(entry) for entry in thread_entries)
+        supplemental_entry = next(
+            entry
+            for entry in manifest["evidence_files"]
+            if entry["path"] == "review-thread-comments.001.002.json"
+        )
+        assert supplemental_entry["request"]["method"] == "POST"
+        assert json.loads(nested_comment_page)["data"]["node"]["id"] == (
+            "thread-resolved-current"
+        )
         assert json.loads((snapshot / "review-threads.001.json").read_bytes())["data"][
             "repository"
         ]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"] == [
