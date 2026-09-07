@@ -103,6 +103,8 @@ def test_rich_progress_renders_complete_lifecycle_after_removed_task() -> None:
     output = stream.getvalue()
     assert "Discovering GitHub artifacts" in output
     assert "Hydrating GitHub artifacts" in output
+    assert "completed" in output
+    assert "octo/example#7" in output
     assert "Publishing archive" in output
     assert "Empty phase" in output
 
