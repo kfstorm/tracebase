@@ -211,9 +211,7 @@ def _actor(github: _GitHub) -> tuple[str, str]:
 def _discovery_queries(
     login: str, collection_range: CollectionRange
 ) -> list[tuple[str, str]]:
-    updated = (
-        f"updated:>={collection_range.from_text} updated:<{collection_range.to_text}"
-    )
+    updated = f"updated:{collection_range.from_text}..{collection_range.to_text}"
     return [
         ("authorship", f"author:{login} {updated}"),
         ("ordinary_comment", f"commenter:{login} {updated}"),
@@ -244,12 +242,11 @@ def _discover(  # noqa: PLR0915
             start_text = _timestamp(start)
             end_text = _timestamp(end)
             original_range = (
-                f"updated:>={collection_range.from_text} "
-                f"updated:<{collection_range.to_text}"
+                f"updated:{collection_range.from_text}..{collection_range.to_text}"
             )
             query = base_query.replace(
                 original_range,
-                f"updated:>={start_text} updated:<{end_text}",
+                f"updated:{start_text}..{end_text}",
             )
             discovery_entry = _DiscoveryEntry(name, query, start_text, end_text)
             endpoint = "/search/issues?" + urlencode(

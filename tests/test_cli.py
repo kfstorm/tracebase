@@ -24,6 +24,7 @@ from tracebase.archive import (
 from tracebase.github import (
     _Candidate,
     _discover,
+    _discovery_queries,
     _DiscoveryEntry,
     _GitHub,
     _hydrate,
@@ -67,6 +68,21 @@ def build_github_run(archive: Archive) -> CollectionRun:
 def test_collection_range_rejects_fractional_seconds(endpoint: str) -> None:
     with pytest.raises(ArchiveError, match="whole seconds"):
         CollectionRange.parse(endpoint, "2026-01-01T01:00:00Z")
+
+
+def test_github_discovery_uses_one_updated_range_qualifier() -> None:
+    collection_range = CollectionRange.parse(
+        "2026-09-06T00:00:00+08:00", "2026-09-07T00:00:00+08:00"
+    )
+
+    queries = _discovery_queries("actor", collection_range)
+
+    assert len(queries) == 3
+    assert all(query.count("updated:") == 1 for _reason, query in queries)
+    assert all(
+        "updated:2026-09-06T00:00:00+08:00..2026-09-07T00:00:00+08:00" in query
+        for _reason, query in queries
+    )
 
 
 def run_github_cli(
