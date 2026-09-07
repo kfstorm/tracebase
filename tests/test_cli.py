@@ -37,6 +37,14 @@ from tracebase.progress import ProgressEvent
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
+class RecordingReporter:
+    def __init__(self) -> None:
+        self.events: list[ProgressEvent] = []
+
+    def emit(self, event: ProgressEvent) -> None:
+        self.events.append(event)
+
+
 def build_run(
     archive: Archive,
     from_text: str = "2026-01-01T00:00:00+00:00",
@@ -622,16 +630,17 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
     monkeypatch.setattr("tracebase.github._GitHub.request", request)
     with tempfile.TemporaryDirectory() as directory:
         run = build_github_run(Archive(directory))
-        events: list[ProgressEvent] = []
+        reporter = RecordingReporter()
 
-        coverage = collect(run, progress=events.append)
-        published = run.publish(coverage)
+        result = collect(run, reporter=reporter)
+        published = run.publish(result.coverage)
         snapshot = next((published / "snapshots/pull-request").iterdir())
         manifest = json.loads((snapshot / "snapshot.json").read_text())
 
-        assert coverage["selected_artifacts"] == 1
-        assert coverage["discovery_matrix_version"] == 1
-        assert [entry["reason"] for entry in coverage["queries"]] == [
+        assert result.snapshot_count == 1
+        assert result.coverage["selected_artifacts"] == 1
+        assert result.coverage["discovery_matrix_version"] == 1
+        assert [entry["reason"] for entry in result.coverage["queries"]] == [
             "authorship",
             "ordinary_comment",
             "submitted_review",
@@ -664,22 +673,20 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
             ]
             == "github"
         )
-        assert [(event.phase, event.kind) for event in events] == [
-            ("discover", "started"),
-            ("discover", "page"),
-            ("discover", "candidate_found"),
-            ("discover", "page"),
-            ("discover", "page"),
-            ("discover", "completed"),
-            ("hydrate", "started"),
-            ("hydrate", "item_started"),
-            ("hydrate", "item_completed"),
-            ("hydrate", "completed"),
+        assert [(event.task_id, event.kind) for event in reporter.events] == [
+            ("github.discover", "start"),
+            ("github.discover", "update"),
+            ("github.discover", "update"),
+            ("github.discover", "update"),
+            ("github.discover", "finish"),
+            ("github.hydrate", "start"),
+            ("github.hydrate", "update"),
+            ("github.hydrate", "update"),
+            ("github.hydrate", "finish"),
         ]
-        assert events[1].name == "authorship"
-        assert events[1].completed == 1
-        assert events[7].total == 1
-        assert events[7].current == "octo/example#7"
+        assert reporter.events[1].message == "authorship: page 1, 1 candidates"
+        assert reporter.events[6].total == 1
+        assert reporter.events[6].current == "octo/example#7"
 
 
 def test_github_collect_failure_keeps_run_unpublished(

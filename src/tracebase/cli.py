@@ -5,18 +5,46 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
+from .collector import CollectionResult
 from .github import _actor, _GitHub
 from .github import collect as collect_github
 from .opencode import collect as collect_opencode
-from .progress import ProgressEvent, RichProgress
+from .progress import (
+    LineProgressReporter,
+    ProgressEvent,
+    ProgressReporter,
+    RichProgressReporter,
+)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
     def error(self, _message: str) -> Never:
         raise ArchiveError("invalid command arguments")
+
+
+def _publish(
+    run: CollectionRun, result: CollectionResult, reporter: ProgressReporter
+) -> Path:
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
+            task_id="publish",
+            label="Publishing archive",
+        )
+    )
+    published = run.publish(result.coverage)
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="publish",
+            message="Archive published",
+        )
+    )
+    return published
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -43,7 +71,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     archive = Archive(arguments.archive)
     run_id = archive.new_run_id()
 
-    with RichProgress(sys.stderr) as progress:
+    reporter = (
+        RichProgressReporter(sys.stderr)
+        if sys.stderr.isatty()
+        else LineProgressReporter(sys.stderr)
+    )
+    with reporter:
         if arguments.source == "opencode":
             scope_id = arguments.instance_id
             run = CollectionRun(
@@ -55,9 +88,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 effective_options={"instance_id": scope_id},
                 run_id=run_id,
             )
-            snapshot_count = collect_opencode(run, progress=progress.emit)
+            result = collect_opencode(run, reporter)
+            published = _publish(run, result, reporter)
             print(
-                f"collected run {run.run_id} with {snapshot_count} snapshots "
+                f"collected run {run.run_id} with {result.snapshot_count} snapshots "
                 f"at {archive.root / 'runs' / run.run_id}"
             )
             return 0
@@ -73,13 +107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             effective_options={"actor_login": login},
             run_id=run_id,
         )
-        coverage = collect_github(run, (scope_id, login), progress=progress.emit)
-        progress.emit(
-            ProgressEvent(phase="publish", kind="started", detail="Publishing archive")
-        )
-        published = run.publish(coverage)
-        progress.emit(
-            ProgressEvent(phase="publish", kind="completed", detail="Archive published")
-        )
-        print(f"{run.run_id}  {coverage['selected_artifacts']} snapshots  {published}")
+        result = collect_github(run, (scope_id, login), reporter=reporter)
+        published = _publish(run, result, reporter)
+        print(f"{run.run_id}  {result.snapshot_count} snapshots  {published}")
         return 0

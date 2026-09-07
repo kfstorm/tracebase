@@ -11,7 +11,8 @@ from typing import Any
 from urllib.parse import urlencode
 
 from .archive import ArchiveError, CollectionRange, CollectionRun, Snapshot
-from .progress import ProgressCallback, ProgressEvent
+from .collector import CollectionResult
+from .progress import NULL_PROGRESS_REPORTER, ProgressEvent, ProgressReporter
 
 _API_ACCEPT = "application/vnd.github+json"
 _TIMELINE_ACCEPT = "application/vnd.github+json"
@@ -235,10 +236,11 @@ def _discover(  # noqa: PLR0915
     github: _GitHub,
     login: str,
     collection_range: CollectionRange,
-    progress: ProgressCallback | None = None,
+    reporter: ProgressReporter = NULL_PROGRESS_REPORTER,
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]]]:
     candidates: dict[str, _Candidate] = {}
     coverage_queries: list[dict[str, Any]] = []
+    pages_processed = 0
     for name, base_query in _discovery_queries(login, collection_range):
         partitions = [(collection_range.start, collection_range.end)]
         while partitions:
@@ -258,16 +260,6 @@ def _discover(  # noqa: PLR0915
             )
             response = github.request(_page_endpoint(endpoint, 1))
             total_count, items = _search_response(github.json(response))
-            if progress is not None:
-                progress(
-                    ProgressEvent(
-                        phase="discover",
-                        kind="page",
-                        name=name,
-                        completed=1,
-                        detail=f"1 page - {len(candidates)} candidates",
-                    )
-                )
             if total_count > _SEARCH_RESULT_LIMIT:
                 if end - start <= _MINIMUM_PARTITION:
                     raise ArchiveError(
@@ -289,6 +281,14 @@ def _discover(  # noqa: PLR0915
                     }
                 )
                 partitions[0:0] = [(start, midpoint), (midpoint, end)]
+                reporter.emit(
+                    ProgressEvent(
+                        kind="update",
+                        task_id="github.discover",
+                        completed=pages_processed,
+                        message=f"{name}: partitioned page 1 ({total_count} results)",
+                    )
+                )
                 continue
             page = 1
             result_count = 0
@@ -297,16 +297,6 @@ def _discover(  # noqa: PLR0915
                 if page > 1:
                     response = github.request(_page_endpoint(endpoint, page))
                 total_count, items = _search_response(github.json(response))
-                if progress is not None and page > 1:
-                    progress(
-                        ProgressEvent(
-                            phase="discover",
-                            kind="page",
-                            name=name,
-                            completed=page,
-                            detail=f"{page} pages - {len(candidates)} candidates",
-                        )
-                    )
                 if total_count > _SEARCH_RESULT_LIMIT:
                     raise ArchiveError(
                         "GitHub discovery exceeded the 1,000 result limit"
@@ -336,15 +326,6 @@ def _discover(  # noqa: PLR0915
                             object_kind,
                             (discovery_entry,),
                         )
-                        if progress is not None:
-                            progress(
-                                ProgressEvent(
-                                    phase="discover",
-                                    kind="candidate_found",
-                                    current=f"{repository}#{number}",
-                                    completed=len(candidates),
-                                )
-                            )
                     elif (prior.repository, prior.number, prior.object_kind) == (
                         repository,
                         number,
@@ -368,6 +349,15 @@ def _discover(  # noqa: PLR0915
                     result_count += 1
                     if source_id not in result_source_ids:
                         result_source_ids.append(source_id)
+                pages_processed += 1
+                reporter.emit(
+                    ProgressEvent(
+                        kind="update",
+                        task_id="github.discover",
+                        completed=pages_processed,
+                        message=f"{name}: page {page}, {len(candidates)} candidates",
+                    )
+                )
                 if not _has_next(response):
                     if total_count > len(result_source_ids):
                         raise ArchiveError("GitHub discovery pagination incomplete")
@@ -526,78 +516,76 @@ def _as_list(value: dict[str, Any] | list[Any]) -> list[Any]:
 def collect(
     run: CollectionRun,
     actor: tuple[str, str] | None = None,
-    progress: ProgressCallback | None = None,
-) -> dict[str, Any]:
-    """Discover and hydrate all eligible Artifacts, returning observed Coverage."""
+    reporter: ProgressReporter = NULL_PROGRESS_REPORTER,
+) -> CollectionResult:
+    """Discover and hydrate all eligible Artifacts."""
 
     github = _GitHub()
     actor_id, login = actor or _actor(github)
-    if progress is not None:
-        progress(
-            ProgressEvent(
-                phase="discover",
-                kind="started",
-                detail="Discovering GitHub artifacts",
-            )
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
+            task_id="github.discover",
+            label="Discovering GitHub artifacts",
         )
-    candidates, discovery = _discover(
-        github, login, run.collection_range, progress=progress
     )
-    if progress is not None:
-        progress(
-            ProgressEvent(
-                phase="discover",
-                kind="completed",
-                detail=f"{len(candidates)} candidates",
-            )
+    candidates, discovery = _discover(github, login, run.collection_range, reporter)
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="github.discover",
+            message=f"{len(candidates)} candidates",
         )
-        progress(
-            ProgressEvent(
-                phase="hydrate",
-                kind="started",
-                total=len(candidates),
-                detail="Hydrating GitHub artifacts",
-            )
+    )
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
+            task_id="github.hydrate",
+            label="Hydrating GitHub artifacts",
+            total=len(candidates),
         )
+    )
     selected = 0
     for candidate in candidates.values():
         current = f"{candidate.repository}#{candidate.number}"
-        if progress is not None:
-            progress(
-                ProgressEvent(
-                    phase="hydrate",
-                    kind="item_started",
-                    current=current,
-                    total=len(candidates),
-                )
-            )
-        _hydrate(run, github, candidate)
-        selected += 1
-        if progress is not None:
-            progress(
-                ProgressEvent(
-                    phase="hydrate",
-                    kind="item_completed",
-                    completed=selected,
-                    total=len(candidates),
-                    current=current,
-                )
-            )
-    if progress is not None:
-        progress(
+        reporter.emit(
             ProgressEvent(
-                phase="hydrate",
-                kind="completed",
+                kind="update",
+                task_id="github.hydrate",
                 completed=selected,
                 total=len(candidates),
-                detail=f"{selected} artifacts",
+                current=current,
             )
         )
-    return {
-        "actor": {"node_id": actor_id, "login": login},
-        "discovery_matrix_version": _DISCOVERY_MATRIX_VERSION,
-        "queries": discovery,
-        "permission_boundary": "responses visible to the authenticated GitHub actor",
-        "pagination_complete": True,
-        "selected_artifacts": selected,
-    }
+        _hydrate(run, github, candidate)
+        selected += 1
+        reporter.emit(
+            ProgressEvent(
+                kind="update",
+                task_id="github.hydrate",
+                completed=selected,
+                total=len(candidates),
+                current=current,
+            )
+        )
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="github.hydrate",
+            completed=selected,
+            message=f"{selected} artifacts",
+        )
+    )
+    return CollectionResult(
+        coverage={
+            "actor": {"node_id": actor_id, "login": login},
+            "discovery_matrix_version": _DISCOVERY_MATRIX_VERSION,
+            "queries": discovery,
+            "permission_boundary": (
+                "responses visible to the authenticated GitHub actor"
+            ),
+            "pagination_complete": True,
+            "selected_artifacts": selected,
+        },
+        snapshot_count=selected,
+    )

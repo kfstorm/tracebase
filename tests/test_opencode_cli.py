@@ -16,6 +16,14 @@ PROJECT_ROOT = Path(__file__).parents[1]
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 
 
+class RecordingReporter:
+    def __init__(self) -> None:
+        self.events: list[ProgressEvent] = []
+
+    def emit(self, event: ProgressEvent) -> None:
+        self.events.append(event)
+
+
 class TestOpenCodeCollectionCli:
     def run_cli(
         self,
@@ -150,7 +158,8 @@ else:
             result = self.run_cli(root / "archive", self.make_fake_opencode(root))
 
             assert result.returncode == 0
-            assert result.stderr == ""
+            assert "START  Discovering OpenCode sessions" in result.stderr
+            assert "DONE   Publishing archive: Archive published" in result.stderr
             assert result.stdout.count("\n") == 1
             published = next((root / "archive" / "runs").iterdir())
             run_manifest = json.loads((published / "run.json").read_text())
@@ -211,22 +220,24 @@ else:
             collector_version="test",
             effective_options={},
         )
-        events: list[ProgressEvent] = []
+        reporter = RecordingReporter()
 
-        assert collect(run, progress=events.append) == 1
+        result = collect(run, reporter=reporter)
 
-        assert [(event.phase, event.kind) for event in events] == [
-            ("discover", "started"),
-            ("discover", "completed"),
-            ("hydrate", "started"),
-            ("hydrate", "item_started"),
-            ("hydrate", "item_completed"),
-            ("hydrate", "completed"),
-            ("publish", "started"),
-            ("publish", "completed"),
+        assert result.snapshot_count == 1
+        assert result.coverage["selected_session_count"] == 1
+        assert run.staging.exists()
+        assert not (tmp_path / "archive" / "runs").exists()
+        assert [(event.task_id, event.kind) for event in reporter.events] == [
+            ("opencode.discover", "start"),
+            ("opencode.discover", "finish"),
+            ("opencode.hydrate", "start"),
+            ("opencode.hydrate", "update"),
+            ("opencode.hydrate", "update"),
+            ("opencode.hydrate", "finish"),
         ]
-        assert events[3].current == "session-1"
-        assert events[3].total == 1
+        assert reporter.events[3].current == "session-1"
+        assert reporter.events[3].total == 1
 
     def test_empty_range_publishes_manifest_only_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

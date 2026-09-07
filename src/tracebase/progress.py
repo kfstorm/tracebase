@@ -1,10 +1,11 @@
-"""Progress events and the terminal presentation for Collection Runs."""
+"""Progress events and presentation reporters for Collection Runs."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TextIO
+from datetime import UTC, datetime
+from typing import Any, Protocol, TextIO
 
 from rich.console import Console
 from rich.progress import (
@@ -19,26 +20,120 @@ from rich.progress import (
 
 @dataclass(frozen=True, slots=True)
 class ProgressEvent:
-    """A source-independent update emitted by a collector."""
+    """A source-independent update in a task's lifecycle."""
 
-    phase: str
     kind: str
-    name: str = ""
-    current: str = ""
+    task_id: str
+    label: str = ""
+    parent_task_id: str | None = None
     completed: int | None = None
     total: int | None = None
-    detail: str = ""
+    current: str = ""
+    message: str = ""
 
 
-ProgressCallback = Callable[[ProgressEvent], None]
+class ProgressReporter(Protocol):
+    def emit(self, event: ProgressEvent) -> None: ...
 
 
-class RichProgress:
-    """Render collector events only when the destination is an interactive TTY."""
+class NullProgressReporter:
+    """Discard progress events for callers that do not need presentation."""
+
+    def emit(self, _event: ProgressEvent) -> None:
+        pass
+
+
+NULL_PROGRESS_REPORTER = NullProgressReporter()
+
+
+ProgressClock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+class LineProgressReporter:
+    """Write one operational progress line for every lifecycle event."""
+
+    def __init__(self, stream: TextIO, clock: ProgressClock = _utc_now) -> None:
+        self._stream = stream
+        self._clock = clock
+        self._tasks: dict[str, ProgressEvent] = {}
+
+    def __enter__(self) -> LineProgressReporter:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        pass
+
+    def emit(self, event: ProgressEvent) -> None:
+        if event.kind == "start":
+            self._tasks[event.task_id] = event
+            self._write("START", event, self._start_status(event))
+        elif event.kind == "update":
+            task = self._tasks.get(event.task_id)
+            if task is not None:
+                self._tasks[event.task_id] = ProgressEvent(
+                    kind="start",
+                    task_id=task.task_id,
+                    label=task.label,
+                    parent_task_id=task.parent_task_id,
+                    completed=(
+                        event.completed
+                        if event.completed is not None
+                        else task.completed
+                    ),
+                    total=event.total if event.total is not None else task.total,
+                    current=event.current,
+                    message=event.message,
+                )
+                self._write("UPDATE", event, self._update_status(task, event))
+        elif event.kind == "finish":
+            task = self._tasks.pop(event.task_id, None)
+            if task is not None:
+                self._write("DONE", event, self._finish_status(task, event), task.label)
+
+    @staticmethod
+    def _start_status(event: ProgressEvent) -> str:
+        return f"0/{event.total}" if event.total is not None else ""
+
+    @staticmethod
+    def _update_status(task: ProgressEvent, event: ProgressEvent) -> str:
+        counts = ""
+        total = event.total if event.total is not None else task.total
+        completed = event.completed if event.completed is not None else task.completed
+        if total is not None and completed is not None:
+            counts = f"{completed}/{total}"
+        return _join_status(counts, event.current, event.message)
+
+    @staticmethod
+    def _finish_status(task: ProgressEvent, event: ProgressEvent) -> str:
+        counts = ""
+        total = event.total if event.total is not None else task.total
+        if total is not None and event.completed is not None:
+            counts = f"{event.completed}/{total}"
+        return _join_status(counts, event.current, event.message)
+
+    def _write(
+        self, kind: str, event: ProgressEvent, status: str, label: str = ""
+    ) -> None:
+        label = label or event.label or self._tasks.get(event.task_id, event).label
+        label = label or event.task_id
+        suffix = f": {status}" if status else ""
+        timestamp = self._clock().astimezone(UTC).isoformat().replace("+00:00", "Z")
+        self._stream.write(f"{timestamp} {kind:<6} {label}{suffix}\n")
+        self._stream.flush()
+
+
+def _join_status(*parts: str) -> str:
+    return " ".join(part for part in parts if part)
+
+
+class RichProgressReporter:
+    """Render progress events as interactive Rich tasks."""
 
     def __init__(self, stream: TextIO) -> None:
-        self._enabled = stream.isatty()
-        self._tasks: dict[tuple[str, str], TaskID] = {}
         self._progress = Progress(
             SpinnerColumn(),
             TextColumn("{task.description}"),
@@ -49,94 +144,68 @@ class RichProgress:
             redirect_stdout=False,
             redirect_stderr=False,
         )
+        self._tasks: dict[str, TaskID] = {}
+        self._totals: dict[str, int | None] = {}
+        self._labels: dict[str, str] = {}
 
-    def __enter__(self) -> RichProgress:
-        if self._enabled:
-            self._progress.start()
+    def __enter__(self) -> RichProgressReporter:
+        self._progress.start()
         return self
 
     def __exit__(self, *_: object) -> None:
-        if self._enabled:
-            self._progress.stop()
+        self._progress.stop()
 
     def emit(self, event: ProgressEvent) -> None:
-        if not self._enabled:
-            return
-        if event.kind == "started":
-            self._start_phase(event)
-        elif event.kind == "page":
-            self._update_discovery(event)
-        elif event.kind == "candidate_found":
-            self._update_phase(event, status=f"{event.completed} candidates")
-        elif event.kind == "item_started":
-            self._update_phase(event, status=event.current)
-        elif event.kind == "item_completed":
-            self._update_phase(event, completed=event.completed)
-        elif event.kind == "completed":
-            self._complete_phase(event)
+        if event.kind == "start":
+            self._start(event)
+        elif event.kind == "update":
+            self._update(event)
+        elif event.kind == "finish":
+            self._finish(event)
 
-    def _start_phase(self, event: ProgressEvent) -> None:
-        key = (event.phase, event.name)
-        if key in self._tasks:
+    def _start(self, event: ProgressEvent) -> None:
+        if event.task_id in self._tasks:
             return
-        description = event.detail or event.phase.capitalize()
-        self._tasks[key] = self._progress.add_task(
-            description,
+        self._tasks[event.task_id] = self._progress.add_task(
+            event.label or event.task_id,
             total=event.total,
             status="",
         )
+        self._totals[event.task_id] = event.total
+        self._labels[event.task_id] = event.label or event.task_id
 
-    def _update_discovery(self, event: ProgressEvent) -> None:
-        key = (event.phase, event.name)
-        if key not in self._tasks:
-            self._start_phase(
-                ProgressEvent(
-                    phase=event.phase,
-                    kind="started",
-                    name=event.name,
-                    detail=f"  {event.name}",
-                )
-            )
-        self._progress.update(
-            self._tasks[key],
-            completed=event.completed,
-            status=event.detail,
-        )
-
-    def _update_phase(
-        self,
-        event: ProgressEvent,
-        *,
-        completed: int | None = None,
-        status: str = "",
-    ) -> None:
-        key = (event.phase, "")
-        task_id = self._tasks.get(key)
+    def _update(self, event: ProgressEvent) -> None:
+        task_id = self._tasks.get(event.task_id)
         if task_id is None:
             return
-        if completed is not None:
-            self._progress.update(task_id, completed=completed, status=status)
-        else:
-            self._progress.update(task_id, status=status)
+        updates: dict[str, Any] = {}
+        if event.completed is not None:
+            updates["completed"] = event.completed
+        if event.total is not None:
+            updates["total"] = event.total
+            self._totals[event.task_id] = event.total
+        if event.current or event.message:
+            updates["status"] = _join_status(event.current, event.message)
+        if updates:
+            self._progress.update(task_id, **updates)
 
-    def _complete_phase(self, event: ProgressEvent) -> None:
-        phase_tasks = [
-            (task_id, self._progress.tasks[task_id])
-            for (phase, _name), task_id in self._tasks.items()
-            if phase == event.phase
-        ]
-        for task_id, task in phase_tasks:
-            status = event.detail or "complete"
-            if task.total is None:
-                # Discovery has no stable denominator, so retain a static status only.
-                self._progress.update(task_id, status=status)
-                self._progress.console.print(
-                    f"done {task.description} {status}", markup=False
-                )
-                self._progress.remove_task(task_id)
-            else:
-                self._progress.update(
-                    task_id,
-                    completed=task.total,
-                    status=status,
-                )
+    def _finish(self, event: ProgressEvent) -> None:
+        task_id = self._tasks.pop(event.task_id, None)
+        stored_total = self._totals.pop(event.task_id, None)
+        total = event.total if event.total is not None else stored_total
+        label = self._labels.pop(event.task_id, event.label or event.task_id)
+        if task_id is None:
+            return
+        status = event.message or "complete"
+        if total is None:
+            self._progress.update(task_id, status=status)
+            self._progress.console.print(f"done {label} {status}", markup=False)
+            self._progress.remove_task(task_id)
+            return
+        updates: dict[str, Any] = {
+            "completed": event.completed if event.completed is not None else total,
+            "status": status,
+        }
+        if event.total is not None:
+            updates["total"] = event.total
+        self._progress.update(task_id, **updates)
