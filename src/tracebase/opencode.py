@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .archive import ArchiveError, CollectionRun, Snapshot
+from .progress import ProgressCallback, ProgressEvent
 
 _SERVER_URL_PATTERN = re.compile(r"http://127\.0\.0\.1:\d+")
 _SERVER_START_TIMEOUT_SECONDS = 5
@@ -156,9 +157,17 @@ def _session_interval(session: dict[str, Any]) -> tuple[datetime, datetime]:
     return created, updated
 
 
-def collect(run: CollectionRun) -> int:
+def collect(run: CollectionRun, progress: ProgressCallback | None = None) -> int:
     """Export every session whose lifecycle intersects the Collection Range."""
 
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase="discover",
+                kind="started",
+                detail="Discovering OpenCode sessions",
+            )
+        )
     opencode_version = _run_opencode(["--version"]).decode("utf-8", "replace").strip()
     list_started_at = _observation_time()
     server, server_url, password = _start_server()
@@ -173,7 +182,32 @@ def collect(run: CollectionRun) -> int:
         if created < run.collection_range.end and run.collection_range.start <= updated:
             selected.append(session)
 
-    for session in selected:
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase="discover",
+                kind="completed",
+                detail=f"{len(selected)} sessions selected from {len(sessions)}",
+            )
+        )
+        progress(
+            ProgressEvent(
+                phase="hydrate",
+                kind="started",
+                total=len(selected),
+                detail="Exporting OpenCode sessions",
+            )
+        )
+    for completed, session in enumerate(selected, start=1):
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase="hydrate",
+                    kind="item_started",
+                    current=session["id"],
+                    total=len(selected),
+                )
+            )
         observation_started_at = _observation_time()
         export_command = ["opencode", "export", session["id"]]
         export = _run_opencode(export_command[1:])
@@ -199,7 +233,34 @@ def collect(run: CollectionRun) -> int:
             )
         )
         run.write_evidence(snapshot_root, "session.json", export)
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase="hydrate",
+                    kind="item_completed",
+                    completed=completed,
+                    total=len(selected),
+                    current=session["id"],
+                )
+            )
 
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase="hydrate",
+                kind="completed",
+                completed=len(selected),
+                total=len(selected),
+                detail=f"{len(selected)} sessions",
+            )
+        )
+        progress(
+            ProgressEvent(
+                phase="publish",
+                kind="started",
+                detail="Publishing archive",
+            )
+        )
     run.publish(
         {
             "session_discovery_endpoint": "/experimental/session",
@@ -213,4 +274,12 @@ def collect(run: CollectionRun) -> int:
             "selected_session_count": len(selected),
         }
     )
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase="publish",
+                kind="completed",
+                detail="Archive published",
+            )
+        )
     return len(selected)

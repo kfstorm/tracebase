@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from .archive import ArchiveError, CollectionRange, CollectionRun, Snapshot
+from .progress import ProgressCallback, ProgressEvent
 
 _API_ACCEPT = "application/vnd.github+json"
 _TIMELINE_ACCEPT = "application/vnd.github+json"
@@ -231,7 +232,10 @@ def _search_response(value: dict[str, Any] | list[Any]) -> tuple[int, list[Any]]
 
 
 def _discover(  # noqa: PLR0915
-    github: _GitHub, login: str, collection_range: CollectionRange
+    github: _GitHub,
+    login: str,
+    collection_range: CollectionRange,
+    progress: ProgressCallback | None = None,
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]]]:
     candidates: dict[str, _Candidate] = {}
     coverage_queries: list[dict[str, Any]] = []
@@ -254,6 +258,16 @@ def _discover(  # noqa: PLR0915
             )
             response = github.request(_page_endpoint(endpoint, 1))
             total_count, items = _search_response(github.json(response))
+            if progress is not None:
+                progress(
+                    ProgressEvent(
+                        phase="discover",
+                        kind="page",
+                        name=name,
+                        completed=1,
+                        detail=f"1 page - {len(candidates)} candidates",
+                    )
+                )
             if total_count > _SEARCH_RESULT_LIMIT:
                 if end - start <= _MINIMUM_PARTITION:
                     raise ArchiveError(
@@ -283,6 +297,16 @@ def _discover(  # noqa: PLR0915
                 if page > 1:
                     response = github.request(_page_endpoint(endpoint, page))
                 total_count, items = _search_response(github.json(response))
+                if progress is not None and page > 1:
+                    progress(
+                        ProgressEvent(
+                            phase="discover",
+                            kind="page",
+                            name=name,
+                            completed=page,
+                            detail=f"{page} pages - {len(candidates)} candidates",
+                        )
+                    )
                 if total_count > _SEARCH_RESULT_LIMIT:
                     raise ArchiveError(
                         "GitHub discovery exceeded the 1,000 result limit"
@@ -312,6 +336,15 @@ def _discover(  # noqa: PLR0915
                             object_kind,
                             (discovery_entry,),
                         )
+                        if progress is not None:
+                            progress(
+                                ProgressEvent(
+                                    phase="discover",
+                                    kind="candidate_found",
+                                    current=f"{repository}#{number}",
+                                    completed=len(candidates),
+                                )
+                            )
                     elif (prior.repository, prior.number, prior.object_kind) == (
                         repository,
                         number,
@@ -490,16 +523,76 @@ def _as_list(value: dict[str, Any] | list[Any]) -> list[Any]:
     return value
 
 
-def collect(run: CollectionRun, actor: tuple[str, str] | None = None) -> dict[str, Any]:
+def collect(
+    run: CollectionRun,
+    actor: tuple[str, str] | None = None,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
     """Discover and hydrate all eligible Artifacts, returning observed Coverage."""
 
     github = _GitHub()
     actor_id, login = actor or _actor(github)
-    candidates, discovery = _discover(github, login, run.collection_range)
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase="discover",
+                kind="started",
+                detail="Discovering GitHub artifacts",
+            )
+        )
+    candidates, discovery = _discover(
+        github, login, run.collection_range, progress=progress
+    )
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase="discover",
+                kind="completed",
+                detail=f"{len(candidates)} candidates",
+            )
+        )
+        progress(
+            ProgressEvent(
+                phase="hydrate",
+                kind="started",
+                total=len(candidates),
+                detail="Hydrating GitHub artifacts",
+            )
+        )
     selected = 0
     for candidate in candidates.values():
+        current = f"{candidate.repository}#{candidate.number}"
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase="hydrate",
+                    kind="item_started",
+                    current=current,
+                    total=len(candidates),
+                )
+            )
         _hydrate(run, github, candidate)
         selected += 1
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    phase="hydrate",
+                    kind="item_completed",
+                    completed=selected,
+                    total=len(candidates),
+                    current=current,
+                )
+            )
+    if progress is not None:
+        progress(
+            ProgressEvent(
+                phase="hydrate",
+                kind="completed",
+                completed=selected,
+                total=len(candidates),
+                detail=f"{selected} artifacts",
+            )
+        )
     return {
         "actor": {"node_id": actor_id, "login": login},
         "discovery_matrix_version": _DISCOVERY_MATRIX_VERSION,

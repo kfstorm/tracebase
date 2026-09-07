@@ -32,6 +32,7 @@ from tracebase.github import (
     _updated_range,
     collect,
 )
+from tracebase.progress import ProgressEvent
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -621,8 +622,9 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
     monkeypatch.setattr("tracebase.github._GitHub.request", request)
     with tempfile.TemporaryDirectory() as directory:
         run = build_github_run(Archive(directory))
+        events: list[ProgressEvent] = []
 
-        coverage = collect(run)
+        coverage = collect(run, progress=events.append)
         published = run.publish(coverage)
         snapshot = next((published / "snapshots/pull-request").iterdir())
         manifest = json.loads((snapshot / "snapshot.json").read_text())
@@ -662,6 +664,22 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
             ]
             == "github"
         )
+        assert [(event.phase, event.kind) for event in events] == [
+            ("discover", "started"),
+            ("discover", "page"),
+            ("discover", "candidate_found"),
+            ("discover", "page"),
+            ("discover", "page"),
+            ("discover", "completed"),
+            ("hydrate", "started"),
+            ("hydrate", "item_started"),
+            ("hydrate", "item_completed"),
+            ("hydrate", "completed"),
+        ]
+        assert events[1].name == "authorship"
+        assert events[1].completed == 1
+        assert events[7].total == 1
+        assert events[7].current == "octo/example#7"
 
 
 def test_github_collect_failure_keeps_run_unpublished(

@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from tracebase.archive import encode_path_id
+from tracebase.archive import Archive, CollectionRange, CollectionRun, encode_path_id
+from tracebase.opencode import collect
+from tracebase.progress import ProgressEvent
 
 PROJECT_ROOT = Path(__file__).parents[1]
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
@@ -177,6 +179,54 @@ else:
             assert metadata["session"]["directory"] == "/gamma"
             assert metadata["session"]["parentID"] == "overlaps-start"
             assert metadata["session"]["time"]["archived"] == 1767228400000
+
+    def test_collect_reports_discovery_hydration_and_publish_progress(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "tracebase.opencode._run_opencode",
+            lambda arguments: b"1.18.29" if arguments == ["--version"] else b"export",
+        )
+        monkeypatch.setattr(
+            "tracebase.opencode._start_server",
+            lambda: (None, "", ""),
+        )
+        monkeypatch.setattr("tracebase.opencode._stop_server", lambda _server: None)
+        monkeypatch.setattr(
+            "tracebase.opencode._discover_sessions",
+            lambda _url, _password, _run: [
+                {
+                    "id": "session-1",
+                    "time": {"created": 1767225600000, "updated": 1767225600000},
+                }
+            ],
+        )
+        run = CollectionRun(
+            Archive(tmp_path / "archive"),
+            "opencode",
+            "instance-1",
+            CollectionRange.parse(
+                "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"
+            ),
+            collector_version="test",
+            effective_options={},
+        )
+        events: list[ProgressEvent] = []
+
+        assert collect(run, progress=events.append) == 1
+
+        assert [(event.phase, event.kind) for event in events] == [
+            ("discover", "started"),
+            ("discover", "completed"),
+            ("hydrate", "started"),
+            ("hydrate", "item_started"),
+            ("hydrate", "item_completed"),
+            ("hydrate", "completed"),
+            ("publish", "started"),
+            ("publish", "completed"),
+        ]
+        assert events[3].current == "session-1"
+        assert events[3].total == 1
 
     def test_empty_range_publishes_manifest_only_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -11,6 +11,7 @@ from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
 from .github import _actor, _GitHub
 from .github import collect as collect_github
 from .opencode import collect as collect_opencode
+from .progress import ProgressEvent, RichProgress
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -37,12 +38,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    try:
-        arguments = _parser().parse_args(argv)
-        collection_range = CollectionRange.parse(arguments.from_text, arguments.to_text)
-        archive = Archive(arguments.archive)
-        run_id = archive.new_run_id()
+    arguments = _parser().parse_args(argv)
+    collection_range = CollectionRange.parse(arguments.from_text, arguments.to_text)
+    archive = Archive(arguments.archive)
+    run_id = archive.new_run_id()
 
+    with RichProgress(sys.stderr) as progress:
         if arguments.source == "opencode":
             scope_id = arguments.instance_id
             run = CollectionRun(
@@ -54,33 +55,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 effective_options={"instance_id": scope_id},
                 run_id=run_id,
             )
-            snapshot_count = collect_opencode(run)
+            snapshot_count = collect_opencode(run, progress=progress.emit)
             print(
                 f"collected run {run.run_id} with {snapshot_count} snapshots "
                 f"at {archive.root / 'runs' / run.run_id}"
             )
             return 0
-        else:
-            # GitHub scope identity is its authenticated actor's stable node ID.
-            scope_id, login = _actor(_GitHub())
-            run = CollectionRun(
-                archive,
-                "github",
-                scope_id,
-                collection_range,
-                collector_version="0.1.0",
-                effective_options={"actor_login": login},
-                run_id=run_id,
-            )
-            coverage = collect_github(run, (scope_id, login))
-            published = run.publish(coverage)
-            print(
-                f"{run.run_id}  {coverage['selected_artifacts']} snapshots  {published}"
-            )
-            return 0
-    except ArchiveError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-    except OSError, RuntimeError:
-        print("error: unable to prepare Collection Run", file=sys.stderr)
-        return 1
+
+        # GitHub scope identity is its authenticated actor's stable node ID.
+        scope_id, login = _actor(_GitHub())
+        run = CollectionRun(
+            archive,
+            "github",
+            scope_id,
+            collection_range,
+            collector_version="0.1.0",
+            effective_options={"actor_login": login},
+            run_id=run_id,
+        )
+        coverage = collect_github(run, (scope_id, login), progress=progress.emit)
+        progress.emit(
+            ProgressEvent(phase="publish", kind="started", detail="Publishing archive")
+        )
+        published = run.publish(coverage)
+        progress.emit(
+            ProgressEvent(phase="publish", kind="completed", detail="Archive published")
+        )
+        print(f"{run.run_id}  {coverage['selected_artifacts']} snapshots  {published}")
+        return 0
