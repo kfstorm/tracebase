@@ -112,7 +112,6 @@ import json
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 
 SOURCE_ID = __SOURCE_ID__
 AUTHORIZATION_MARKER = "__AUTHORIZATION_MARKER__"
@@ -143,9 +142,6 @@ elif arguments == [
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
-    Path(os.environ["TRACEBASE_PASSWORD_RECORD"]).write_text(
-        os.environ["OPENCODE_SERVER_PASSWORD"], encoding="utf-8"
-    )
     print(
         f"opencode server listening on http://127.0.0.1:{server.server_port}",
         flush=True,
@@ -214,7 +210,6 @@ def _run_collect(
             "PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"],
             "GH_TOKEN": AUTHORIZATION_MARKER,
             "TRACEBASE_FAIL_SOURCE": "1" if fail_source else "",
-            "TRACEBASE_PASSWORD_RECORD": str(archive.parent / "opencode-password"),
         },
     )
 
@@ -240,11 +235,6 @@ def _assert_authorization_is_not_disclosed(
     result: subprocess.CompletedProcess[str], archive: Path
 ) -> None:
     sensitive_values = [AUTHORIZATION_MARKER]
-    password_record = archive.parent / "opencode-password"
-    if password_record.exists():
-        password = password_record.read_text(encoding="utf-8")
-        assert password
-        sensitive_values.append(password)
     output = result.stdout + result.stderr
     archive_content = _archive_bytes(archive)
     for value in sensitive_values:
