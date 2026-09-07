@@ -212,7 +212,7 @@ class Archive:
     """Own the archive root and the published-run overlap registry."""
 
     def __init__(self, root: str | Path):
-        self.root = Path(root)
+        self.root = Path(root).absolute()
 
     def new_run_id(self) -> str:
         return str(uuid7())
@@ -392,14 +392,31 @@ class CollectionRun:
     def write_evidence(
         self, snapshot_root: Path, relative_path: str | Path, content: bytes
     ) -> Path:
+        destination = self._evidence_destination(snapshot_root, relative_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+        return destination
+
+    def move_evidence(
+        self, snapshot_root: Path, relative_path: str | Path, source: Path
+    ) -> Path:
+        _ensure_inside(source, self.staging)
+        if not _is_regular_file(source):
+            raise ArchiveError("evidence source is missing or not regular")
+        destination = self._evidence_destination(snapshot_root, relative_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(destination)
+        return destination
+
+    def _evidence_destination(
+        self, snapshot_root: Path, relative_path: str | Path
+    ) -> Path:
         _ensure_inside(snapshot_root, self.staging / "snapshots")
         relative = _archive_relative_path(relative_path)
         if relative == PurePosixPath("snapshot.json"):
             raise ArchiveError("snapshot.json is reserved for the Snapshot manifest")
         destination = snapshot_root.joinpath(*relative.parts)
         _ensure_inside(destination, snapshot_root)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
         return destination
 
     def publish(self, coverage: dict[str, Any]) -> Path:

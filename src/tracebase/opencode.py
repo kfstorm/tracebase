@@ -8,10 +8,12 @@ import re
 import secrets
 import select
 import subprocess
+import tempfile
 import time
 from base64 import b64encode
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, BinaryIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -40,6 +42,20 @@ def _run_opencode(arguments: list[str]) -> bytes:
     if result.returncode != 0:
         raise ArchiveError("OpenCode CLI operation failed")
     return result.stdout
+
+
+def _run_opencode_to_file(arguments: list[str], output: BinaryIO) -> None:
+    try:
+        result = subprocess.run(
+            ["opencode", *arguments],
+            stdout=output,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        raise ArchiveError("OpenCode CLI is unavailable") from None
+    if result.returncode != 0:
+        raise ArchiveError("OpenCode CLI operation failed")
 
 
 def _start_server() -> tuple[subprocess.Popen[str], str, str]:
@@ -235,29 +251,43 @@ def collect(
         )
         observation_started_at = _observation_time()
         export_command = ["opencode", "export", session["id"]]
-        export = _run_opencode(export_command[1:])
-        observation_completed_at = _observation_time()
-        snapshot_root = run.write_snapshot(
-            Snapshot(
-                source_kind="opencode",
-                object_kind="session",
-                source_id=session["id"],
-                observation_window={
-                    "from": observation_started_at,
-                    "to": observation_completed_at,
-                },
-                evidence_files=({"path": "session.json"},),
-                metadata={
-                    "export_command": export_command,
-                    "collector_version": run.collector_version,
-                    "opencode_version": opencode_version,
-                    "effective_options": run.effective_options,
-                    "source_instance_id": run.scope_id,
-                    "session": session,
-                },
-            )
+        temporary_fd, temporary_name = tempfile.mkstemp(
+            dir=run.staging, prefix=".opencode-export-", suffix=".json"
         )
-        run.write_evidence(snapshot_root, "session.json", export)
+        os.close(temporary_fd)
+        temporary_path = Path(temporary_name)
+        try:
+            with temporary_path.open("wb") as output:
+                _run_opencode_to_file(export_command[1:], output)
+            try:
+                with temporary_path.open("rb") as output:
+                    json.load(output)
+            except OSError, json.JSONDecodeError:
+                raise ArchiveError("OpenCode session export is invalid") from None
+            observation_completed_at = _observation_time()
+            snapshot_root = run.write_snapshot(
+                Snapshot(
+                    source_kind="opencode",
+                    object_kind="session",
+                    source_id=session["id"],
+                    observation_window={
+                        "from": observation_started_at,
+                        "to": observation_completed_at,
+                    },
+                    evidence_files=({"path": "session.json"},),
+                    metadata={
+                        "export_command": export_command,
+                        "collector_version": run.collector_version,
+                        "opencode_version": opencode_version,
+                        "effective_options": run.effective_options,
+                        "source_instance_id": run.scope_id,
+                        "session": session,
+                    },
+                )
+            )
+            run.move_evidence(snapshot_root, "session.json", temporary_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
         reporter.emit(
             ProgressEvent(
                 kind="update",

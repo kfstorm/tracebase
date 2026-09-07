@@ -33,6 +33,9 @@ class TestOpenCodeCollectionCli:
         fail_export: str = "",
         next_cursor: str = "",
         discovery: Path | None = None,
+        large_export: Path | None = None,
+        malformed_export: str = "",
+        cwd: Path = PROJECT_ROOT,
     ) -> subprocess.CompletedProcess[str]:
         from_text = "2026-01-01T00:00:00+00:00"
         to_text = "2026-01-01T01:00:00+00:00"
@@ -45,6 +48,8 @@ class TestOpenCodeCollectionCli:
             "TRACEBASE_DISCOVERY": str(discovery or FIXTURES / "session-list.json"),
             "TRACEBASE_EXPORT_DIR": str(FIXTURES),
             "TRACEBASE_FAIL_EXPORT": fail_export,
+            "TRACEBASE_LARGE_EXPORT": str(large_export or ""),
+            "TRACEBASE_MALFORMED_EXPORT": malformed_export,
             "TRACEBASE_NEXT_CURSOR": next_cursor,
             "TRACEBASE_EXPECTED_START": str(
                 int(datetime.fromisoformat(from_text).timestamp() * 1000)
@@ -71,7 +76,7 @@ class TestOpenCodeCollectionCli:
                 "2026-01-01T01:00:00+00:00",
                 *arguments,
             ],
-            cwd=PROJECT_ROOT,
+            cwd=cwd,
             text=True,
             capture_output=True,
             check=False,
@@ -85,6 +90,7 @@ class TestOpenCodeCollectionCli:
 import base64
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -144,14 +150,24 @@ elif len(arguments) == 2 and arguments[0] == "export":
     if session_id == os.environ["TRACEBASE_FAIL_EXPORT"]:
         print("sensitive-session-payload", file=sys.stderr)
         sys.exit(9)
+    if session_id == os.environ["TRACEBASE_MALFORMED_EXPORT"]:
+        sys.stdout.buffer.write(b'{"payload":"truncated')
+        sys.exit(0)
     filenames = {
         "ends-at-start": "ends-at-start.json",
         "overlaps-start": "overlaps-start.json",
         "session/unsafe:1": "session-unsafe-1.json",
         "updated-after-end": "session-unsafe-1.json",
     }
-    export_path = Path(os.environ["TRACEBASE_EXPORT_DIR"], filenames[session_id])
-    sys.stdout.buffer.write(export_path.read_bytes())
+    if session_id == "large":
+        export_path = Path(os.environ["TRACEBASE_LARGE_EXPORT"])
+        content = export_path.read_bytes()
+        if not stat.S_ISREG(os.fstat(sys.stdout.fileno()).st_mode):
+            content = content[:65536]
+    else:
+        export_path = Path(os.environ["TRACEBASE_EXPORT_DIR"], filenames[session_id])
+        content = export_path.read_bytes()
+    sys.stdout.buffer.write(content)
 else:
     sys.exit(2)
 """,
@@ -208,12 +224,72 @@ else:
             assert metadata["session"]["parentID"] == "overlaps-start"
             assert metadata["session"]["time"]["archived"] == 1767228400000
 
+    def test_collects_complete_large_export_when_cli_writes_to_pipe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            discovery = root / "large-sessions.json"
+            discovery.write_text(
+                '[{"id":"large","time":{"created":1767225600000,'
+                '"updated":1767225600000}}]',
+                encoding="utf-8",
+            )
+            large_export = root / "large.json"
+            large_export.write_bytes(b'{"payload":"' + b"x" * 100_000 + b'"}')
+
+            result = self.run_cli(
+                root / "archive",
+                self.make_fake_opencode(root),
+                discovery=discovery,
+                large_export=large_export,
+            )
+
+            assert result.returncode == 0
+            published = next((root / "archive" / "runs").iterdir())
+            snapshot = next(published.glob("snapshots/session/*"))
+            assert (snapshot / "session.json").read_bytes() == large_export.read_bytes()
+
+    def test_collects_with_relative_archive_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+
+            result = self.run_cli(
+                Path("archive"), self.make_fake_opencode(root), cwd=workspace
+            )
+
+            assert result.returncode == 0
+            assert next((workspace / "archive" / "runs").iterdir()).is_dir()
+
+    def test_invalid_export_does_not_publish_or_leave_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "archive"
+            result = self.run_cli(
+                archive,
+                self.make_fake_opencode(root),
+                malformed_export="overlaps-start",
+            )
+
+            assert result.returncode == 1
+            assert "OpenCode session export is invalid" in result.stderr
+            assert not (archive / "runs").exists()
+            staging = next((archive / ".staging").iterdir())
+            assert not (
+                staging / "snapshots" / "session" / encode_path_id("overlaps-start")
+            ).exists()
+            assert not list(staging.glob(".opencode-export-*.json"))
+
     def test_collect_reports_discovery_hydration_and_publish_progress(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr(
             "tracebase.opencode._run_opencode",
-            lambda arguments: b"1.18.29" if arguments == ["--version"] else b"export",
+            lambda arguments: b"1.18.29",
+        )
+        monkeypatch.setattr(
+            "tracebase.opencode._run_opencode_to_file",
+            lambda _arguments, output: output.write(b"{}"),
         )
         monkeypatch.setattr(
             "tracebase.opencode._start_server",
