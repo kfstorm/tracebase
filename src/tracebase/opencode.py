@@ -103,6 +103,7 @@ def _discover_sessions(
     query = urlencode(
         {
             "start": int(run.collection_range.start.timestamp() * 1000),
+            "cursor": int(run.collection_range.end.timestamp() * 1000),
             "archived": "true",
             "limit": _DISCOVERY_LIMIT,
         }
@@ -173,7 +174,7 @@ def collect(
     run: CollectionRun,
     reporter: ProgressReporter,
 ) -> CollectionResult:
-    """Export every session whose lifecycle intersects the Collection Range."""
+    """Export complete evidence for sessions updated within the Collection Range."""
 
     reporter.emit(
         ProgressEvent(
@@ -192,8 +193,10 @@ def collect(
     list_completed_at = _observation_time()
     selected: list[dict[str, Any]] = []
     for session in sessions:
-        created, updated = _session_interval(session)
-        if created < run.collection_range.end and run.collection_range.start <= updated:
+        _, updated = _session_interval(session)
+        # The API bounds updated timestamps with start/cursor. Keep this
+        # predicate defensive in case a server does not honor those filters.
+        if run.collection_range.start <= updated < run.collection_range.end:
             selected.append(session)
 
     reporter.emit(
@@ -277,6 +280,7 @@ def collect(
             "session_discovery_endpoint": "/experimental/session",
             "session_discovery_options": {
                 "start": int(run.collection_range.start.timestamp() * 1000),
+                "cursor": int(run.collection_range.end.timestamp() * 1000),
                 "archived": True,
                 "limit": _DISCOVERY_LIMIT,
             },
