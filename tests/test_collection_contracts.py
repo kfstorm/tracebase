@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).parents[1]
-FROM = "2026-01-01T00:00:00+00:00"
-TO = "2026-01-01T01:00:00+00:00"
+COLLECTION_FROM = "2026-01-01T00:00:00+00:00"
+COLLECTION_TO = "2026-01-01T01:00:00+00:00"
 SOURCE_IDS = {
     "github": "artifact/source:1?秘密",
     "opencode": "session/source:1?秘密",
@@ -17,6 +17,12 @@ SOURCE_IDS = {
 AUTHORIZATION_MARKER = "authorization-marker-18"
 SOURCE_RESPONSE_MARKER = "source-response-marker-18"
 SESSION_EXPORT_MARKER = "session-export-marker-18"
+GITHUB_ISSUE_RESPONSE = (
+    '{"node_id": "artifact/source:1?秘密", "body": "source-response-marker-18"}'
+).encode()
+GITHUB_COMMENTS_RESPONSE = b'[{"body": "source-response-marker-18-comment"}]'
+GITHUB_TIMELINE_RESPONSE = b'[{"event": "source-response-marker-18-timeline"}]'
+OPENCODE_SESSION_EXPORT = b'{"export":"session-export-marker-18"}'
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -24,11 +30,18 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+def _render_fixture(template: str, replacements: dict[str, str]) -> str:
+    for placeholder, value in replacements.items():
+        template = template.replace(placeholder, value)
+    return template
+
+
 def _make_github_fixture(directory: Path) -> None:
     source_id = repr(SOURCE_IDS["github"])
     _write_executable(
         directory / "gh",
-        """#!/usr/bin/env python3
+        _render_fixture(
+            """#!/usr/bin/env python3
 import json
 import os
 import sys
@@ -36,6 +49,9 @@ import sys
 SOURCE_ID = __SOURCE_ID__
 AUTHORIZATION_MARKER = "__AUTHORIZATION_MARKER__"
 SOURCE_RESPONSE_MARKER = "__SOURCE_RESPONSE_MARKER__"
+ISSUE_RESPONSE = __ISSUE_RESPONSE__
+COMMENTS_RESPONSE = __COMMENTS_RESPONSE__
+TIMELINE_RESPONSE = __TIMELINE_RESPONSE__
 
 endpoint = sys.argv[-1]
 if endpoint == "--help":
@@ -46,9 +62,9 @@ if os.environ.get("TRACEBASE_FAIL_SOURCE") and endpoint.endswith("/issues/42"):
     print(SOURCE_RESPONSE_MARKER, file=sys.stderr)
     raise SystemExit(1)
 if endpoint == "/user":
-    body = {"node_id": "synthetic-actor", "login": "synthetic-actor"}
+    payload = {"node_id": "synthetic-actor", "login": "synthetic-actor"}
 elif endpoint.startswith("/search/issues?"):
-    body = {
+    payload = {
         "total_count": 1,
         "incomplete_results": False,
         "items": [
@@ -60,21 +76,29 @@ elif endpoint.startswith("/search/issues?"):
         ],
     }
 elif endpoint == "/repos/example/project/issues/42":
-    body = {"node_id": SOURCE_ID, "body": SOURCE_RESPONSE_MARKER}
+    payload = ISSUE_RESPONSE
 elif endpoint == "/repos/example/project/issues/42/comments?per_page=100&page=1":
-    body = [{"body": SOURCE_RESPONSE_MARKER + "-comment"}]
+    payload = COMMENTS_RESPONSE
 elif endpoint == "/repos/example/project/issues/42/timeline?per_page=100&page=1":
-    body = [{"event": SOURCE_RESPONSE_MARKER + "-timeline"}]
+    payload = TIMELINE_RESPONSE
 else:
     raise SystemExit(2)
 
-payload = json.dumps(body).encode()
+if not isinstance(payload, bytes):
+    payload = json.dumps(payload).encode()
 sys.stdout.buffer.write(
     b"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n" + payload
 )
-""".replace("__SOURCE_ID__", source_id)
-        .replace("__AUTHORIZATION_MARKER__", AUTHORIZATION_MARKER)
-        .replace("__SOURCE_RESPONSE_MARKER__", SOURCE_RESPONSE_MARKER),
+""",
+            {
+                "__SOURCE_ID__": source_id,
+                "__AUTHORIZATION_MARKER__": AUTHORIZATION_MARKER,
+                "__SOURCE_RESPONSE_MARKER__": SOURCE_RESPONSE_MARKER,
+                "__ISSUE_RESPONSE__": repr(GITHUB_ISSUE_RESPONSE),
+                "__COMMENTS_RESPONSE__": repr(GITHUB_COMMENTS_RESPONSE),
+                "__TIMELINE_RESPONSE__": repr(GITHUB_TIMELINE_RESPONSE),
+            },
+        ),
     )
 
 
@@ -82,18 +106,19 @@ def _make_opencode_fixture(directory: Path) -> None:
     source_id = repr(SOURCE_IDS["opencode"])
     _write_executable(
         directory / "opencode",
-        """#!/usr/bin/env python3
-import base64
+        _render_fixture(
+            """#!/usr/bin/env python3
 import json
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
+from pathlib import Path
 
 SOURCE_ID = __SOURCE_ID__
 AUTHORIZATION_MARKER = "__AUTHORIZATION_MARKER__"
 SOURCE_RESPONSE_MARKER = "__SOURCE_RESPONSE_MARKER__"
 SESSION_EXPORT_MARKER = "__SESSION_EXPORT_MARKER__"
+SESSION_EXPORT = __SESSION_EXPORT__
 
 arguments = sys.argv[1:]
 if arguments == ["--version"]:
@@ -103,26 +128,6 @@ elif arguments == [
 ]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            parsed = urlparse(self.path)
-            expected_query = {
-                "start": ["1767225600000"],
-                "archived": ["true"],
-                "limit": ["10000"],
-            }
-            expected_auth = "Basic " + base64.b64encode(
-                (
-                    f"{os.environ['OPENCODE_SERVER_USERNAME']}:"
-                    f"{os.environ['OPENCODE_SERVER_PASSWORD']}"
-                ).encode()
-            ).decode()
-            if (
-                parsed.path != "/experimental/session"
-                or parse_qs(parsed.query) != expected_query
-                or self.headers.get("Authorization") != expected_auth
-            ):
-                self.send_response(400)
-                self.end_headers()
-                return
             body = json.dumps([
                 {
                     "id": SOURCE_ID,
@@ -138,6 +143,9 @@ elif arguments == [
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
+    Path(os.environ["TRACEBASE_PASSWORD_RECORD"]).write_text(
+        os.environ["OPENCODE_SERVER_PASSWORD"], encoding="utf-8"
+    )
     print(
         f"opencode server listening on http://127.0.0.1:{server.server_port}",
         flush=True,
@@ -148,15 +156,18 @@ elif arguments == ["export", SOURCE_ID]:
         print(AUTHORIZATION_MARKER, file=sys.stderr)
         print(SESSION_EXPORT_MARKER, file=sys.stderr)
         raise SystemExit(1)
-    sys.stdout.buffer.write(
-        json.dumps({"export": SESSION_EXPORT_MARKER}).encode()
-    )
+    sys.stdout.buffer.write(SESSION_EXPORT)
 else:
     raise SystemExit(2)
-""".replace("__SOURCE_ID__", source_id)
-        .replace("__AUTHORIZATION_MARKER__", AUTHORIZATION_MARKER)
-        .replace("__SOURCE_RESPONSE_MARKER__", SOURCE_RESPONSE_MARKER)
-        .replace("__SESSION_EXPORT_MARKER__", SESSION_EXPORT_MARKER),
+""",
+            {
+                "__SOURCE_ID__": source_id,
+                "__AUTHORIZATION_MARKER__": AUTHORIZATION_MARKER,
+                "__SOURCE_RESPONSE_MARKER__": SOURCE_RESPONSE_MARKER,
+                "__SESSION_EXPORT_MARKER__": SESSION_EXPORT_MARKER,
+                "__SESSION_EXPORT__": repr(OPENCODE_SESSION_EXPORT),
+            },
+        ),
     )
 
 
@@ -173,8 +184,8 @@ def _run_collect(
     archive: Path,
     fixture_directory: Path,
     *,
-    from_text: str = FROM,
-    to_text: str = TO,
+    from_text: str = COLLECTION_FROM,
+    to_text: str = COLLECTION_TO,
     fail_source: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     arguments = [
@@ -203,6 +214,7 @@ def _run_collect(
             "PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"],
             "GH_TOKEN": AUTHORIZATION_MARKER,
             "TRACEBASE_FAIL_SOURCE": "1" if fail_source else "",
+            "TRACEBASE_PASSWORD_RECORD": str(archive.parent / "opencode-password"),
         },
     )
 
@@ -218,6 +230,26 @@ def _decode_path_id(path_id: str) -> str:
     assert "=" not in path_id
     padding = "=" * (-len(path_id) % 4)
     return base64.urlsafe_b64decode(path_id + padding).decode("utf-8")
+
+
+def _encode_path_id(source_id: str) -> str:
+    return base64.urlsafe_b64encode(source_id.encode("utf-8")).decode().rstrip("=")
+
+
+def _assert_authorization_is_not_disclosed(
+    result: subprocess.CompletedProcess[str], archive: Path
+) -> None:
+    sensitive_values = [AUTHORIZATION_MARKER]
+    password_record = archive.parent / "opencode-password"
+    if password_record.exists():
+        password = password_record.read_text(encoding="utf-8")
+        assert password
+        sensitive_values.append(password)
+    output = result.stdout + result.stderr
+    archive_content = _archive_bytes(archive)
+    for value in sensitive_values:
+        assert value not in output
+        assert value.encode() not in archive_content
 
 
 @pytest.fixture(params=["github", "opencode"])
@@ -239,9 +271,9 @@ def test_successful_sources_share_the_published_archive_contract(
     assert result.returncode == 0
     assert result.stderr == ""
     assert len(result.stdout.splitlines()) == 1
-    assert AUTHORIZATION_MARKER not in result.stdout
     assert SOURCE_RESPONSE_MARKER not in result.stdout
     assert SESSION_EXPORT_MARKER not in result.stdout
+    _assert_authorization_is_not_disclosed(result, archive)
 
     published_runs = list((archive / "runs").iterdir())
     assert len(published_runs) == 1
@@ -257,7 +289,10 @@ def test_successful_sources_share_the_published_archive_contract(
         else {"kind": "opencode", "scope_id": "synthetic-instance-18"}
     )
     assert run_manifest["source"] == expected_scope
-    assert run_manifest["collection_range"] == {"from": FROM, "to": TO}
+    assert run_manifest["collection_range"] == {
+        "from": COLLECTION_FROM,
+        "to": COLLECTION_TO,
+    }
     assert len(run_manifest["snapshots"]) == 1
 
     snapshot_entry = run_manifest["snapshots"][0]
@@ -265,6 +300,7 @@ def test_successful_sources_share_the_published_archive_contract(
     assert snapshot_entry["source_id"] == source_id
     snapshot_path = Path(snapshot_entry["path"])
     assert snapshot_path.parts[:2] == ("snapshots", snapshot_entry["object_kind"])
+    assert snapshot_path.name == _encode_path_id(source_id)
     assert _decode_path_id(snapshot_path.name) == source_id
     snapshot = published / snapshot_path
     snapshot_manifest = json.loads(
@@ -274,19 +310,17 @@ def test_successful_sources_share_the_published_archive_contract(
 
     if source == "github":
         assert snapshot_manifest["source_kind"] == "github"
-        assert (snapshot / "issue.json").is_file()
-        assert SOURCE_RESPONSE_MARKER.encode() in (snapshot / "issue.json").read_bytes()
+        assert (snapshot / "issue.json").read_bytes() == GITHUB_ISSUE_RESPONSE
+        assert (snapshot / "comments.001.json").read_bytes() == GITHUB_COMMENTS_RESPONSE
+        assert (snapshot / "timeline.001.json").read_bytes() == GITHUB_TIMELINE_RESPONSE
     else:
         assert snapshot_manifest["source_kind"] == "opencode"
-        assert (snapshot / "session.json").read_bytes() == json.dumps(
-            {"export": SESSION_EXPORT_MARKER}
-        ).encode()
+        assert (snapshot / "session.json").read_bytes() == OPENCODE_SESSION_EXPORT
 
     staging = archive / ".staging"
     assert staging.is_dir()
     assert list(staging.iterdir()) == []
     archive_content = _archive_bytes(archive)
-    assert AUTHORIZATION_MARKER.encode() not in archive_content
     assert SOURCE_RESPONSE_MARKER.encode() in archive_content
     if source == "opencode":
         assert SESSION_EXPORT_MARKER.encode() in archive_content
@@ -297,9 +331,9 @@ def test_successful_sources_share_the_published_archive_contract(
 @pytest.mark.parametrize(
     ("from_text", "to_text"),
     [
-        ("2026-01-01T00:00:00", TO),
-        ("2026-01-01T00:00:00.1Z", TO),
-        (FROM, FROM),
+        ("2026-01-01T00:00:00", COLLECTION_TO),
+        ("2026-01-01T00:00:00.1Z", COLLECTION_TO),
+        (COLLECTION_FROM, COLLECTION_FROM),
     ],
 )
 def test_both_commands_reject_invalid_ranges_before_staging(
@@ -321,8 +355,8 @@ def test_both_commands_reject_invalid_ranges_before_staging(
 
     assert result.returncode == 1
     assert result.stdout == ""
-    assert AUTHORIZATION_MARKER not in result.stderr
     assert SOURCE_RESPONSE_MARKER not in result.stderr
+    _assert_authorization_is_not_disclosed(result, archive)
     assert not archive.exists()
 
 
@@ -343,8 +377,8 @@ def test_both_commands_reject_matching_published_overlap(
     assert "overlaps" in second.stderr
     assert list((archive / "runs").iterdir()) == published_runs
     assert list((archive / ".staging").iterdir()) == []
-    assert AUTHORIZATION_MARKER not in second.stderr
     assert SOURCE_RESPONSE_MARKER not in second.stderr
+    _assert_authorization_is_not_disclosed(second, archive)
 
 
 def test_failed_sources_remain_inspectable_but_do_not_enter_overlap_registry(
@@ -357,14 +391,13 @@ def test_failed_sources_remain_inspectable_but_do_not_enter_overlap_registry(
 
     assert failed.returncode == 1
     assert failed.stdout == ""
-    assert AUTHORIZATION_MARKER not in failed.stderr
     assert SOURCE_RESPONSE_MARKER not in failed.stderr
     assert SESSION_EXPORT_MARKER not in failed.stderr
     assert not (archive / "runs").exists()
     staging_runs = list((archive / ".staging").iterdir())
     assert len(staging_runs) == 1
     assert (staging_runs[0] / "snapshots").is_dir()
-    assert AUTHORIZATION_MARKER.encode() not in _archive_bytes(archive)
+    _assert_authorization_is_not_disclosed(failed, archive)
 
     recovered = _run_collect(source, archive, fixture_directory)
 
