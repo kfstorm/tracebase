@@ -282,6 +282,12 @@ class CollectionRun:
         (self.staging / "snapshots").mkdir()
         self._snapshots: list[dict[str, Any]] = []
 
+    @property
+    def snapshot_count(self) -> int:
+        """Return the number of snapshots currently staged for this run."""
+
+        return len(self._snapshots)
+
     def write_snapshot(self, snapshot: Snapshot) -> Path:
         _validate_archive_type(snapshot.source_kind, "source kind")
         _validate_archive_type(snapshot.object_kind, "object kind")

@@ -8,7 +8,23 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class CollectionResult:
-    """The collected coverage and number of snapshots ready for publication."""
+    """The collected coverage ready for publication."""
 
     coverage: dict[str, Any]
-    snapshot_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionContext:
+    """Source-resolved identity and options used to create a Collection Run."""
+
+    source_kind: str
+    scope_id: str
+    collector_version: str
+    effective_options: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubContext(CollectionContext):
+    """Resolved GitHub actor context used by the GitHub collector."""
+
+    actor_login: str

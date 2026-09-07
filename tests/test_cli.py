@@ -21,6 +21,7 @@ from tracebase.archive import (
     encode_path_id,
     uuid7,
 )
+from tracebase.collector import GitHubContext
 from tracebase.github import (
     _Candidate,
     _discover,
@@ -69,6 +70,33 @@ def build_github_run(archive: Archive) -> CollectionRun:
         collector_version="test",
         effective_options={},
     )
+
+
+def build_github_context() -> GitHubContext:
+    return GitHubContext(
+        source_kind="github",
+        scope_id="actor-node",
+        collector_version="test",
+        effective_options={"actor_login": "actor"},
+        actor_login="actor",
+    )
+
+
+def test_collection_run_snapshot_count_tracks_written_snapshots() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+
+        assert run.snapshot_count == 0
+        run.write_snapshot(
+            Snapshot(
+                source_kind="github",
+                object_kind="issue",
+                source_id="issue-node",
+                observation_window={"from": "now", "to": "now"},
+            )
+        )
+
+        assert run.snapshot_count == 1
 
 
 @pytest.mark.parametrize(
@@ -632,12 +660,12 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
         run = build_github_run(Archive(directory))
         reporter = RecordingReporter()
 
-        result = collect(run, reporter=reporter)
+        result = collect(run, build_github_context(), reporter=reporter)
         published = run.publish(result.coverage)
         snapshot = next((published / "snapshots/pull-request").iterdir())
         manifest = json.loads((snapshot / "snapshot.json").read_text())
 
-        assert result.snapshot_count == 1
+        assert run.snapshot_count == 1
         assert result.coverage["selected_artifacts"] == 1
         assert result.coverage["discovery_matrix_version"] == 1
         assert [entry["reason"] for entry in result.coverage["queries"]] == [
@@ -700,7 +728,7 @@ def test_github_collect_failure_keeps_run_unpublished(
         run = build_github_run(Archive(directory))
 
         with pytest.raises(ArchiveError, match="request failed"):
-            collect(run)
+            collect(run, build_github_context())
 
         assert run.staging.exists()
         assert not (Path(directory) / "runs").exists()

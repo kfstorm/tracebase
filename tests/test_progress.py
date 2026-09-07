@@ -1,9 +1,12 @@
 from datetime import UTC, datetime
 from io import StringIO
 
+import pytest
+
 from tracebase.progress import (
     LineProgressReporter,
     ProgressEvent,
+    ProgressProtocolError,
     RichProgressReporter,
 )
 
@@ -163,3 +166,23 @@ def test_line_progress_reports_complete_lifecycle_for_non_tty() -> None:
         "2026-09-07T04:01:22Z UPDATE Hydrating GitHub artifacts: 1/81 kfstorm/foo#42",
         "2026-09-07T04:01:22Z DONE   Hydrating GitHub artifacts: 81/81 81 artifacts",
     ]
+
+
+@pytest.mark.parametrize("reporter_type", [LineProgressReporter, RichProgressReporter])
+def test_reporters_fail_fast_on_invalid_task_lifecycle(reporter_type: type) -> None:
+    stream = TTYBuffer() if reporter_type is RichProgressReporter else StringIO()
+    reporter = reporter_type(stream)
+
+    with reporter:
+        reporter.emit(ProgressEvent(kind="start", task_id="task", label="Task"))
+        with pytest.raises(ProgressProtocolError, match="already started"):
+            reporter.emit(ProgressEvent(kind="start", task_id="task", label="Task"))
+        with pytest.raises(ProgressProtocolError, match="unknown task"):
+            reporter.emit(ProgressEvent(kind="update", task_id="missing"))
+        with pytest.raises(ProgressProtocolError, match="unknown task"):
+            reporter.emit(ProgressEvent(kind="finish", task_id="missing"))
+
+
+def test_progress_event_rejects_unknown_kind() -> None:
+    with pytest.raises(ProgressProtocolError, match="unknown progress event kind"):
+        ProgressEvent(kind="udpate", task_id="task")  # type: ignore[arg-type]

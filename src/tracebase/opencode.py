@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .archive import ArchiveError, CollectionRun, Snapshot
-from .collector import CollectionResult
+from .collector import CollectionContext, CollectionResult
 from .progress import NULL_PROGRESS_REPORTER, ProgressEvent, ProgressReporter
 
 _SERVER_URL_PATTERN = re.compile(r"http://127\.0\.0\.1:\d+")
@@ -158,8 +158,20 @@ def _session_interval(session: dict[str, Any]) -> tuple[datetime, datetime]:
     return created, updated
 
 
+def resolve_context(instance_id: str) -> CollectionContext:
+    """Resolve the caller-provided OpenCode source instance."""
+
+    return CollectionContext(
+        source_kind="opencode",
+        scope_id=instance_id,
+        collector_version="0.1.0",
+        effective_options={"instance_id": instance_id},
+    )
+
+
 def collect(
     run: CollectionRun,
+    _context: CollectionContext,
     reporter: ProgressReporter = NULL_PROGRESS_REPORTER,
 ) -> CollectionResult:
     """Export every session whose lifecycle intersects the Collection Range."""
@@ -187,6 +199,14 @@ def collect(
 
     reporter.emit(
         ProgressEvent(
+            kind="update",
+            task_id="opencode.discover",
+            completed=len(sessions),
+            message=f"{len(sessions)} sessions listed, {len(selected)} selected",
+        )
+    )
+    reporter.emit(
+        ProgressEvent(
             kind="finish",
             task_id="opencode.discover",
             message=f"{len(selected)} sessions selected from {len(sessions)}",
@@ -196,7 +216,7 @@ def collect(
         ProgressEvent(
             kind="start",
             task_id="opencode.hydrate",
-            label="Exporting OpenCode sessions",
+            label="Hydrating OpenCode sessions",
             total=len(selected),
         )
     )
@@ -264,6 +284,5 @@ def collect(
             "observation_window": {"from": list_started_at, "to": list_completed_at},
             "listed_session_count": len(sessions),
             "selected_session_count": len(selected),
-        },
-        snapshot_count=len(selected),
+        }
     )

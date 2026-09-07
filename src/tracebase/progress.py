@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol, TextIO
+from typing import Any, Literal, Protocol, TextIO
 
 from rich.console import Console
 from rich.progress import (
@@ -17,12 +17,18 @@ from rich.progress import (
     TextColumn,
 )
 
+ProgressKind = Literal["start", "update", "finish"]
+
+
+class ProgressProtocolError(ValueError):
+    """Raised when a reporter receives an invalid progress lifecycle event."""
+
 
 @dataclass(frozen=True, slots=True)
 class ProgressEvent:
     """A source-independent update in a task's lifecycle."""
 
-    kind: str
+    kind: ProgressKind
     task_id: str
     label: str = ""
     parent_task_id: str | None = None
@@ -30,6 +36,10 @@ class ProgressEvent:
     total: int | None = None
     current: str = ""
     message: str = ""
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"start", "update", "finish"}:
+            raise ProgressProtocolError(f"unknown progress event kind: {self.kind!r}")
 
 
 class ProgressReporter(Protocol):
@@ -69,30 +79,32 @@ class LineProgressReporter:
 
     def emit(self, event: ProgressEvent) -> None:
         if event.kind == "start":
+            if event.task_id in self._tasks:
+                raise ProgressProtocolError(f"task already started: {event.task_id}")
             self._tasks[event.task_id] = event
             self._write("START", event, self._start_status(event))
         elif event.kind == "update":
             task = self._tasks.get(event.task_id)
-            if task is not None:
-                self._tasks[event.task_id] = ProgressEvent(
-                    kind="start",
-                    task_id=task.task_id,
-                    label=task.label,
-                    parent_task_id=task.parent_task_id,
-                    completed=(
-                        event.completed
-                        if event.completed is not None
-                        else task.completed
-                    ),
-                    total=event.total if event.total is not None else task.total,
-                    current=event.current,
-                    message=event.message,
-                )
-                self._write("UPDATE", event, self._update_status(task, event))
+            if task is None:
+                raise ProgressProtocolError(f"update for unknown task: {event.task_id}")
+            self._tasks[event.task_id] = ProgressEvent(
+                kind="start",
+                task_id=task.task_id,
+                label=task.label,
+                parent_task_id=task.parent_task_id,
+                completed=(
+                    event.completed if event.completed is not None else task.completed
+                ),
+                total=event.total if event.total is not None else task.total,
+                current=event.current,
+                message=event.message,
+            )
+            self._write("UPDATE", event, self._update_status(task, event))
         elif event.kind == "finish":
             task = self._tasks.pop(event.task_id, None)
-            if task is not None:
-                self._write("DONE", event, self._finish_status(task, event), task.label)
+            if task is None:
+                raise ProgressProtocolError(f"finish for unknown task: {event.task_id}")
+            self._write("DONE", event, self._finish_status(task, event), task.label)
 
     @staticmethod
     def _start_status(event: ProgressEvent) -> str:
@@ -165,7 +177,7 @@ class RichProgressReporter:
 
     def _start(self, event: ProgressEvent) -> None:
         if event.task_id in self._tasks:
-            return
+            raise ProgressProtocolError(f"task already started: {event.task_id}")
         self._tasks[event.task_id] = self._progress.add_task(
             event.label or event.task_id,
             total=event.total,
@@ -177,7 +189,7 @@ class RichProgressReporter:
     def _update(self, event: ProgressEvent) -> None:
         task_id = self._tasks.get(event.task_id)
         if task_id is None:
-            return
+            raise ProgressProtocolError(f"update for unknown task: {event.task_id}")
         updates: dict[str, Any] = {}
         if event.completed is not None:
             updates["completed"] = event.completed
@@ -190,12 +202,13 @@ class RichProgressReporter:
             self._progress.update(task_id, **updates)
 
     def _finish(self, event: ProgressEvent) -> None:
-        task_id = self._tasks.pop(event.task_id, None)
+        task_id = self._tasks.get(event.task_id)
+        if task_id is None:
+            raise ProgressProtocolError(f"finish for unknown task: {event.task_id}")
+        self._tasks.pop(event.task_id)
         stored_total = self._totals.pop(event.task_id, None)
         total = event.total if event.total is not None else stored_total
         label = self._labels.pop(event.task_id, event.label or event.task_id)
-        if task_id is None:
-            return
         status = event.message or "complete"
         if total is None:
             self._progress.update(task_id, status=status)

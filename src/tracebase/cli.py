@@ -9,10 +9,15 @@ from pathlib import Path
 from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
-from .collector import CollectionResult
-from .github import _actor, _GitHub
+from .collector import CollectionContext, CollectionResult
 from .github import collect as collect_github
-from .opencode import collect as collect_opencode
+from .github import resolve_context as resolve_github_context
+from .opencode import (
+    collect as collect_opencode,
+)
+from .opencode import (
+    resolve_context as resolve_opencode_context,
+)
 from .progress import (
     LineProgressReporter,
     ProgressEvent,
@@ -47,6 +52,23 @@ def _publish(
     return published
 
 
+def _new_run(
+    archive: Archive,
+    collection_range: CollectionRange,
+    run_id: str,
+    context: CollectionContext,
+) -> CollectionRun:
+    return CollectionRun(
+        archive,
+        context.source_kind,
+        context.scope_id,
+        collection_range,
+        collector_version=context.collector_version,
+        effective_options=context.effective_options,
+        run_id=run_id,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="tracebase", add_help=True, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -78,36 +100,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     with reporter:
         if arguments.source == "opencode":
-            scope_id = arguments.instance_id
-            run = CollectionRun(
-                archive,
-                "opencode",
-                scope_id,
-                collection_range,
-                collector_version="0.1.0",
-                effective_options={"instance_id": scope_id},
-                run_id=run_id,
+            reporter.emit(
+                ProgressEvent(
+                    kind="start",
+                    task_id="prepare",
+                    label="Preparing OpenCode collection",
+                )
             )
-            result = collect_opencode(run, reporter)
+            context = resolve_opencode_context(arguments.instance_id)
+            run = _new_run(archive, collection_range, run_id, context)
+            reporter.emit(ProgressEvent(kind="finish", task_id="prepare"))
+            result = collect_opencode(run, context, reporter)
             published = _publish(run, result, reporter)
             print(
-                f"collected run {run.run_id} with {result.snapshot_count} snapshots "
+                f"collected run {run.run_id} with {run.snapshot_count} snapshots "
                 f"at {archive.root / 'runs' / run.run_id}"
             )
             return 0
 
-        # GitHub scope identity is its authenticated actor's stable node ID.
-        scope_id, login = _actor(_GitHub())
-        run = CollectionRun(
-            archive,
-            "github",
-            scope_id,
-            collection_range,
-            collector_version="0.1.0",
-            effective_options={"actor_login": login},
-            run_id=run_id,
+        reporter.emit(
+            ProgressEvent(
+                kind="start",
+                task_id="prepare",
+                label="Preparing GitHub collection",
+            )
         )
-        result = collect_github(run, (scope_id, login), reporter=reporter)
+        context = resolve_github_context()
+        run = _new_run(archive, collection_range, run_id, context)
+        reporter.emit(ProgressEvent(kind="finish", task_id="prepare"))
+        result = collect_github(run, context, reporter=reporter)
         published = _publish(run, result, reporter)
-        print(f"{run.run_id}  {result.snapshot_count} snapshots  {published}")
+        print(f"{run.run_id}  {run.snapshot_count} snapshots  {published}")
         return 0

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from tracebase.archive import Archive, CollectionRange, CollectionRun, encode_path_id
-from tracebase.opencode import collect
+from tracebase.opencode import collect, resolve_context
 from tracebase.progress import ProgressEvent
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -222,22 +222,23 @@ else:
         )
         reporter = RecordingReporter()
 
-        result = collect(run, reporter=reporter)
+        result = collect(run, resolve_context("instance-1"), reporter=reporter)
 
-        assert result.snapshot_count == 1
+        assert run.snapshot_count == 1
         assert result.coverage["selected_session_count"] == 1
         assert run.staging.exists()
         assert not (tmp_path / "archive" / "runs").exists()
         assert [(event.task_id, event.kind) for event in reporter.events] == [
             ("opencode.discover", "start"),
+            ("opencode.discover", "update"),
             ("opencode.discover", "finish"),
             ("opencode.hydrate", "start"),
             ("opencode.hydrate", "update"),
             ("opencode.hydrate", "update"),
             ("opencode.hydrate", "finish"),
         ]
-        assert reporter.events[3].current == "session-1"
-        assert reporter.events[3].total == 1
+        assert reporter.events[4].current == "session-1"
+        assert reporter.events[4].total == 1
 
     def test_empty_range_publishes_manifest_only_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -290,7 +290,7 @@ def source_fixture(request: pytest.FixtureRequest, tmp_path: Path) -> tuple[str,
     return source, fixture_directory
 
 
-def test_successful_sources_share_the_published_archive_contract(
+def test_successful_sources_share_the_published_archive_contract(  # noqa: PLR0915
     source_fixture: tuple[str, Path], tmp_path: Path
 ) -> None:
     source, fixture_directory = source_fixture
@@ -299,10 +299,27 @@ def test_successful_sources_share_the_published_archive_contract(
     result = _run_collect(source, archive, fixture_directory)
 
     assert result.returncode == 0
-    assert result.stderr == ""
+    assert result.stderr
+    prepare_label = (
+        "Preparing GitHub collection"
+        if source == "github"
+        else "Preparing OpenCode collection"
+    )
+    assert f"START  {prepare_label}" in result.stderr
+    assert f"DONE   {prepare_label}" in result.stderr
+    assert "START  Discovering" in result.stderr
+    assert "UPDATE Discovering" in result.stderr
+    assert "DONE   Discovering" in result.stderr
+    assert "START  Hydrating" in result.stderr
+    assert "UPDATE Hydrating" in result.stderr
+    assert "DONE   Hydrating" in result.stderr
+    assert "START  Publishing" in result.stderr
+    assert "DONE   Publishing" in result.stderr
     assert len(result.stdout.splitlines()) == 1
     assert SOURCE_RESPONSE_MARKER not in result.stdout
     assert SESSION_EXPORT_MARKER not in result.stdout
+    assert SOURCE_RESPONSE_MARKER not in result.stderr
+    assert SESSION_EXPORT_MARKER not in result.stderr
     _assert_authorization_is_not_disclosed(result, archive)
 
     published_runs = list((archive / "runs").iterdir())
@@ -406,6 +423,13 @@ def test_both_commands_reject_matching_published_overlap(
 
     assert second.returncode == 1
     assert second.stdout == ""
+    prepare_label = (
+        "Preparing GitHub collection"
+        if source == "github"
+        else "Preparing OpenCode collection"
+    )
+    assert f"START  {prepare_label}" in second.stderr
+    assert f"DONE   {prepare_label}" not in second.stderr
     assert "overlaps" in second.stderr
     assert list((archive / "runs").iterdir()) == published_runs
     assert list((archive / ".staging").iterdir()) == []
@@ -423,6 +447,7 @@ def test_failed_sources_remain_inspectable_but_do_not_enter_overlap_registry(
 
     assert failed.returncode == 1
     assert failed.stdout == ""
+    assert "START  Preparing" in failed.stderr
     assert SOURCE_RESPONSE_MARKER not in failed.stderr
     assert SESSION_EXPORT_MARKER not in failed.stderr
     assert not (archive / "runs").exists()

@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from .archive import ArchiveError, CollectionRange, CollectionRun, Snapshot
-from .collector import CollectionResult
+from .collector import CollectionResult, GitHubContext
 from .progress import NULL_PROGRESS_REPORTER, ProgressEvent, ProgressReporter
 
 _API_ACCEPT = "application/vnd.github+json"
@@ -208,6 +208,19 @@ def _actor(github: _GitHub) -> tuple[str, str]:
     if not isinstance(node_id, str) or not isinstance(login, str):
         raise ArchiveError("GitHub actor response was invalid")
     return node_id, login
+
+
+def resolve_context() -> GitHubContext:
+    """Resolve the authenticated GitHub actor for a Collection Run."""
+
+    actor_id, login = _actor(_GitHub())
+    return GitHubContext(
+        source_kind="github",
+        scope_id=actor_id,
+        collector_version="0.1.0",
+        effective_options={"actor_login": login},
+        actor_login=login,
+    )
 
 
 def _discovery_queries(
@@ -515,13 +528,13 @@ def _as_list(value: dict[str, Any] | list[Any]) -> list[Any]:
 
 def collect(
     run: CollectionRun,
-    actor: tuple[str, str] | None = None,
+    context: GitHubContext,
     reporter: ProgressReporter = NULL_PROGRESS_REPORTER,
 ) -> CollectionResult:
     """Discover and hydrate all eligible Artifacts."""
 
     github = _GitHub()
-    actor_id, login = actor or _actor(github)
+    actor_id, login = context.scope_id, context.actor_login
     reporter.emit(
         ProgressEvent(
             kind="start",
@@ -586,6 +599,5 @@ def collect(
             ),
             "pagination_complete": True,
             "selected_artifacts": selected,
-        },
-        snapshot_count=selected,
+        }
     )
