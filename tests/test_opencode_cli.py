@@ -8,10 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from tracebase.archive import encode_path_id
+from tracebase.archive import Archive, CollectionRange, CollectionRun, encode_path_id
+from tracebase.opencode import collect
+from tracebase.progress import ProgressEvent
 
 PROJECT_ROOT = Path(__file__).parents[1]
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
+
+
+class RecordingReporter:
+    def __init__(self) -> None:
+        self.events: list[ProgressEvent] = []
+
+    def emit(self, event: ProgressEvent) -> None:
+        self.events.append(event)
 
 
 class TestOpenCodeCollectionCli:
@@ -148,7 +158,8 @@ else:
             result = self.run_cli(root / "archive", self.make_fake_opencode(root))
 
             assert result.returncode == 0
-            assert result.stderr == ""
+            assert "START  Discovering OpenCode sessions" in result.stderr
+            assert "DONE   Publishing archive: Archive published" in result.stderr
             assert result.stdout.count("\n") == 1
             published = next((root / "archive" / "runs").iterdir())
             run_manifest = json.loads((published / "run.json").read_text())
@@ -177,6 +188,57 @@ else:
             assert metadata["session"]["directory"] == "/gamma"
             assert metadata["session"]["parentID"] == "overlaps-start"
             assert metadata["session"]["time"]["archived"] == 1767228400000
+
+    def test_collect_reports_discovery_hydration_and_publish_progress(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "tracebase.opencode._run_opencode",
+            lambda arguments: b"1.18.29" if arguments == ["--version"] else b"export",
+        )
+        monkeypatch.setattr(
+            "tracebase.opencode._start_server",
+            lambda: (None, "", ""),
+        )
+        monkeypatch.setattr("tracebase.opencode._stop_server", lambda _server: None)
+        monkeypatch.setattr(
+            "tracebase.opencode._discover_sessions",
+            lambda _url, _password, _run: [
+                {
+                    "id": "session-1",
+                    "time": {"created": 1767225600000, "updated": 1767225600000},
+                }
+            ],
+        )
+        run = CollectionRun(
+            Archive(tmp_path / "archive"),
+            "opencode",
+            "instance-1",
+            CollectionRange.parse(
+                "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"
+            ),
+            collector_version="test",
+            effective_options={},
+        )
+        reporter = RecordingReporter()
+
+        result = collect(run, reporter)
+
+        assert run.snapshot_count == 1
+        assert result.coverage["selected_session_count"] == 1
+        assert run.staging.exists()
+        assert not (tmp_path / "archive" / "runs").exists()
+        assert [(event.task_id, event.kind) for event in reporter.events] == [
+            ("opencode.discover", "start"),
+            ("opencode.discover", "update"),
+            ("opencode.discover", "finish"),
+            ("opencode.hydrate", "start"),
+            ("opencode.hydrate", "update"),
+            ("opencode.hydrate", "update"),
+            ("opencode.hydrate", "finish"),
+        ]
+        assert reporter.events[4].current == "session-1"
+        assert reporter.events[4].total == 1
 
     def test_empty_range_publishes_manifest_only_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

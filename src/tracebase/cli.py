@@ -5,17 +5,68 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
-from .github import _actor, _GitHub
+from .collector import CollectionContext, CollectionResult
 from .github import collect as collect_github
-from .opencode import collect as collect_opencode
+from .github import resolve_context as resolve_github_context
+from .opencode import (
+    collect as collect_opencode,
+)
+from .opencode import (
+    resolve_context as resolve_opencode_context,
+)
+from .progress import (
+    LineProgressSink,
+    ProgressEvent,
+    ProgressReporter,
+    RichProgressSink,
+)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
     def error(self, _message: str) -> Never:
         raise ArchiveError("invalid command arguments")
+
+
+def _publish(
+    run: CollectionRun, result: CollectionResult, reporter: ProgressReporter
+) -> Path:
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
+            task_id="publish",
+            label="Publishing archive",
+        )
+    )
+    published = run.publish(result.coverage)
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="publish",
+            message="Archive published",
+        )
+    )
+    return published
+
+
+def _new_run(
+    archive: Archive,
+    collection_range: CollectionRange,
+    run_id: str,
+    context: CollectionContext,
+) -> CollectionRun:
+    return CollectionRun(
+        archive,
+        context.source_kind,
+        context.scope_id,
+        collection_range,
+        collector_version=context.collector_version,
+        effective_options=context.effective_options,
+        run_id=run_id,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -37,50 +88,51 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    try:
-        arguments = _parser().parse_args(argv)
-        collection_range = CollectionRange.parse(arguments.from_text, arguments.to_text)
-        archive = Archive(arguments.archive)
-        run_id = archive.new_run_id()
+    # Intentionally let collection/orchestration exceptions propagate.
+    # Progress output provides context while the original traceback remains
+    # visible for debugging; source content and credentials stay excluded.
+    arguments = _parser().parse_args(argv)
+    collection_range = CollectionRange.parse(arguments.from_text, arguments.to_text)
+    archive = Archive(arguments.archive)
+    run_id = archive.new_run_id()
 
+    sink = (
+        RichProgressSink(sys.stderr)
+        if sys.stderr.isatty()
+        else LineProgressSink(sys.stderr)
+    )
+    with sink:
+        progress = ProgressReporter(sink)
         if arguments.source == "opencode":
-            scope_id = arguments.instance_id
-            run = CollectionRun(
-                archive,
-                "opencode",
-                scope_id,
-                collection_range,
-                collector_version="0.1.0",
-                effective_options={"instance_id": scope_id},
-                run_id=run_id,
+            progress.emit(
+                ProgressEvent(
+                    kind="start",
+                    task_id="prepare",
+                    label="Preparing OpenCode collection",
+                )
             )
-            snapshot_count = collect_opencode(run)
+            context = resolve_opencode_context(arguments.instance_id)
+            run = _new_run(archive, collection_range, run_id, context)
+            progress.emit(ProgressEvent(kind="finish", task_id="prepare"))
+            result = collect_opencode(run, progress)
+            published = _publish(run, result, progress)
             print(
-                f"collected run {run.run_id} with {snapshot_count} snapshots "
+                f"collected run {run.run_id} with {run.snapshot_count} snapshots "
                 f"at {archive.root / 'runs' / run.run_id}"
             )
             return 0
-        else:
-            # GitHub scope identity is its authenticated actor's stable node ID.
-            scope_id, login = _actor(_GitHub())
-            run = CollectionRun(
-                archive,
-                "github",
-                scope_id,
-                collection_range,
-                collector_version="0.1.0",
-                effective_options={"actor_login": login},
-                run_id=run_id,
+
+        progress.emit(
+            ProgressEvent(
+                kind="start",
+                task_id="prepare",
+                label="Preparing GitHub collection",
             )
-            coverage = collect_github(run, (scope_id, login))
-            published = run.publish(coverage)
-            print(
-                f"{run.run_id}  {coverage['selected_artifacts']} snapshots  {published}"
-            )
-            return 0
-    except ArchiveError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-    except OSError, RuntimeError:
-        print("error: unable to prepare Collection Run", file=sys.stderr)
-        return 1
+        )
+        context = resolve_github_context()
+        run = _new_run(archive, collection_range, run_id, context)
+        progress.emit(ProgressEvent(kind="finish", task_id="prepare"))
+        result = collect_github(run, progress)
+        published = _publish(run, result, progress)
+        print(f"{run.run_id}  {run.snapshot_count} snapshots  {published}")
+        return 0

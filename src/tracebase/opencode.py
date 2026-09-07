@@ -17,6 +17,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .archive import ArchiveError, CollectionRun, Snapshot
+from .collector import CollectionContext, CollectionResult
+from .progress import ProgressEvent, ProgressReporter
 
 _SERVER_URL_PATTERN = re.compile(r"http://127\.0\.0\.1:\d+")
 _SERVER_START_TIMEOUT_SECONDS = 5
@@ -156,9 +158,30 @@ def _session_interval(session: dict[str, Any]) -> tuple[datetime, datetime]:
     return created, updated
 
 
-def collect(run: CollectionRun) -> int:
+def resolve_context(instance_id: str) -> CollectionContext:
+    """Resolve the caller-provided OpenCode source instance."""
+
+    return CollectionContext(
+        source_kind="opencode",
+        scope_id=instance_id,
+        collector_version="0.1.0",
+        effective_options={"instance_id": instance_id},
+    )
+
+
+def collect(
+    run: CollectionRun,
+    reporter: ProgressReporter,
+) -> CollectionResult:
     """Export every session whose lifecycle intersects the Collection Range."""
 
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
+            task_id="opencode.discover",
+            label="Discovering OpenCode sessions",
+        )
+    )
     opencode_version = _run_opencode(["--version"]).decode("utf-8", "replace").strip()
     list_started_at = _observation_time()
     server, server_url, password = _start_server()
@@ -173,7 +196,39 @@ def collect(run: CollectionRun) -> int:
         if created < run.collection_range.end and run.collection_range.start <= updated:
             selected.append(session)
 
-    for session in selected:
+    reporter.emit(
+        ProgressEvent(
+            kind="update",
+            task_id="opencode.discover",
+            completed=len(sessions),
+            message=f"{len(sessions)} sessions listed, {len(selected)} selected",
+        )
+    )
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="opencode.discover",
+            message=f"{len(selected)} sessions selected from {len(sessions)}",
+        )
+    )
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
+            task_id="opencode.hydrate",
+            label="Hydrating OpenCode sessions",
+            total=len(selected),
+        )
+    )
+    for completed, session in enumerate(selected, start=1):
+        reporter.emit(
+            ProgressEvent(
+                kind="update",
+                task_id="opencode.hydrate",
+                completed=completed - 1,
+                total=len(selected),
+                current=session["id"],
+            )
+        )
         observation_started_at = _observation_time()
         export_command = ["opencode", "export", session["id"]]
         export = _run_opencode(export_command[1:])
@@ -199,9 +254,26 @@ def collect(run: CollectionRun) -> int:
             )
         )
         run.write_evidence(snapshot_root, "session.json", export)
+        reporter.emit(
+            ProgressEvent(
+                kind="update",
+                task_id="opencode.hydrate",
+                completed=completed,
+                total=len(selected),
+                current=session["id"],
+            )
+        )
 
-    run.publish(
-        {
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="opencode.hydrate",
+            completed=len(selected),
+            message=f"{len(selected)} sessions",
+        )
+    )
+    return CollectionResult(
+        coverage={
             "session_discovery_endpoint": "/experimental/session",
             "session_discovery_options": {
                 "start": int(run.collection_range.start.timestamp() * 1000),
@@ -213,4 +285,3 @@ def collect(run: CollectionRun) -> int:
             "selected_session_count": len(selected),
         }
     )
-    return len(selected)

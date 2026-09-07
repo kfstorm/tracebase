@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -32,8 +33,17 @@ from tracebase.github import (
     _updated_range,
     collect,
 )
+from tracebase.progress import LineProgressSink, ProgressEvent, ProgressReporter
 
 PROJECT_ROOT = Path(__file__).parents[1]
+
+
+class RecordingReporter:
+    def __init__(self) -> None:
+        self.events: list[ProgressEvent] = []
+
+    def emit(self, event: ProgressEvent) -> None:
+        self.events.append(event)
 
 
 def build_run(
@@ -58,8 +68,29 @@ def build_github_run(archive: Archive) -> CollectionRun:
         "actor-node",
         CollectionRange.parse("2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"),
         collector_version="test",
-        effective_options={},
+        effective_options={"actor_login": "actor"},
     )
+
+
+def build_test_reporter() -> ProgressReporter:
+    return ProgressReporter(LineProgressSink(StringIO()))
+
+
+def test_collection_run_snapshot_count_tracks_written_snapshots() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+
+        assert run.snapshot_count == 0
+        run.write_snapshot(
+            Snapshot(
+                source_kind="github",
+                object_kind="issue",
+                source_id="issue-node",
+                observation_window={"from": "now", "to": "now"},
+            )
+        )
+
+        assert run.snapshot_count == 1
 
 
 @pytest.mark.parametrize(
@@ -621,15 +652,17 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
     monkeypatch.setattr("tracebase.github._GitHub.request", request)
     with tempfile.TemporaryDirectory() as directory:
         run = build_github_run(Archive(directory))
+        reporter = RecordingReporter()
 
-        coverage = collect(run)
-        published = run.publish(coverage)
+        result = collect(run, reporter)
+        published = run.publish(result.coverage)
         snapshot = next((published / "snapshots/pull-request").iterdir())
         manifest = json.loads((snapshot / "snapshot.json").read_text())
 
-        assert coverage["selected_artifacts"] == 1
-        assert coverage["discovery_matrix_version"] == 1
-        assert [entry["reason"] for entry in coverage["queries"]] == [
+        assert run.snapshot_count == 1
+        assert result.coverage["selected_artifacts"] == 1
+        assert result.coverage["discovery_matrix_version"] == 1
+        assert [entry["reason"] for entry in result.coverage["queries"]] == [
             "authorship",
             "ordinary_comment",
             "submitted_review",
@@ -662,6 +695,20 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
             ]
             == "github"
         )
+        assert [(event.task_id, event.kind) for event in reporter.events] == [
+            ("github.discover", "start"),
+            ("github.discover", "update"),
+            ("github.discover", "update"),
+            ("github.discover", "update"),
+            ("github.discover", "finish"),
+            ("github.hydrate", "start"),
+            ("github.hydrate", "update"),
+            ("github.hydrate", "update"),
+            ("github.hydrate", "finish"),
+        ]
+        assert reporter.events[1].message == "authorship: page 1, 1 candidates"
+        assert reporter.events[6].total == 1
+        assert reporter.events[6].current == "octo/example#7"
 
 
 def test_github_collect_failure_keeps_run_unpublished(
@@ -675,7 +722,7 @@ def test_github_collect_failure_keeps_run_unpublished(
         run = build_github_run(Archive(directory))
 
         with pytest.raises(ArchiveError, match="request failed"):
-            collect(run)
+            collect(run, build_test_reporter())
 
         assert run.staging.exists()
         assert not (Path(directory) / "runs").exists()
@@ -873,11 +920,17 @@ def test_github_discovery_partitions_over_limit_results() -> None:
             )
 
     fixture = SearchFixture()
+    reporter = build_test_reporter()
+    reporter.emit(
+        ProgressEvent(kind="start", task_id="github.discover", label="GitHub discovery")
+    )
     candidates, coverage = _discover(
         fixture,
         "actor",
         CollectionRange.parse("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:02+00:00"),
+        reporter,
     )
+    reporter.emit(ProgressEvent(kind="finish", task_id="github.discover"))
 
     assert candidates == {}
     assert len(coverage) == 9
@@ -920,6 +973,10 @@ def test_github_discovery_rejects_incomplete_later_page() -> None:
                 {},
             )
 
+    reporter = build_test_reporter()
+    reporter.emit(
+        ProgressEvent(kind="start", task_id="github.discover", label="GitHub discovery")
+    )
     with pytest.raises(ArchiveError, match="incomplete"):
         _discover(
             IncompleteFixture(),
@@ -927,4 +984,5 @@ def test_github_discovery_rejects_incomplete_later_page() -> None:
             CollectionRange.parse(
                 "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"
             ),
+            reporter,
         )

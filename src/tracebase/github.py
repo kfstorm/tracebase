@@ -11,6 +11,20 @@ from typing import Any
 from urllib.parse import urlencode
 
 from .archive import ArchiveError, CollectionRange, CollectionRun, Snapshot
+from .collector import CollectionContext, CollectionResult
+from .progress import ProgressEvent, ProgressReporter
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubContext(CollectionContext):
+    """Resolved GitHub actor context used by the GitHub collector."""
+
+    actor_login: str
+
+    def __post_init__(self) -> None:
+        if self.effective_options.get("actor_login") != self.actor_login:
+            raise ArchiveError("GitHub context actor login is inconsistent")
+
 
 _API_ACCEPT = "application/vnd.github+json"
 _TIMELINE_ACCEPT = "application/vnd.github+json"
@@ -208,6 +222,19 @@ def _actor(github: _GitHub) -> tuple[str, str]:
     return node_id, login
 
 
+def resolve_context() -> GitHubContext:
+    """Resolve the authenticated GitHub actor for a Collection Run."""
+
+    actor_id, login = _actor(_GitHub())
+    return GitHubContext(
+        source_kind="github",
+        scope_id=actor_id,
+        collector_version="0.1.0",
+        effective_options={"actor_login": login},
+        actor_login=login,
+    )
+
+
 def _discovery_queries(
     login: str, collection_range: CollectionRange
 ) -> list[tuple[str, str]]:
@@ -231,10 +258,14 @@ def _search_response(value: dict[str, Any] | list[Any]) -> tuple[int, list[Any]]
 
 
 def _discover(  # noqa: PLR0915
-    github: _GitHub, login: str, collection_range: CollectionRange
+    github: _GitHub,
+    login: str,
+    collection_range: CollectionRange,
+    reporter: ProgressReporter,
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]]]:
     candidates: dict[str, _Candidate] = {}
     coverage_queries: list[dict[str, Any]] = []
+    pages_processed = 0
     for name, base_query in _discovery_queries(login, collection_range):
         partitions = [(collection_range.start, collection_range.end)]
         while partitions:
@@ -275,6 +306,14 @@ def _discover(  # noqa: PLR0915
                     }
                 )
                 partitions[0:0] = [(start, midpoint), (midpoint, end)]
+                reporter.emit(
+                    ProgressEvent(
+                        kind="update",
+                        task_id="github.discover",
+                        completed=pages_processed,
+                        message=f"{name}: partitioned page 1 ({total_count} results)",
+                    )
+                )
                 continue
             page = 1
             result_count = 0
@@ -335,6 +374,15 @@ def _discover(  # noqa: PLR0915
                     result_count += 1
                     if source_id not in result_source_ids:
                         result_source_ids.append(source_id)
+                pages_processed += 1
+                reporter.emit(
+                    ProgressEvent(
+                        kind="update",
+                        task_id="github.discover",
+                        completed=pages_processed,
+                        message=f"{name}: page {page}, {len(candidates)} candidates",
+                    )
+                )
                 if not _has_next(response):
                     if total_count > len(result_source_ids):
                         raise ArchiveError("GitHub discovery pagination incomplete")
@@ -490,21 +538,80 @@ def _as_list(value: dict[str, Any] | list[Any]) -> list[Any]:
     return value
 
 
-def collect(run: CollectionRun, actor: tuple[str, str] | None = None) -> dict[str, Any]:
-    """Discover and hydrate all eligible Artifacts, returning observed Coverage."""
+def collect(
+    run: CollectionRun,
+    reporter: ProgressReporter,
+) -> CollectionResult:
+    """Discover and hydrate all eligible Artifacts."""
 
     github = _GitHub()
-    actor_id, login = actor or _actor(github)
-    candidates, discovery = _discover(github, login, run.collection_range)
+    actor_id = run.scope_id
+    login = run.effective_options.get("actor_login")
+    if not isinstance(login, str):
+        raise ArchiveError("GitHub Collection Run actor login is invalid")
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
+            task_id="github.discover",
+            label="Discovering GitHub artifacts",
+        )
+    )
+    candidates, discovery = _discover(github, login, run.collection_range, reporter)
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="github.discover",
+            message=f"{len(candidates)} candidates",
+        )
+    )
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
+            task_id="github.hydrate",
+            label="Hydrating GitHub artifacts",
+            total=len(candidates),
+        )
+    )
     selected = 0
     for candidate in candidates.values():
+        current = f"{candidate.repository}#{candidate.number}"
+        reporter.emit(
+            ProgressEvent(
+                kind="update",
+                task_id="github.hydrate",
+                completed=selected,
+                total=len(candidates),
+                current=current,
+            )
+        )
         _hydrate(run, github, candidate)
         selected += 1
-    return {
-        "actor": {"node_id": actor_id, "login": login},
-        "discovery_matrix_version": _DISCOVERY_MATRIX_VERSION,
-        "queries": discovery,
-        "permission_boundary": "responses visible to the authenticated GitHub actor",
-        "pagination_complete": True,
-        "selected_artifacts": selected,
-    }
+        reporter.emit(
+            ProgressEvent(
+                kind="update",
+                task_id="github.hydrate",
+                completed=selected,
+                total=len(candidates),
+                current=current,
+            )
+        )
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="github.hydrate",
+            completed=selected,
+            message=f"{selected} artifacts",
+        )
+    )
+    return CollectionResult(
+        coverage={
+            "actor": {"node_id": actor_id, "login": login},
+            "discovery_matrix_version": _DISCOVERY_MATRIX_VERSION,
+            "queries": discovery,
+            "permission_boundary": (
+                "responses visible to the authenticated GitHub actor"
+            ),
+            "pagination_complete": True,
+            "selected_artifacts": selected,
+        }
+    )
