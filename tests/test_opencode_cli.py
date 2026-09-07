@@ -258,6 +258,8 @@ else:
         ]
         assert reporter.events[4].current == "session-1"
         assert reporter.events[4].total == 1
+        assert reporter.events[4].phase == "starting"
+        assert reporter.events[5].phase == "completed"
 
     def test_empty_range_publishes_manifest_only_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

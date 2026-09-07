@@ -760,6 +760,8 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
         assert reporter.events[1].message == "authorship: page 1, 1 candidates"
         assert reporter.events[6].total == 1
         assert reporter.events[6].current == "octo/example#7"
+        assert reporter.events[6].phase == "starting"
+        assert reporter.events[7].phase == "completed"
 
 
 def test_github_collect_preserves_review_thread_source_native_responses(

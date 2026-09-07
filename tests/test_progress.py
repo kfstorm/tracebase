@@ -57,6 +57,7 @@ def test_rich_progress_renders_complete_lifecycle_after_removed_task() -> None:
                 task_id="github.hydrate",
                 completed=1,
                 total=2,
+                phase="completed",
                 current="octo/example#7",
             )
         )
@@ -146,6 +147,7 @@ def test_line_progress_reports_complete_lifecycle_for_non_tty() -> None:
                 kind="update",
                 task_id="github.hydrate",
                 completed=1,
+                phase="completed",
                 current="kfstorm/foo#42",
             )
         )
@@ -164,7 +166,8 @@ def test_line_progress_reports_complete_lifecycle_for_non_tty() -> None:
         "Authorship: page 1, 37 candidates",
         "2026-09-07T04:01:22Z DONE   Discovering GitHub artifacts: 81 candidates",
         "2026-09-07T04:01:22Z START  Hydrating GitHub artifacts: 0/81",
-        "2026-09-07T04:01:22Z UPDATE Hydrating GitHub artifacts: 1/81 kfstorm/foo#42",
+        "2026-09-07T04:01:22Z UPDATE Hydrating GitHub artifacts: "
+        "1/81 completed kfstorm/foo#42",
         "2026-09-07T04:01:22Z DONE   Hydrating GitHub artifacts: 81/81 81 artifacts",
     ]
 

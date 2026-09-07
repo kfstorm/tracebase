@@ -859,6 +859,7 @@ def collect(
                 task_id="github.hydrate",
                 completed=selected,
                 total=len(candidates),
+                phase="starting",
                 current=current,
             )
         )
@@ -870,6 +871,7 @@ def collect(
                 task_id="github.hydrate",
                 completed=selected,
                 total=len(candidates),
+                phase="completed",
                 current=current,
             )
         )
