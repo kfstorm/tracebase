@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from tracebase.archive import Archive, CollectionRange, CollectionRun, encode_path_id
-from tracebase.opencode import collect, resolve_context
+from tracebase.opencode import collect
 from tracebase.progress import ProgressEvent
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -222,7 +222,7 @@ else:
         )
         reporter = RecordingReporter()
 
-        result = collect(run, resolve_context("instance-1"), reporter=reporter)
+        result = collect(run, reporter)
 
         assert run.snapshot_count == 1
         assert result.coverage["selected_session_count"] == 1

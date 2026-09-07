@@ -42,18 +42,41 @@ class ProgressEvent:
             raise ProgressProtocolError(f"unknown progress event kind: {self.kind!r}")
 
 
-class ProgressReporter(Protocol):
+class ProgressSink(Protocol):
     def emit(self, event: ProgressEvent) -> None: ...
 
 
-class NullProgressReporter:
+class ProgressReporter:
+    """Validate task lifecycles before forwarding events to a presentation sink."""
+
+    def __init__(self, sink: ProgressSink) -> None:
+        self._sink = sink
+        self._tasks: set[str] = set()
+
+    def emit(self, event: ProgressEvent) -> None:
+        if event.kind == "start":
+            if event.task_id in self._tasks:
+                raise ProgressProtocolError(f"task already started: {event.task_id}")
+            self._sink.emit(event)
+            self._tasks.add(event.task_id)
+        elif event.kind == "update":
+            if event.task_id not in self._tasks:
+                raise ProgressProtocolError(f"update for unknown task: {event.task_id}")
+            self._sink.emit(event)
+        elif event.kind == "finish":
+            if event.task_id not in self._tasks:
+                raise ProgressProtocolError(f"finish for unknown task: {event.task_id}")
+            self._sink.emit(event)
+            self._tasks.remove(event.task_id)
+        else:
+            raise ProgressProtocolError(f"unknown progress event kind: {event.kind!r}")
+
+
+class NullProgressSink:
     """Discard progress events for callers that do not need presentation."""
 
     def emit(self, _event: ProgressEvent) -> None:
         pass
-
-
-NULL_PROGRESS_REPORTER = NullProgressReporter()
 
 
 ProgressClock = Callable[[], datetime]
@@ -79,14 +102,12 @@ class LineProgressReporter:
 
     def emit(self, event: ProgressEvent) -> None:
         if event.kind == "start":
-            if event.task_id in self._tasks:
-                raise ProgressProtocolError(f"task already started: {event.task_id}")
             self._tasks[event.task_id] = event
             self._write("START", event, self._start_status(event))
         elif event.kind == "update":
             task = self._tasks.get(event.task_id)
             if task is None:
-                raise ProgressProtocolError(f"update for unknown task: {event.task_id}")
+                return
             self._tasks[event.task_id] = ProgressEvent(
                 kind="start",
                 task_id=task.task_id,
@@ -103,7 +124,7 @@ class LineProgressReporter:
         elif event.kind == "finish":
             task = self._tasks.pop(event.task_id, None)
             if task is None:
-                raise ProgressProtocolError(f"finish for unknown task: {event.task_id}")
+                return
             self._write("DONE", event, self._finish_status(task, event), task.label)
 
     @staticmethod
@@ -204,7 +225,7 @@ class RichProgressReporter:
     def _finish(self, event: ProgressEvent) -> None:
         task_id = self._tasks.get(event.task_id)
         if task_id is None:
-            raise ProgressProtocolError(f"finish for unknown task: {event.task_id}")
+            return
         self._tasks.pop(event.task_id)
         stored_total = self._totals.pop(event.task_id, None)
         total = event.total if event.total is not None else stored_total

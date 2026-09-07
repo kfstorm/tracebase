@@ -11,8 +11,20 @@ from typing import Any
 from urllib.parse import urlencode
 
 from .archive import ArchiveError, CollectionRange, CollectionRun, Snapshot
-from .collector import CollectionResult, GitHubContext
-from .progress import NULL_PROGRESS_REPORTER, ProgressEvent, ProgressReporter
+from .collector import CollectionContext, CollectionResult
+from .progress import ProgressEvent, ProgressReporter
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubContext(CollectionContext):
+    """Resolved GitHub actor context used by the GitHub collector."""
+
+    actor_login: str
+
+    def __post_init__(self) -> None:
+        if self.effective_options.get("actor_login") != self.actor_login:
+            raise ArchiveError("GitHub context actor login is inconsistent")
+
 
 _API_ACCEPT = "application/vnd.github+json"
 _TIMELINE_ACCEPT = "application/vnd.github+json"
@@ -249,7 +261,7 @@ def _discover(  # noqa: PLR0915
     github: _GitHub,
     login: str,
     collection_range: CollectionRange,
-    reporter: ProgressReporter = NULL_PROGRESS_REPORTER,
+    reporter: ProgressReporter,
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]]]:
     candidates: dict[str, _Candidate] = {}
     coverage_queries: list[dict[str, Any]] = []
@@ -528,13 +540,15 @@ def _as_list(value: dict[str, Any] | list[Any]) -> list[Any]:
 
 def collect(
     run: CollectionRun,
-    context: GitHubContext,
-    reporter: ProgressReporter = NULL_PROGRESS_REPORTER,
+    reporter: ProgressReporter,
 ) -> CollectionResult:
     """Discover and hydrate all eligible Artifacts."""
 
     github = _GitHub()
-    actor_id, login = context.scope_id, context.actor_login
+    actor_id = run.scope_id
+    login = run.effective_options.get("actor_login")
+    if not isinstance(login, str):
+        raise ArchiveError("GitHub Collection Run actor login is invalid")
     reporter.emit(
         ProgressEvent(
             kind="start",

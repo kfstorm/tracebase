@@ -5,8 +5,10 @@ import pytest
 
 from tracebase.progress import (
     LineProgressReporter,
+    NullProgressSink,
     ProgressEvent,
     ProgressProtocolError,
+    ProgressReporter,
     RichProgressReporter,
 )
 
@@ -168,12 +170,15 @@ def test_line_progress_reports_complete_lifecycle_for_non_tty() -> None:
     ]
 
 
-@pytest.mark.parametrize("reporter_type", [LineProgressReporter, RichProgressReporter])
-def test_reporters_fail_fast_on_invalid_task_lifecycle(reporter_type: type) -> None:
-    stream = TTYBuffer() if reporter_type is RichProgressReporter else StringIO()
-    reporter = reporter_type(stream)
+@pytest.mark.parametrize("sink_type", [LineProgressReporter, RichProgressReporter])
+def test_progress_reporter_fails_fast_on_invalid_task_lifecycle(
+    sink_type: type,
+) -> None:
+    stream = TTYBuffer() if sink_type is RichProgressReporter else StringIO()
+    sink = sink_type(stream)
+    reporter = ProgressReporter(sink)
 
-    with reporter:
+    with sink:
         reporter.emit(ProgressEvent(kind="start", task_id="task", label="Task"))
         with pytest.raises(ProgressProtocolError, match="already started"):
             reporter.emit(ProgressEvent(kind="start", task_id="task", label="Task"))
@@ -186,3 +191,11 @@ def test_reporters_fail_fast_on_invalid_task_lifecycle(reporter_type: type) -> N
 def test_progress_event_rejects_unknown_kind() -> None:
     with pytest.raises(ProgressProtocolError, match="unknown progress event kind"):
         ProgressEvent(kind="udpate", task_id="task")  # type: ignore[arg-type]
+
+
+def test_progress_reporter_state_is_not_shared_between_runs() -> None:
+    first = ProgressReporter(NullProgressSink())
+    second = ProgressReporter(NullProgressSink())
+
+    first.emit(ProgressEvent(kind="start", task_id="task"))
+    second.emit(ProgressEvent(kind="start", task_id="task"))

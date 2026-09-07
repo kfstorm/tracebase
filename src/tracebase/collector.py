@@ -21,10 +21,3 @@ class CollectionContext:
     scope_id: str
     collector_version: str
     effective_options: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class GitHubContext(CollectionContext):
-    """Resolved GitHub actor context used by the GitHub collector."""
-
-    actor_login: str

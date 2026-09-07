@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 
 from .archive import ArchiveError, CollectionRun, Snapshot
 from .collector import CollectionContext, CollectionResult
-from .progress import NULL_PROGRESS_REPORTER, ProgressEvent, ProgressReporter
+from .progress import ProgressEvent, ProgressReporter
 
 _SERVER_URL_PATTERN = re.compile(r"http://127\.0\.0\.1:\d+")
 _SERVER_START_TIMEOUT_SECONDS = 5
@@ -171,8 +171,7 @@ def resolve_context(instance_id: str) -> CollectionContext:
 
 def collect(
     run: CollectionRun,
-    _context: CollectionContext,
-    reporter: ProgressReporter = NULL_PROGRESS_REPORTER,
+    reporter: ProgressReporter,
 ) -> CollectionResult:
     """Export every session whose lifecycle intersects the Collection Range."""
 

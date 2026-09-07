@@ -93,14 +93,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     archive = Archive(arguments.archive)
     run_id = archive.new_run_id()
 
-    reporter = (
+    sink = (
         RichProgressReporter(sys.stderr)
         if sys.stderr.isatty()
         else LineProgressReporter(sys.stderr)
     )
-    with reporter:
+    with sink:
+        progress = ProgressReporter(sink)
         if arguments.source == "opencode":
-            reporter.emit(
+            progress.emit(
                 ProgressEvent(
                     kind="start",
                     task_id="prepare",
@@ -109,16 +110,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             context = resolve_opencode_context(arguments.instance_id)
             run = _new_run(archive, collection_range, run_id, context)
-            reporter.emit(ProgressEvent(kind="finish", task_id="prepare"))
-            result = collect_opencode(run, context, reporter)
-            published = _publish(run, result, reporter)
+            progress.emit(ProgressEvent(kind="finish", task_id="prepare"))
+            result = collect_opencode(run, progress)
+            published = _publish(run, result, progress)
             print(
                 f"collected run {run.run_id} with {run.snapshot_count} snapshots "
                 f"at {archive.root / 'runs' / run.run_id}"
             )
             return 0
 
-        reporter.emit(
+        progress.emit(
             ProgressEvent(
                 kind="start",
                 task_id="prepare",
@@ -127,8 +128,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         context = resolve_github_context()
         run = _new_run(archive, collection_range, run_id, context)
-        reporter.emit(ProgressEvent(kind="finish", task_id="prepare"))
-        result = collect_github(run, context, reporter=reporter)
-        published = _publish(run, result, reporter)
+        progress.emit(ProgressEvent(kind="finish", task_id="prepare"))
+        result = collect_github(run, progress)
+        published = _publish(run, result, progress)
         print(f"{run.run_id}  {run.snapshot_count} snapshots  {published}")
         return 0
