@@ -812,7 +812,7 @@ def test_github_collect_preserves_review_thread_source_native_responses(
                                     "isOutdated": True,
                                     "resolvedBy": None,
                                     "comments": {
-                                        "nodes": [{"id": "comment-3", "body": "old"}],
+                                        "nodes": [{"id": "comment-3"}],
                                         "pageInfo": {
                                             "hasNextPage": False,
                                             "endCursor": None,
@@ -956,6 +956,94 @@ def test_github_collect_preserves_review_thread_source_native_responses(
                 None,
             ),
         ]
+
+
+@pytest.mark.parametrize("mode", ["retry", "exhausted"])
+def test_github_hydration_enforces_review_comment_join(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item, responses = build_github_pr_fixture()
+    review_comments_endpoint = (
+        "/repos/octo/example/pulls/7/comments?per_page=100&page=1"
+    )
+    full_review_comments = responses[review_comments_endpoint][0]
+    incomplete_review_comments = json.dumps(
+        json.loads(full_review_comments)[:2], separators=(",", ":")
+    ).encode()
+    graphql_response = _Response(
+        json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "thread-1",
+                                        "comments": {
+                                            "nodes": [
+                                                {"id": "comment-1"},
+                                                {"id": "comment-2"},
+                                                {"id": "comment-3"},
+                                            ],
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
+                                        },
+                                    }
+                                ],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+            separators=(",", ":"),
+        ).encode(),
+        200,
+        {},
+    )
+    base_request = build_github_request(item, responses)
+    review_comment_calls = 0
+
+    def request(
+        self: object, endpoint: str, accept: str = "application/vnd.github+json"
+    ) -> _Response:
+        nonlocal review_comment_calls
+        if endpoint == review_comments_endpoint:
+            review_comment_calls += 1
+            if mode == "exhausted" or review_comment_calls == 1:
+                return _Response(incomplete_review_comments, 200, {})
+            return _Response(full_review_comments, 200, {})
+        return base_request(self, endpoint, accept)
+
+    def graphql(_self: object, _query: str) -> _Response:
+        return graphql_response
+
+    monkeypatch.setattr("tracebase.github._GitHub.request", request)
+    monkeypatch.setattr("tracebase.github._GitHub.graphql", graphql)
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+        if mode == "retry":
+            result = collect(run, build_test_reporter())
+            published = run.publish(result.coverage)
+            snapshot = next((published / "snapshots/pull-request").iterdir())
+
+            assert review_comment_calls == 2
+            assert (
+                snapshot / "review-comments.001.json"
+            ).read_bytes() == full_review_comments
+        else:
+            with pytest.raises(ArchiveError, match="review comment join"):
+                collect(run, build_test_reporter())
+
+            assert review_comment_calls == 3
+            assert run.staging.exists()
+            assert not (Path(directory) / "runs").exists()
 
 
 def test_github_collect_failure_keeps_run_unpublished(
@@ -1115,7 +1203,18 @@ elif endpoint.endswith("/issues/7/comments?per_page=100&page=1"):
     body = b'[{"user":{"node_id":"actor-node"}}]'
     headers = b"HTTP/1.1 200 OK\\r\\nLink: <next>; rel=\\\"next\\\"\\r\\n\\r\\n"
 elif endpoint.endswith("/issues/7/comments?per_page=100&page=2"): body = b"[]"
-elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1") or endpoint.endswith("/pulls/7/comments?per_page=100&page=1"): body = b"[]"
+elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1"): body = b"[]"
+elif endpoint.endswith("/pulls/7/comments?per_page=100&page=1"):
+    body = json.dumps([
+        {"node_id": thread_id + "-comment-" + str(number)}
+        for thread_id in (
+            "thread-cli-resolved-current",
+            "thread-cli-unresolved-current",
+            "thread-cli-resolved-outdated",
+            "thread-cli-unresolved-outdated",
+        )
+        for number in (1, 2)
+    ]).encode()
 elif endpoint.endswith("/pulls/7/reviews?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"},"submitted_at":"x"}]'
 elif endpoint.startswith("query=query PullRequestReviewThreads"):
     body = json.dumps({

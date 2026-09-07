@@ -36,6 +36,7 @@ _REQUEST_TIMEOUT_SECONDS = 60
 _API_VERSION = "2022-11-28"
 _MINIMUM_PARTITION = timedelta(seconds=1)
 _DISCOVERY_MATRIX_VERSION = 1
+_REVIEW_COMMENT_JOIN_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -351,8 +352,35 @@ def _review_comment_nodes(value: Any) -> list[dict[str, Any]]:
     return value
 
 
-def _review_thread_evidence(github: _GitHub, candidate: _Candidate) -> list[_Evidence]:
+def _review_comments_evidence(
+    github: _GitHub, endpoint: str
+) -> tuple[list[_Evidence], set[str]]:
     evidence: list[_Evidence] = []
+    comment_ids: set[str] = set()
+    for page_number, (page, response) in enumerate(_pages(github, endpoint), start=1):
+        value = github.json(response)
+        if not isinstance(value, list) or not all(
+            isinstance(comment, dict) and isinstance(comment.get("node_id"), str)
+            for comment in value
+        ):
+            raise ArchiveError("GitHub review-comment response was invalid")
+        comment_ids.update(comment["node_id"] for comment in value)
+        evidence.append(
+            _Evidence(
+                f"review-comments.{page_number:03d}.json",
+                page,
+                _API_ACCEPT,
+                response,
+            )
+        )
+    return evidence, comment_ids
+
+
+def _review_thread_evidence(
+    github: _GitHub, candidate: _Candidate
+) -> tuple[list[_Evidence], set[str]]:
+    evidence: list[_Evidence] = []
+    comment_ids: set[str] = set()
     thread_cursor: str | None = None
     thread_page_number = 0
     thread_number = 0
@@ -382,7 +410,9 @@ def _review_thread_evidence(github: _GitHub, candidate: _Candidate) -> list[_Evi
                 or not isinstance(comments.get("pageInfo"), dict)
             ):
                 raise ArchiveError("GitHub review-thread response was invalid")
-            _review_comment_nodes(comments["nodes"])
+            comment_ids.update(
+                comment["id"] for comment in _review_comment_nodes(comments["nodes"])
+            )
             thread_number += 1
             comment_cursor: str | None = None
             comment_page_number = 1
@@ -412,13 +442,16 @@ def _review_thread_evidence(github: _GitHub, candidate: _Candidate) -> list[_Evi
                         },
                     )
                 )
-                _review_comment_nodes(comment_connection["nodes"])
+                comment_ids.update(
+                    comment["id"]
+                    for comment in _review_comment_nodes(comment_connection["nodes"])
+                )
                 has_next_comments, comment_cursor = _graphql_page_info(
                     comment_connection["pageInfo"]
                 )
         has_next_threads, thread_cursor = _graphql_page_info(page_info)
         if not has_next_threads:
-            return evidence
+            return evidence, comment_ids
 
 
 def _pages(
@@ -712,18 +745,27 @@ def _hydrate(
                 )
             )
         review_comments_endpoint = f"{pull_endpoint}/comments"
-        for page_number, (page, response) in enumerate(
-            _pages(github, review_comments_endpoint), start=1
-        ):
-            evidence.append(
-                _Evidence(
-                    f"review-comments.{page_number:03d}.json",
-                    page,
-                    _API_ACCEPT,
-                    response,
+        review_comment_evidence, rest_comment_ids = _review_comments_evidence(
+            github, review_comments_endpoint
+        )
+        review_thread_evidence, graphql_comment_ids = _review_thread_evidence(
+            github, candidate
+        )
+        for retry in range(_REVIEW_COMMENT_JOIN_RETRIES + 1):
+            missing_comment_ids = graphql_comment_ids - rest_comment_ids
+            if not missing_comment_ids:
+                break
+            if retry == _REVIEW_COMMENT_JOIN_RETRIES:
+                missing = ", ".join(sorted(missing_comment_ids))
+                raise ArchiveError(
+                    "GitHub review comment join was incomplete; "
+                    f"missing REST comments: {missing}"
                 )
+            review_comment_evidence, rest_comment_ids = _review_comments_evidence(
+                github, review_comments_endpoint
             )
-        evidence.extend(_review_thread_evidence(github, candidate))
+        evidence.extend(review_comment_evidence)
+        evidence.extend(review_thread_evidence)
         diff_response = github.request(pull_endpoint, _DIFF_ACCEPT)
         evidence.append(
             _Evidence("pull-request.diff", pull_endpoint, _DIFF_ACCEPT, diff_response)
