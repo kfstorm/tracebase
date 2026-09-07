@@ -446,6 +446,7 @@ def test_failed_sources_remain_inspectable_but_do_not_enter_overlap_registry(
     failed = _run_collect(source, archive, fixture_directory, fail_source=True)
 
     assert failed.returncode == 1
+    assert "Traceback (most recent call last)" in failed.stderr
     assert failed.stdout == ""
     assert "START  Preparing" in failed.stderr
     assert SOURCE_RESPONSE_MARKER not in failed.stderr

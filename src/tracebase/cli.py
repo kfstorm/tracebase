@@ -88,6 +88,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Intentionally let collection/orchestration exceptions propagate.
+    # Progress output provides context while the original traceback remains
+    # visible for debugging; source content and credentials stay excluded.
     arguments = _parser().parse_args(argv)
     collection_range = CollectionRange.parse(arguments.from_text, arguments.to_text)
     archive = Archive(arguments.archive)
