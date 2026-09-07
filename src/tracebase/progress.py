@@ -72,13 +72,6 @@ class ProgressReporter:
             raise ProgressProtocolError(f"unknown progress event kind: {event.kind!r}")
 
 
-class NullProgressSink:
-    """Discard progress events for callers that do not need presentation."""
-
-    def emit(self, _event: ProgressEvent) -> None:
-        pass
-
-
 ProgressClock = Callable[[], datetime]
 
 

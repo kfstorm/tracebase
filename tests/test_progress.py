@@ -5,7 +5,6 @@ import pytest
 
 from tracebase.progress import (
     LineProgressSink,
-    NullProgressSink,
     ProgressEvent,
     ProgressProtocolError,
     ProgressReporter,
@@ -194,8 +193,8 @@ def test_progress_event_rejects_unknown_kind() -> None:
 
 
 def test_progress_reporter_state_is_not_shared_between_runs() -> None:
-    first = ProgressReporter(NullProgressSink())
-    second = ProgressReporter(NullProgressSink())
+    first = ProgressReporter(LineProgressSink(StringIO()))
+    second = ProgressReporter(LineProgressSink(StringIO()))
 
     first.emit(ProgressEvent(kind="start", task_id="task"))
     second.emit(ProgressEvent(kind="start", task_id="task"))

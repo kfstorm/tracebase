@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ from tracebase.github import (
     _updated_range,
     collect,
 )
-from tracebase.progress import NullProgressSink, ProgressEvent, ProgressReporter
+from tracebase.progress import LineProgressSink, ProgressEvent, ProgressReporter
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -71,8 +72,8 @@ def build_github_run(archive: Archive) -> CollectionRun:
     )
 
 
-def build_null_reporter() -> ProgressReporter:
-    return ProgressReporter(NullProgressSink())
+def build_test_reporter() -> ProgressReporter:
+    return ProgressReporter(LineProgressSink(StringIO()))
 
 
 def test_collection_run_snapshot_count_tracks_written_snapshots() -> None:
@@ -721,7 +722,7 @@ def test_github_collect_failure_keeps_run_unpublished(
         run = build_github_run(Archive(directory))
 
         with pytest.raises(ArchiveError, match="request failed"):
-            collect(run, build_null_reporter())
+            collect(run, build_test_reporter())
 
         assert run.staging.exists()
         assert not (Path(directory) / "runs").exists()
@@ -919,7 +920,7 @@ def test_github_discovery_partitions_over_limit_results() -> None:
             )
 
     fixture = SearchFixture()
-    reporter = build_null_reporter()
+    reporter = build_test_reporter()
     reporter.emit(
         ProgressEvent(kind="start", task_id="github.discover", label="GitHub discovery")
     )
@@ -972,7 +973,7 @@ def test_github_discovery_rejects_incomplete_later_page() -> None:
                 {},
             )
 
-    reporter = build_null_reporter()
+    reporter = build_test_reporter()
     reporter.emit(
         ProgressEvent(kind="start", task_id="github.discover", label="GitHub discovery")
     )
