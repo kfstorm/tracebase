@@ -250,21 +250,9 @@ def _repository_parts(repository: str) -> tuple[str, str]:
     return owner, name
 
 
-_REVIEW_COMMENT_FIELDS = """
+_REVIEW_COMMENT_ID_FIELDS = """
               nodes {
                 id
-                body
-                path
-                line
-                originalLine
-                startLine
-                originalStartLine
-                diffHunk
-                createdAt
-                updatedAt
-                author {
-                  login
-                }
               }
               pageInfo {
                 hasNextPage
@@ -295,7 +283,7 @@ def _review_threads_query(repository: str, number: int, cursor: str | None) -> s
             id
             login
           }}
-          comments(first: 100) {{{_REVIEW_COMMENT_FIELDS}          }}
+          comments(first: 100) {{{_REVIEW_COMMENT_ID_FIELDS}          }}
         }}
         pageInfo {{
           hasNextPage
@@ -313,7 +301,7 @@ def _review_thread_comments_query(thread_id: str, cursor: str) -> str:
   node(id: {json.dumps(thread_id)}) {{
     ... on PullRequestReviewThread {{
       id
-      comments(first: 100, after: {cursor_value}) {{{_REVIEW_COMMENT_FIELDS}      }}
+      comments(first: 100, after: {cursor_value}) {{{_REVIEW_COMMENT_ID_FIELDS}      }}
     }}
   }}
 }}"""
@@ -356,7 +344,8 @@ def _review_thread_comment_page(data: dict[str, Any], thread_id: str) -> dict[st
 
 def _review_comment_nodes(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not all(
-        isinstance(comment, dict) for comment in value
+        isinstance(comment, dict) and isinstance(comment.get("id"), str)
+        for comment in value
     ):
         raise ArchiveError("GitHub review-thread comments response was invalid")
     return value

@@ -98,7 +98,10 @@ def build_github_pr_fixture() -> tuple[
         "/repos/octo/example/issues/7/timeline?per_page=100&page=1": (b"[]", {}),
         "/repos/octo/example/pulls/7": (b'{"node_id":"pr-node"}', {}),
         "/repos/octo/example/pulls/7/reviews?per_page=100&page=1": (b"[]", {}),
-        "/repos/octo/example/pulls/7/comments?per_page=100&page=1": (b"[]", {}),
+        "/repos/octo/example/pulls/7/comments?per_page=100&page=1": (
+            b'[{"id":101,"node_id":"comment-1","body":"rest first","path":"src/example.py","line":10,"original_line":10,"in_reply_to_id":null},{"id":102,"node_id":"comment-2","body":"rest second","path":"src/example.py","line":10,"original_line":10,"in_reply_to_id":101},{"id":103,"node_id":"comment-3","body":"rest third","path":"src/example.py","line":10,"original_line":10,"in_reply_to_id":102}]',
+            {},
+        ),
     }
     return item, responses
 
@@ -787,8 +790,8 @@ def test_github_collect_preserves_review_thread_source_native_responses(
                                     },
                                     "comments": {
                                         "nodes": [
-                                            {"id": "comment-1", "body": "first"},
-                                            {"id": "comment-2", "body": "second"},
+                                            {"id": "comment-1"},
+                                            {"id": "comment-2"},
                                         ],
                                         "pageInfo": {
                                             "hasNextPage": True,
@@ -828,7 +831,7 @@ def test_github_collect_preserves_review_thread_source_native_responses(
         },
         separators=(",", ":"),
     ).encode()
-    nested_comment_page = b'{"data":{"node":{"id":"thread-resolved-current","comments":{"nodes":[{"id":"comment-3","body":"third"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}'
+    nested_comment_page = b'{"data":{"node":{"id":"thread-resolved-current","comments":{"nodes":[{"id":"comment-3"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}'
     thread_page_two = b'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
     outer_graphql_responses = iter(
         [
@@ -840,6 +843,9 @@ def test_github_collect_preserves_review_thread_source_native_responses(
     request = build_github_request(item, responses)
 
     def graphql(_self: object, query: str) -> _Response:
+        assert "body" not in query
+        assert "databaseId" not in query
+        assert "diffHunk" not in query
         if "PullRequestReviewThreadComments" in query:
             return _Response(nested_comment_page, 200, {})
         assert "reviewThreads" in query
@@ -895,11 +901,20 @@ def test_github_collect_preserves_review_thread_source_native_responses(
         assert json.loads(nested_comment_page)["data"]["node"]["id"] == (
             "thread-resolved-current"
         )
-        assert json.loads((snapshot / "review-threads.001.json").read_bytes())["data"][
-            "repository"
-        ]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"] == [
-            {"id": "comment-1", "body": "first"},
-            {"id": "comment-2", "body": "second"},
+        rest_comments = json.loads((snapshot / "review-comments.001.json").read_bytes())
+        first_thread = json.loads((snapshot / "review-threads.001.json").read_bytes())[
+            "data"
+        ]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]
+        supplemental_comments = json.loads(
+            (snapshot / "review-thread-comments.001.002.json").read_bytes()
+        )["data"]["node"]["comments"]["nodes"]
+        graph_comment_ids = {
+            comment["id"] for comment in first_thread["comments"]["nodes"]
+        } | {comment["id"] for comment in supplemental_comments}
+        assert graph_comment_ids == {comment["node_id"] for comment in rest_comments}
+        assert first_thread["comments"]["nodes"] == [
+            {"id": "comment-1"},
+            {"id": "comment-2"},
         ]
         threads = json.loads((snapshot / "review-threads.001.json").read_bytes())[
             "data"
@@ -1087,8 +1102,8 @@ def review_thread(thread_id, resolved, outdated, line, original_line, resolver):
         "resolvedBy": {"id": "reviewer-id", "login": "reviewer"} if resolver else None,
         "comments": {
             "nodes": [
-                {"id": thread_id + "-comment-1", "body": "first"},
-                {"id": thread_id + "-comment-2", "body": "second"},
+                {"id": thread_id + "-comment-1"},
+                {"id": thread_id + "-comment-2"},
             ],
             "pageInfo": {"hasNextPage": False, "endCursor": None},
         },
