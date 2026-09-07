@@ -76,6 +76,55 @@ def build_test_reporter() -> ProgressReporter:
     return ProgressReporter(LineProgressSink(StringIO()))
 
 
+def build_github_pr_fixture() -> tuple[
+    dict[str, object], dict[str, tuple[bytes, dict[str, str]]]
+]:
+    actor = {"node_id": "actor-node", "login": "actor"}
+    item: dict[str, object] = {
+        "node_id": "pr-node",
+        "number": 7,
+        "repository_url": "https://api.github.com/repos/octo/example",
+        "pull_request": {},
+    }
+    responses: dict[str, tuple[bytes, dict[str, str]]] = {
+        "/user": (json.dumps(actor).encode(), {}),
+        "/repos/octo/example/issues/7": (
+            json.dumps(
+                {"node_id": "pr-node", "user": actor, "pull_request": {}}
+            ).encode(),
+            {},
+        ),
+        "/repos/octo/example/issues/7/comments?per_page=100&page=1": (b"[]", {}),
+        "/repos/octo/example/issues/7/timeline?per_page=100&page=1": (b"[]", {}),
+        "/repos/octo/example/pulls/7": (b'{"node_id":"pr-node"}', {}),
+        "/repos/octo/example/pulls/7/reviews?per_page=100&page=1": (b"[]", {}),
+        "/repos/octo/example/pulls/7/comments?per_page=100&page=1": (
+            b'[{"id":101,"node_id":"comment-1","body":"rest first","path":"src/example.py","line":10,"original_line":10,"in_reply_to_id":null},{"id":102,"node_id":"comment-2","body":"rest second","path":"src/example.py","line":10,"original_line":10,"in_reply_to_id":101},{"id":103,"node_id":"comment-3","body":"rest third","path":"src/example.py","line":10,"original_line":10,"in_reply_to_id":102}]',
+            {},
+        ),
+    }
+    return item, responses
+
+
+def build_github_request(
+    item: dict[str, object], responses: dict[str, tuple[bytes, dict[str, str]]]
+) -> object:
+    def request(
+        _self: object, endpoint: str, accept: str = "application/vnd.github+json"
+    ) -> _Response:
+        if endpoint.startswith("/search/issues?"):
+            return _Response(
+                json.dumps({"total_count": 1, "items": [item]}).encode(), 200, {}
+            )
+        body, headers = responses[endpoint]
+        if accept == "application/vnd.github.diff":
+            assert endpoint == "/repos/octo/example/pulls/7"
+            return _Response(b"diff --git a/a b/a\n", 200, {})
+        return _Response(body, 200, headers)
+
+    return request
+
+
 def test_collection_run_snapshot_count_tracks_written_snapshots() -> None:
     with tempfile.TemporaryDirectory() as directory:
         run = build_github_run(Archive(directory))
@@ -607,49 +656,51 @@ def test_publish_rechecks_overlap_for_runs_staged_before_another_publish() -> No
 def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    actor = {"node_id": "actor-node", "login": "actor"}
-    item = {
-        "node_id": "pr-node",
-        "number": 7,
-        "repository_url": "https://api.github.com/repos/octo/example",
-        "pull_request": {},
-    }
-    responses: dict[str, tuple[bytes, dict[str, str]]] = {
-        "/user": (json.dumps(actor).encode(), {}),
-        "/repos/octo/example/issues/7": (
-            json.dumps(
-                {"node_id": "pr-node", "user": actor, "pull_request": {}}
-            ).encode(),
-            {},
-        ),
-        "/repos/octo/example/issues/7/comments?per_page=100&page=1": (
-            b'[{"user":{"node_id":"actor-node"}}]',
-            {"link": '<next>; rel="next"'},
-        ),
-        "/repos/octo/example/issues/7/comments?per_page=100&page=2": (b"[]", {}),
-        "/repos/octo/example/issues/7/timeline?per_page=100&page=1": (b"[]", {}),
-        "/repos/octo/example/pulls/7": (b'{"node_id":"pr-node"}', {}),
-        "/repos/octo/example/pulls/7/reviews?per_page=100&page=1": (
-            b'[{"user":{"node_id":"actor-node"},"submitted_at":"2026-01-01T00:00:00Z"}]',
-            {},
-        ),
-        "/repos/octo/example/pulls/7/comments?per_page=100&page=1": (b"[]", {}),
-    }
+    item, responses = build_github_pr_fixture()
+    responses.update(
+        {
+            "/repos/octo/example/issues/7/comments?per_page=100&page=1": (
+                b'[{"user":{"node_id":"actor-node"}}]',
+                {"link": '<next>; rel="next"'},
+            ),
+            "/repos/octo/example/issues/7/comments?per_page=100&page=2": (
+                b"[]",
+                {},
+            ),
+            "/repos/octo/example/pulls/7/reviews?per_page=100&page=1": (
+                b'[{"user":{"node_id":"actor-node"},"submitted_at":"2026-01-01T00:00:00Z"}]',
+                {},
+            ),
+        }
+    )
 
-    def request(
-        _self: object, endpoint: str, accept: str = "application/vnd.github+json"
-    ) -> _Response:
-        if endpoint.startswith("/search/issues?"):
-            return _Response(
-                json.dumps({"total_count": 1, "items": [item]}).encode(), 200, {}
-            )
-        body, headers = responses[endpoint]
-        if accept == "application/vnd.github.diff":
-            assert endpoint == "/repos/octo/example/pulls/7"
-            return _Response(b"diff --git a/a b/a\n", 200, {})
-        return _Response(body, 200, headers)
+    request = build_github_request(item, responses)
+
+    def graphql(_self: object, _query: str) -> _Response:
+        return _Response(
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            ).encode(),
+            200,
+            {},
+        )
 
     monkeypatch.setattr("tracebase.github._GitHub.request", request)
+    monkeypatch.setattr("tracebase.github._GitHub.graphql", graphql)
     with tempfile.TemporaryDirectory() as directory:
         run = build_github_run(Archive(directory))
         reporter = RecordingReporter()
@@ -709,6 +760,290 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
         assert reporter.events[1].message == "authorship: page 1, 1 candidates"
         assert reporter.events[6].total == 1
         assert reporter.events[6].current == "octo/example#7"
+
+
+def test_github_collect_preserves_review_thread_source_native_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item, responses = build_github_pr_fixture()
+    thread_page_one = json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "thread-resolved-current",
+                                    "path": "src/example.py",
+                                    "line": 10,
+                                    "originalLine": 10,
+                                    "startLine": 8,
+                                    "originalStartLine": 8,
+                                    "diffSide": "RIGHT",
+                                    "startDiffSide": "RIGHT",
+                                    "isResolved": True,
+                                    "isOutdated": False,
+                                    "resolvedBy": {
+                                        "id": "reviewer-id",
+                                        "login": "reviewer",
+                                    },
+                                    "comments": {
+                                        "nodes": [
+                                            {"id": "comment-1"},
+                                            {"id": "comment-2"},
+                                        ],
+                                        "pageInfo": {
+                                            "hasNextPage": True,
+                                            "endCursor": "comment-cursor-1",
+                                        },
+                                    },
+                                },
+                                {
+                                    "id": "thread-unresolved-outdated",
+                                    "path": "src/old.py",
+                                    "line": None,
+                                    "originalLine": 20,
+                                    "startLine": None,
+                                    "originalStartLine": 20,
+                                    "diffSide": "RIGHT",
+                                    "startDiffSide": "RIGHT",
+                                    "isResolved": False,
+                                    "isOutdated": True,
+                                    "resolvedBy": None,
+                                    "comments": {
+                                        "nodes": [{"id": "comment-3"}],
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    },
+                                },
+                            ],
+                            "pageInfo": {
+                                "hasNextPage": True,
+                                "endCursor": "thread-cursor-1",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        separators=(",", ":"),
+    ).encode()
+    nested_comment_page = b'{"data":{"node":{"id":"thread-resolved-current","comments":{"nodes":[{"id":"comment-3"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}'
+    thread_page_two = b'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+    outer_graphql_responses = iter(
+        [
+            _Response(thread_page_one, 200, {}),
+            _Response(thread_page_two, 200, {}),
+        ]
+    )
+
+    request = build_github_request(item, responses)
+
+    def graphql(_self: object, query: str) -> _Response:
+        assert "body" not in query
+        assert "databaseId" not in query
+        assert "diffHunk" not in query
+        if "PullRequestReviewThreadComments" in query:
+            return _Response(nested_comment_page, 200, {})
+        assert "reviewThreads" in query
+        return next(outer_graphql_responses)
+
+    monkeypatch.setattr("tracebase.github._GitHub.request", request)
+    monkeypatch.setattr("tracebase.github._GitHub.graphql", graphql)
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+
+        result = collect(run, build_test_reporter())
+        _hydrate(
+            run,
+            _GitHub(),
+            _Candidate(
+                "pr-node",
+                "octo/example",
+                7,
+                "pull-request",
+                (),
+            ),
+        )
+        assert run.snapshot_count == 1
+        published = run.publish(result.coverage)
+        snapshot = next((published / "snapshots/pull-request").iterdir())
+        manifest = json.loads((snapshot / "snapshot.json").read_text())
+
+        assert (snapshot / "review-threads.001.json").read_bytes() == thread_page_one
+        assert (snapshot / "review-threads.002.json").read_bytes() == thread_page_two
+        assert (
+            snapshot / "review-thread-comments.001.002.json"
+        ).read_bytes() == nested_comment_page
+        thread_entries = [
+            entry
+            for entry in manifest["evidence_files"]
+            if entry["path"].startswith("review-threads.")
+        ]
+        assert [entry["path"] for entry in thread_entries] == [
+            "review-threads.001.json",
+            "review-threads.002.json",
+        ]
+        assert all(entry["request"]["method"] == "POST" for entry in thread_entries)
+        assert all(
+            entry["request"]["api"] == "GitHub GraphQL API" for entry in thread_entries
+        )
+        assert all("GH_TOKEN" not in json.dumps(entry) for entry in thread_entries)
+        supplemental_entry = next(
+            entry
+            for entry in manifest["evidence_files"]
+            if entry["path"] == "review-thread-comments.001.002.json"
+        )
+        assert supplemental_entry["request"]["method"] == "POST"
+        assert json.loads(nested_comment_page)["data"]["node"]["id"] == (
+            "thread-resolved-current"
+        )
+        rest_comments = json.loads((snapshot / "review-comments.001.json").read_bytes())
+        first_thread = json.loads((snapshot / "review-threads.001.json").read_bytes())[
+            "data"
+        ]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]
+        supplemental_comments = json.loads(
+            (snapshot / "review-thread-comments.001.002.json").read_bytes()
+        )["data"]["node"]["comments"]["nodes"]
+        graph_comment_ids = {
+            comment["id"] for comment in first_thread["comments"]["nodes"]
+        } | {comment["id"] for comment in supplemental_comments}
+        assert graph_comment_ids == {comment["node_id"] for comment in rest_comments}
+        assert first_thread["comments"]["nodes"] == [
+            {"id": "comment-1"},
+            {"id": "comment-2"},
+        ]
+        threads = json.loads((snapshot / "review-threads.001.json").read_bytes())[
+            "data"
+        ]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        assert [
+            (
+                thread["id"],
+                thread["path"],
+                thread["line"],
+                thread["originalLine"],
+                thread["startLine"],
+                thread["originalStartLine"],
+                thread["isResolved"],
+                thread["isOutdated"],
+                thread["resolvedBy"],
+            )
+            for thread in threads
+        ] == [
+            (
+                "thread-resolved-current",
+                "src/example.py",
+                10,
+                10,
+                8,
+                8,
+                True,
+                False,
+                {"id": "reviewer-id", "login": "reviewer"},
+            ),
+            (
+                "thread-unresolved-outdated",
+                "src/old.py",
+                None,
+                20,
+                None,
+                20,
+                False,
+                True,
+                None,
+            ),
+        ]
+
+
+@pytest.mark.parametrize("mode", ["retry", "exhausted"])
+def test_github_hydration_enforces_review_comment_join(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item, responses = build_github_pr_fixture()
+    review_comments_endpoint = (
+        "/repos/octo/example/pulls/7/comments?per_page=100&page=1"
+    )
+    full_review_comments = responses[review_comments_endpoint][0]
+    incomplete_review_comments = json.dumps(
+        json.loads(full_review_comments)[:2], separators=(",", ":")
+    ).encode()
+    graphql_response = _Response(
+        json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "thread-1",
+                                        "comments": {
+                                            "nodes": [
+                                                {"id": "comment-1"},
+                                                {"id": "comment-2"},
+                                                {"id": "comment-3"},
+                                            ],
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
+                                        },
+                                    }
+                                ],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+            separators=(",", ":"),
+        ).encode(),
+        200,
+        {},
+    )
+    base_request = build_github_request(item, responses)
+    review_comment_calls = 0
+
+    def request(
+        self: object, endpoint: str, accept: str = "application/vnd.github+json"
+    ) -> _Response:
+        nonlocal review_comment_calls
+        if endpoint == review_comments_endpoint:
+            review_comment_calls += 1
+            if mode == "exhausted" or review_comment_calls == 1:
+                return _Response(incomplete_review_comments, 200, {})
+            return _Response(full_review_comments, 200, {})
+        return base_request(self, endpoint, accept)
+
+    def graphql(_self: object, _query: str) -> _Response:
+        return graphql_response
+
+    monkeypatch.setattr("tracebase.github._GitHub.request", request)
+    monkeypatch.setattr("tracebase.github._GitHub.graphql", graphql)
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_github_run(Archive(directory))
+        if mode == "retry":
+            result = collect(run, build_test_reporter())
+            published = run.publish(result.coverage)
+            snapshot = next((published / "snapshots/pull-request").iterdir())
+
+            assert review_comment_calls == 2
+            assert (
+                snapshot / "review-comments.001.json"
+            ).read_bytes() == full_review_comments
+        else:
+            with pytest.raises(ArchiveError, match="review comment join"):
+                collect(run, build_test_reporter())
+
+            assert review_comment_calls == 3
+            assert run.staging.exists()
+            assert not (Path(directory) / "runs").exists()
 
 
 def test_github_collect_failure_keeps_run_unpublished(
@@ -840,6 +1175,27 @@ if has_escape_flag != (capability == "modern" and is_diff):
 assert "X-GitHub-Api-Version: 2022-11-28" in sys.argv
 headers = b"HTTP/1.1 200 OK\\r\\n\\r\\n"
 item = {"node_id": "pr-node", "number": 7, "repository_url": "https://api.github.com/repos/octo/example", "pull_request": {}}
+def review_thread(thread_id, resolved, outdated, line, original_line, resolver):
+    return {
+        "id": thread_id,
+        "path": "src/example.py",
+        "line": line,
+        "originalLine": original_line,
+        "startLine": line,
+        "originalStartLine": original_line,
+        "diffSide": "RIGHT",
+        "startDiffSide": "RIGHT",
+        "isResolved": resolved,
+        "isOutdated": outdated,
+        "resolvedBy": {"id": "reviewer-id", "login": "reviewer"} if resolver else None,
+        "comments": {
+            "nodes": [
+                {"id": thread_id + "-comment-1"},
+                {"id": thread_id + "-comment-2"},
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+    }
 if endpoint == "/user": body = b'{"node_id":"actor-node","login":"actor"}'
 elif endpoint.startswith("/search/issues?"): body = json.dumps({"total_count": 1, "incomplete_results": False, "items": [item]}).encode()
 elif endpoint == "/repos/octo/example/issues/7": body = b'{"node_id":"pr-node","user":{"node_id":"actor-node"},"pull_request":{}}'
@@ -847,8 +1203,31 @@ elif endpoint.endswith("/issues/7/comments?per_page=100&page=1"):
     body = b'[{"user":{"node_id":"actor-node"}}]'
     headers = b"HTTP/1.1 200 OK\\r\\nLink: <next>; rel=\\\"next\\\"\\r\\n\\r\\n"
 elif endpoint.endswith("/issues/7/comments?per_page=100&page=2"): body = b"[]"
-elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1") or endpoint.endswith("/pulls/7/comments?per_page=100&page=1"): body = b"[]"
+elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1"): body = b"[]"
+elif endpoint.endswith("/pulls/7/comments?per_page=100&page=1"):
+    body = json.dumps([
+        {"node_id": thread_id + "-comment-" + str(number)}
+        for thread_id in (
+            "thread-cli-resolved-current",
+            "thread-cli-unresolved-current",
+            "thread-cli-resolved-outdated",
+            "thread-cli-unresolved-outdated",
+        )
+        for number in (1, 2)
+    ]).encode()
 elif endpoint.endswith("/pulls/7/reviews?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"},"submitted_at":"x"}]'
+elif endpoint.startswith("query=query PullRequestReviewThreads"):
+    body = json.dumps({
+        "data": {"repository": {"pullRequest": {"reviewThreads": {
+            "nodes": [
+                review_thread("thread-cli-resolved-current", True, False, 4, 4, True),
+                review_thread("thread-cli-unresolved-current", False, False, 8, 8, False),
+                review_thread("thread-cli-resolved-outdated", True, True, 12, 12, True),
+                review_thread("thread-cli-unresolved-outdated", False, True, None, 16, False),
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }}}}
+    }).encode()
 elif endpoint == "/repos/octo/example/pulls/7" and any("application/vnd.github.diff" in arg for arg in sys.argv): body = b"diff --git a/a b/a\\n"
 elif endpoint == "/repos/octo/example/pulls/7": body = b'{"node_id":"pr-node"}'
 else: raise SystemExit(2)
@@ -867,6 +1246,43 @@ sys.stdout.buffer.write(headers + body)
     run = next((archive / "runs").iterdir())
     snapshot = next((run / "snapshots/pull-request").iterdir())
     assert (snapshot / "comments.002.json").read_bytes() == b"[]"
+    threads = json.loads((snapshot / "review-threads.001.json").read_bytes())["data"][
+        "repository"
+    ]["pullRequest"]["reviewThreads"]["nodes"]
+    assert [
+        (
+            thread["id"],
+            thread["isResolved"],
+            thread["isOutdated"],
+            thread["line"],
+            thread["originalLine"],
+            thread["resolvedBy"],
+        )
+        for thread in threads
+    ] == [
+        (
+            "thread-cli-resolved-current",
+            True,
+            False,
+            4,
+            4,
+            {"id": "reviewer-id", "login": "reviewer"},
+        ),
+        ("thread-cli-unresolved-current", False, False, 8, 8, None),
+        (
+            "thread-cli-resolved-outdated",
+            True,
+            True,
+            12,
+            12,
+            {"id": "reviewer-id", "login": "reviewer"},
+        ),
+        ("thread-cli-unresolved-outdated", False, True, None, 16, None),
+    ]
+    assert [comment["id"] for comment in threads[0]["comments"]["nodes"]] == [
+        "thread-cli-resolved-current-comment-1",
+        "thread-cli-resolved-current-comment-2",
+    ]
     assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
     assert json.loads((snapshot / "snapshot.json").read_text())["selection_provenance"][
         0

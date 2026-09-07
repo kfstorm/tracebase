@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import secrets
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
@@ -136,6 +137,19 @@ def _ensure_no_symlink(path: Path, root: Path) -> None:
 
 def _is_regular_file(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
+
+
+def _validate_declared_evidence(snapshot_root: Path, evidence_files: Any) -> set[str]:
+    declared = _normalize_evidence_files(evidence_files)
+    declared_paths = {evidence_file["path"] for evidence_file in declared}
+    for evidence_file in declared:
+        evidence_path = snapshot_root.joinpath(
+            *PurePosixPath(evidence_file["path"]).parts
+        )
+        _ensure_inside(evidence_path, snapshot_root)
+        if not _is_regular_file(evidence_path):
+            raise ArchiveError("declared evidence file is missing or not regular")
+    return declared_paths
 
 
 def _utc_now() -> str:
@@ -288,6 +302,43 @@ class CollectionRun:
 
         return len(self._snapshots)
 
+    def has_staged_snapshot(self, object_kind: str, source_id: str) -> bool:
+        """Return whether this run already staged an Artifact snapshot."""
+
+        for entry in self._snapshots:
+            if entry["object_kind"] != object_kind or entry["source_id"] != source_id:
+                continue
+            snapshot_root = self.staging / PurePosixPath(entry["path"])
+            manifest_path = snapshot_root / "snapshot.json"
+            if not _is_regular_file(manifest_path):
+                return False
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if not isinstance(manifest, dict):
+                    return False
+                _validate_declared_evidence(
+                    snapshot_root, manifest.get("evidence_files")
+                )
+            except OSError, ArchiveError, json.JSONDecodeError:
+                return False
+            return True
+        return False
+
+    def discard_staged_snapshot(self, object_kind: str, source_id: str) -> None:
+        """Remove an incomplete staged Artifact snapshot before retrying it."""
+
+        for index, entry in enumerate(self._snapshots):
+            if entry["object_kind"] != object_kind or entry["source_id"] != source_id:
+                continue
+            snapshot_root = self.staging / PurePosixPath(entry["path"])
+            _ensure_inside(snapshot_root, self.staging / "snapshots")
+            if snapshot_root.is_symlink():
+                raise ArchiveError("Snapshot directory cannot be a symlink")
+            if snapshot_root.exists():
+                shutil.rmtree(snapshot_root)
+            self._snapshots.pop(index)
+            return
+
     def write_snapshot(self, snapshot: Snapshot) -> Path:
         _validate_archive_type(snapshot.source_kind, "source kind")
         _validate_archive_type(snapshot.object_kind, "object kind")
@@ -404,19 +455,9 @@ class CollectionRun:
             for field in ("source_kind", "object_kind", "source_id"):
                 if snapshot_manifest.get(field) != entry[field]:
                     raise ArchiveError(f"Snapshot {field} is inconsistent")
-            declared = _normalize_evidence_files(
-                snapshot_manifest.get("evidence_files")
+            declared_paths = _validate_declared_evidence(
+                snapshot_root, snapshot_manifest.get("evidence_files")
             )
-            declared_paths = {evidence_file["path"] for evidence_file in declared}
-            for evidence_file in declared:
-                evidence_path = snapshot_root.joinpath(
-                    *PurePosixPath(evidence_file["path"]).parts
-                )
-                _ensure_inside(evidence_path, snapshot_root)
-                if not _is_regular_file(evidence_path):
-                    raise ArchiveError(
-                        "declared evidence file is missing or not regular"
-                    )
 
             actual_paths: set[str] = set()
             for path in snapshot_root.rglob("*"):

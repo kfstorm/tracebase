@@ -36,6 +36,7 @@ _REQUEST_TIMEOUT_SECONDS = 60
 _API_VERSION = "2022-11-28"
 _MINIMUM_PARTITION = timedelta(seconds=1)
 _DISCOVERY_MATRIX_VERSION = 1
+_REVIEW_COMMENT_JOIN_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -69,11 +70,27 @@ class _Evidence:
     endpoint: str
     accept: str
     response: _Response
+    request_metadata: dict[str, Any] | None = None
 
 
 class _GitHub:
     def __init__(self) -> None:
         self._supports_allow_escape_sequences: bool | None = None
+
+    @staticmethod
+    def _execute(arguments: list[str], failure_message: str) -> _Response:
+        try:
+            completed = subprocess.run(
+                arguments,
+                capture_output=True,
+                check=False,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ArchiveError(failure_message) from error
+        if completed.returncode != 0:
+            raise ArchiveError(failure_message)
+        return _GitHub._parse_response(completed.stdout, _observed_at())
 
     def _supports_escape_sequences(self) -> bool:
         if self._supports_allow_escape_sequences is not None:
@@ -111,18 +128,22 @@ class _GitHub:
                 endpoint,
             ]
         )
-        try:
-            completed = subprocess.run(
-                arguments,
-                capture_output=True,
-                check=False,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise ArchiveError("GitHub request failed") from error
-        if completed.returncode != 0:
-            raise ArchiveError("GitHub request failed")
-        return self._parse_response(completed.stdout, _observed_at())
+        return self._execute(arguments, "GitHub request failed")
+
+    def graphql(self, query: str) -> _Response:
+        arguments = [
+            "gh",
+            "api",
+            "graphql",
+            "--include",
+            "-H",
+            f"Accept: {_API_ACCEPT}",
+            "-H",
+            f"X-GitHub-Api-Version: {_API_VERSION}",
+            "-f",
+            f"query={query}",
+        ]
+        return self._execute(arguments, "GitHub GraphQL request failed")
 
     @staticmethod
     def _parse_response(raw: bytes, observed_at: str = "") -> _Response:
@@ -168,21 +189,25 @@ def _response_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 def _evidence_file(
-    path: str, endpoint: str, accept: str, response: _Response
+    path: str,
+    endpoint: str,
+    accept: str,
+    response: _Response,
+    request_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "path": path,
-        "request": {
-            "endpoint": endpoint,
-            "method": "GET",
-            "api": "GitHub REST API",
-            "api_version": _API_VERSION,
-            "accept": accept,
-            "response_status": response.status,
-            "response_headers": _response_headers(response.headers),
-            "observed_at": response.observed_at or _observed_at(),
-        },
+    request = {
+        "endpoint": endpoint,
+        "method": "GET",
+        "api": "GitHub REST API",
+        "api_version": _API_VERSION,
+        "accept": accept,
+        "response_status": response.status,
+        "response_headers": _response_headers(response.headers),
+        "observed_at": response.observed_at or _observed_at(),
     }
+    if request_metadata is not None:
+        request.update(request_metadata)
+    return {"path": path, "request": request}
 
 
 def _page_endpoint(endpoint: str, page: int) -> str:
@@ -193,6 +218,240 @@ def _page_endpoint(endpoint: str, page: int) -> str:
 def _has_next(response: _Response) -> bool:
     link = response.headers.get("link", "")
     return 'rel="next"' in link
+
+
+def _graphql_data(response: _Response) -> dict[str, Any]:
+    value = _GitHub.json(response)
+    if not isinstance(value, dict) or value.get("errors"):
+        raise ArchiveError("GitHub GraphQL response was invalid")
+    data = value.get("data")
+    if not isinstance(data, dict):
+        raise ArchiveError("GitHub GraphQL response was invalid")
+    return data
+
+
+def _graphql_page_info(value: Any) -> tuple[bool, str | None]:
+    if not isinstance(value, dict):
+        raise ArchiveError("GitHub GraphQL pagination response was invalid")
+    has_next = value.get("hasNextPage")
+    cursor = value.get("endCursor")
+    if not isinstance(has_next, bool) or (
+        cursor is not None and not isinstance(cursor, str)
+    ):
+        raise ArchiveError("GitHub GraphQL pagination response was invalid")
+    if has_next and not cursor:
+        raise ArchiveError("GitHub GraphQL pagination response was invalid")
+    return has_next, cursor
+
+
+def _repository_parts(repository: str) -> tuple[str, str]:
+    owner, separator, name = repository.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        raise ArchiveError("GitHub repository identifier was invalid")
+    return owner, name
+
+
+_REVIEW_COMMENT_ID_FIELDS = """
+              nodes {
+                id
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+"""
+
+
+def _review_threads_query(repository: str, number: int, cursor: str | None) -> str:
+    owner, name = _repository_parts(repository)
+    after = "null" if cursor is None else json.dumps(cursor)
+    return f"""query PullRequestReviewThreads {{
+  repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
+    pullRequest(number: {number}) {{
+      reviewThreads(first: 100, after: {after}) {{
+        nodes {{
+          id
+          path
+          line
+          originalLine
+          startLine
+          originalStartLine
+          diffSide
+          startDiffSide
+          isResolved
+          isOutdated
+          resolvedBy {{
+            id
+            login
+          }}
+          comments(first: 100) {{{_REVIEW_COMMENT_ID_FIELDS}          }}
+        }}
+        pageInfo {{
+          hasNextPage
+          endCursor
+        }}
+      }}
+    }}
+  }}
+}}"""
+
+
+def _review_thread_comments_query(thread_id: str, cursor: str) -> str:
+    cursor_value = json.dumps(cursor)
+    return f"""query PullRequestReviewThreadComments {{
+  node(id: {json.dumps(thread_id)}) {{
+    ... on PullRequestReviewThread {{
+      id
+      comments(first: 100, after: {cursor_value}) {{{_REVIEW_COMMENT_ID_FIELDS}      }}
+    }}
+  }}
+}}"""
+
+
+def _review_threads_page(
+    data: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    repository = data.get("repository")
+    pull_request = (
+        repository.get("pullRequest") if isinstance(repository, dict) else None
+    )
+    connection = (
+        pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
+    )
+    if not isinstance(connection, dict):
+        raise ArchiveError("GitHub review-thread response was invalid")
+    nodes = connection.get("nodes")
+    page_info = connection.get("pageInfo")
+    if not isinstance(nodes, list) or not isinstance(page_info, dict):
+        raise ArchiveError("GitHub review-thread response was invalid")
+    if not all(isinstance(node, dict) for node in nodes):
+        raise ArchiveError("GitHub review-thread response was invalid")
+    return nodes, page_info
+
+
+def _review_thread_comment_page(data: dict[str, Any], thread_id: str) -> dict[str, Any]:
+    node = data.get("node")
+    connection = node.get("comments") if isinstance(node, dict) else None
+    if (
+        not isinstance(node, dict)
+        or node.get("id") != thread_id
+        or not isinstance(connection, dict)
+        or not isinstance(connection.get("nodes"), list)
+        or not isinstance(connection.get("pageInfo"), dict)
+    ):
+        raise ArchiveError("GitHub review-thread comments response was invalid")
+    return connection
+
+
+def _review_comment_nodes(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not all(
+        isinstance(comment, dict) and isinstance(comment.get("id"), str)
+        for comment in value
+    ):
+        raise ArchiveError("GitHub review-thread comments response was invalid")
+    return value
+
+
+def _review_comments_evidence(
+    github: _GitHub, endpoint: str
+) -> tuple[list[_Evidence], set[str]]:
+    evidence: list[_Evidence] = []
+    comment_ids: set[str] = set()
+    for page_number, (page, response) in enumerate(_pages(github, endpoint), start=1):
+        value = github.json(response)
+        if not isinstance(value, list) or not all(
+            isinstance(comment, dict) and isinstance(comment.get("node_id"), str)
+            for comment in value
+        ):
+            raise ArchiveError("GitHub review-comment response was invalid")
+        comment_ids.update(comment["node_id"] for comment in value)
+        evidence.append(
+            _Evidence(
+                f"review-comments.{page_number:03d}.json",
+                page,
+                _API_ACCEPT,
+                response,
+            )
+        )
+    return evidence, comment_ids
+
+
+def _review_thread_evidence(
+    github: _GitHub, candidate: _Candidate
+) -> tuple[list[_Evidence], set[str]]:
+    evidence: list[_Evidence] = []
+    comment_ids: set[str] = set()
+    thread_cursor: str | None = None
+    thread_page_number = 0
+    thread_number = 0
+    while True:
+        query = _review_threads_query(
+            candidate.repository, candidate.number, thread_cursor
+        )
+        response = github.graphql(query)
+        nodes, page_info = _review_threads_page(_graphql_data(response))
+        thread_page_number += 1
+        evidence.append(
+            _Evidence(
+                f"review-threads.{thread_page_number:03d}.json",
+                "/graphql",
+                _API_ACCEPT,
+                response,
+                {"method": "POST", "api": "GitHub GraphQL API", "query": query},
+            )
+        )
+        for node in nodes:
+            thread_id = node.get("id")
+            comments = node.get("comments")
+            if (
+                not isinstance(thread_id, str)
+                or not isinstance(comments, dict)
+                or not isinstance(comments.get("nodes"), list)
+                or not isinstance(comments.get("pageInfo"), dict)
+            ):
+                raise ArchiveError("GitHub review-thread response was invalid")
+            comment_ids.update(
+                comment["id"] for comment in _review_comment_nodes(comments["nodes"])
+            )
+            thread_number += 1
+            comment_cursor: str | None = None
+            comment_page_number = 1
+            has_next_comments, comment_cursor = _graphql_page_info(comments["pageInfo"])
+            while has_next_comments:
+                if comment_cursor is None:
+                    raise ArchiveError(
+                        "GitHub review-thread comments pagination was invalid"
+                    )
+                comment_query = _review_thread_comments_query(thread_id, comment_cursor)
+                comment_response = github.graphql(comment_query)
+                comment_connection = _review_thread_comment_page(
+                    _graphql_data(comment_response), thread_id
+                )
+                comment_page_number += 1
+                evidence.append(
+                    _Evidence(
+                        f"review-thread-comments.{thread_number:03d}."
+                        f"{comment_page_number:03d}.json",
+                        "/graphql",
+                        _API_ACCEPT,
+                        comment_response,
+                        {
+                            "method": "POST",
+                            "api": "GitHub GraphQL API",
+                            "query": comment_query,
+                        },
+                    )
+                )
+                comment_ids.update(
+                    comment["id"]
+                    for comment in _review_comment_nodes(comment_connection["nodes"])
+                )
+                has_next_comments, comment_cursor = _graphql_page_info(
+                    comment_connection["pageInfo"]
+                )
+        has_next_threads, thread_cursor = _graphql_page_info(page_info)
+        if not has_next_threads:
+            return evidence, comment_ids
 
 
 def _pages(
@@ -431,6 +690,9 @@ def _hydrate(
     github: _GitHub,
     candidate: _Candidate,
 ) -> None:
+    if run.has_staged_snapshot(candidate.object_kind, candidate.source_id):
+        return
+    run.discard_staged_snapshot(candidate.object_kind, candidate.source_id)
     observed_from = _observed_at()
     base = f"/repos/{candidate.repository}"
     issue_endpoint = f"{base}/issues/{candidate.number}"
@@ -483,17 +745,27 @@ def _hydrate(
                 )
             )
         review_comments_endpoint = f"{pull_endpoint}/comments"
-        for page_number, (page, response) in enumerate(
-            _pages(github, review_comments_endpoint), start=1
-        ):
-            evidence.append(
-                _Evidence(
-                    f"review-comments.{page_number:03d}.json",
-                    page,
-                    _API_ACCEPT,
-                    response,
+        review_comment_evidence, rest_comment_ids = _review_comments_evidence(
+            github, review_comments_endpoint
+        )
+        review_thread_evidence, graphql_comment_ids = _review_thread_evidence(
+            github, candidate
+        )
+        for retry in range(_REVIEW_COMMENT_JOIN_RETRIES + 1):
+            missing_comment_ids = graphql_comment_ids - rest_comment_ids
+            if not missing_comment_ids:
+                break
+            if retry == _REVIEW_COMMENT_JOIN_RETRIES:
+                missing = ", ".join(sorted(missing_comment_ids))
+                raise ArchiveError(
+                    "GitHub review comment join was incomplete; "
+                    f"missing REST comments: {missing}"
                 )
+            review_comment_evidence, rest_comment_ids = _review_comments_evidence(
+                github, review_comments_endpoint
             )
+        evidence.extend(review_comment_evidence)
+        evidence.extend(review_thread_evidence)
         diff_response = github.request(pull_endpoint, _DIFF_ACCEPT)
         evidence.append(
             _Evidence("pull-request.diff", pull_endpoint, _DIFF_ACCEPT, diff_response)
@@ -522,7 +794,13 @@ def _hydrate(
         source_id=candidate.source_id,
         observation_window={"from": observed_from, "to": _observed_at()},
         evidence_files=tuple(
-            _evidence_file(item.path, item.endpoint, item.accept, item.response)
+            _evidence_file(
+                item.path,
+                item.endpoint,
+                item.accept,
+                item.response,
+                item.request_metadata,
+            )
             for item in evidence
         ),
         selection_provenance=provenance,
