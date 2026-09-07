@@ -212,7 +212,7 @@ class Archive:
     """Own the archive root and the published-run overlap registry."""
 
     def __init__(self, root: str | Path):
-        self.root = Path(root)
+        self.root = Path(root).absolute()
 
     def new_run_id(self) -> str:
         return str(uuid7())
