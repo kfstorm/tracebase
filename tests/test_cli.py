@@ -129,26 +129,54 @@ def github_response(status: int, body: bytes = b"{}") -> bytes:
     return f"HTTP/1.1 {status} Test\r\nX-Test: value\r\n\r\n".encode() + body
 
 
+def completed_gh(
+    stdout: bytes,
+    returncode: int = 0,
+    stderr: bytes = b"",
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(
+        ["gh"],
+        returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def completed_github_response(
+    status: int,
+    body: bytes,
+    *,
+    returncode: int = 0,
+    stderr: bytes = b"",
+) -> subprocess.CompletedProcess[bytes]:
+    return completed_gh(
+        github_response(status, body), returncode=returncode, stderr=stderr
+    )
+
+
+def run_github_request_with_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    attempts: list[subprocess.CompletedProcess[bytes]],
+) -> tuple[_Response, list[float]]:
+    responses = iter(attempts)
+    delays: list[float] = []
+    monkeypatch.setattr(
+        "tracebase.github.subprocess.run", lambda *_args, **_kwargs: next(responses)
+    )
+    monkeypatch.setattr("tracebase.github._sleep", delays.append)
+    return _GitHub().request("/user"), delays
+
+
 def test_github_request_retries_nonzero_cli_failure_without_http_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    attempts = iter(
+    response, delays = run_github_request_with_attempts(
+        monkeypatch,
         [
-            subprocess.CompletedProcess(
-                ["gh"], 1, stdout=b"", stderr=b"connection reset"
-            ),
-            subprocess.CompletedProcess(
-                ["gh"], 0, stdout=github_response(200, b'{"ok":true}'), stderr=b""
-            ),
-        ]
+            completed_gh(b"", returncode=1, stderr=b"connection reset"),
+            completed_github_response(200, b'{"ok":true}'),
+        ],
     )
-    delays: list[float] = []
-    monkeypatch.setattr(
-        "tracebase.github.subprocess.run", lambda *_args, **_kwargs: next(attempts)
-    )
-    monkeypatch.setattr("tracebase.github._sleep", delays.append)
-
-    response = _GitHub().request("/user")
 
     assert response.status == 200
     assert response.body == b'{"ok":true}'
@@ -182,26 +210,15 @@ def test_github_request_does_not_retry_http_404(
 def test_github_request_retries_http_500_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    attempts = iter(
+    response, delays = run_github_request_with_attempts(
+        monkeypatch,
         [
-            subprocess.CompletedProcess(
-                ["gh"],
-                1,
-                stdout=github_response(500, b"temporary"),
-                stderr=b"server error",
+            completed_github_response(
+                500, b"temporary", returncode=1, stderr=b"server error"
             ),
-            subprocess.CompletedProcess(
-                ["gh"], 0, stdout=github_response(200, b"ok"), stderr=b""
-            ),
-        ]
+            completed_github_response(200, b"ok"),
+        ],
     )
-    delays: list[float] = []
-    monkeypatch.setattr(
-        "tracebase.github.subprocess.run", lambda *_args, **_kwargs: next(attempts)
-    )
-    monkeypatch.setattr("tracebase.github._sleep", delays.append)
-
-    response = _GitHub().request("/user")
 
     assert response.status == 200
     assert delays == [0.5]
@@ -212,11 +229,8 @@ def test_github_request_reports_http_500_diagnostics_after_retries(
 ) -> None:
     monkeypatch.setattr(
         "tracebase.github.subprocess.run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            ["gh"],
-            1,
-            stdout=github_response(503, b"service unavailable"),
-            stderr=b"server error",
+        lambda *_args, **_kwargs: completed_github_response(
+            503, b"service unavailable", returncode=1, stderr=b"server error"
         ),
     )
     delays: list[float] = []
@@ -238,13 +252,7 @@ def test_github_request_reports_http_500_diagnostics_after_retries(
 def test_github_request_retries_timeout_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    attempts = iter(
-        [
-            subprocess.CompletedProcess(
-                ["gh"], 0, stdout=github_response(200, b"ok"), stderr=b""
-            )
-        ]
-    )
+    attempts = iter([completed_github_response(200, b"ok")])
     timed_out = False
 
     def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
@@ -290,10 +298,8 @@ def test_github_graphql_uses_transport_retry_path(
 ) -> None:
     attempts = iter(
         [
-            subprocess.CompletedProcess(["gh"], 1, stdout=b"", stderr=b"network"),
-            subprocess.CompletedProcess(
-                ["gh"], 0, stdout=github_response(200, b'{"data":{}}'), stderr=b""
-            ),
+            completed_gh(b"", returncode=1, stderr=b"network"),
+            completed_github_response(200, b'{"data":{}}'),
         ]
     )
     monkeypatch.setattr(
