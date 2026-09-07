@@ -14,6 +14,10 @@ SOURCE_IDS = {
     "github": "artifact/source:1?秘密",
     "opencode": "session/source:1?秘密",
 }
+SECOND_SOURCE_IDS = {
+    "github": "artifact/second:2?秘密",
+    "opencode": "session/second:2?秘密",
+}
 AUTHORIZATION_MARKER = "authorization-marker-18"
 SOURCE_RESPONSE_MARKER = "source-response-marker-18"
 SESSION_EXPORT_MARKER = "session-export-marker-18"
@@ -47,6 +51,7 @@ import os
 import sys
 
 SOURCE_ID = __SOURCE_ID__
+SECOND_SOURCE_ID = __SECOND_SOURCE_ID__
 AUTHORIZATION_MARKER = "__AUTHORIZATION_MARKER__"
 SOURCE_RESPONSE_MARKER = "__SOURCE_RESPONSE_MARKER__"
 ISSUE_RESPONSE = __ISSUE_RESPONSE__
@@ -57,7 +62,7 @@ endpoint = sys.argv[-1]
 if endpoint == "--help":
     print("gh api help")
     raise SystemExit(0)
-if os.environ.get("TRACEBASE_FAIL_SOURCE") and endpoint.endswith("/issues/42"):
+if os.environ.get("TRACEBASE_FAIL_SOURCE") and endpoint.endswith("/issues/43"):
     print(AUTHORIZATION_MARKER, file=sys.stderr)
     print(SOURCE_RESPONSE_MARKER, file=sys.stderr)
     raise SystemExit(1)
@@ -75,6 +80,15 @@ elif endpoint.startswith("/search/issues?"):
             }
         ],
     }
+    if os.environ.get("TRACEBASE_FAIL_SOURCE"):
+        payload["total_count"] = 2
+        payload["items"].append(
+            {
+                "node_id": SECOND_SOURCE_ID,
+                "number": 43,
+                "repository_url": "https://api.github.com/repos/example/project",
+            }
+        )
 elif endpoint == "/repos/example/project/issues/42":
     payload = ISSUE_RESPONSE
 elif endpoint == "/repos/example/project/issues/42/comments?per_page=100&page=1":
@@ -92,6 +106,7 @@ sys.stdout.buffer.write(
 """,
             {
                 "__SOURCE_ID__": source_id,
+                "__SECOND_SOURCE_ID__": repr(SECOND_SOURCE_IDS["github"]),
                 "__AUTHORIZATION_MARKER__": AUTHORIZATION_MARKER,
                 "__SOURCE_RESPONSE_MARKER__": SOURCE_RESPONSE_MARKER,
                 "__ISSUE_RESPONSE__": repr(GITHUB_ISSUE_RESPONSE),
@@ -104,16 +119,7 @@ sys.stdout.buffer.write(
 
 def _make_opencode_fixture(directory: Path) -> None:
     source_id = repr(SOURCE_IDS["opencode"])
-    (directory / "secrets.py").write_text(
-        "import time\n"
-        "\n"
-        "def randbits(bit_count: int) -> int:\n"
-        "    return time.time_ns() & ((1 << bit_count) - 1)\n"
-        "\n"
-        "def token_urlsafe(_nbytes: int = 32) -> str:\n"
-        f"    return {AUTHORIZATION_MARKER!r}\n",
-        encoding="utf-8",
-    )
+    second_source_id = repr(SECOND_SOURCE_IDS["opencode"])
     _write_executable(
         directory / "opencode",
         _render_fixture(
@@ -122,8 +128,10 @@ import json
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 SOURCE_ID = __SOURCE_ID__
+SECOND_SOURCE_ID = __SECOND_SOURCE_ID__
 AUTHORIZATION_MARKER = "__AUTHORIZATION_MARKER__"
 SOURCE_RESPONSE_MARKER = "__SOURCE_RESPONSE_MARKER__"
 SESSION_EXPORT_MARKER = "__SESSION_EXPORT_MARKER__"
@@ -143,7 +151,13 @@ elif arguments == [
                     "title": SOURCE_RESPONSE_MARKER,
                     "time": {"created": 1767225900000, "updated": 1767226200000},
                 }
-            ]).encode()
+            ] + ([
+                {
+                    "id": SECOND_SOURCE_ID,
+                    "title": SOURCE_RESPONSE_MARKER + "-second",
+                    "time": {"created": 1767225900000, "updated": 1767226200000},
+                }
+            ] if os.environ.get("TRACEBASE_FAIL_SOURCE") else [])).encode()
             self.send_response(200)
             self.end_headers()
             self.wfile.write(body)
@@ -152,13 +166,22 @@ elif arguments == [
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
+    Path(os.environ["TRACEBASE_PASSWORD_CAPTURE"]).write_text(
+        os.environ["OPENCODE_SERVER_PASSWORD"], encoding="utf-8"
+    )
     print(
         f"opencode server listening on http://127.0.0.1:{server.server_port}",
         flush=True,
     )
     server.serve_forever()
 elif arguments == ["export", SOURCE_ID]:
+    sys.stdout.buffer.write(SESSION_EXPORT)
+elif arguments == ["export", SECOND_SOURCE_ID]:
     if os.environ.get("TRACEBASE_FAIL_SOURCE"):
+        password = Path(os.environ["TRACEBASE_PASSWORD_CAPTURE"]).read_text(
+            encoding="utf-8"
+        )
+        print(password, file=sys.stderr)
         print(AUTHORIZATION_MARKER, file=sys.stderr)
         print(SESSION_EXPORT_MARKER, file=sys.stderr)
         raise SystemExit(1)
@@ -168,6 +191,7 @@ else:
 """,
             {
                 "__SOURCE_ID__": source_id,
+                "__SECOND_SOURCE_ID__": second_source_id,
                 "__AUTHORIZATION_MARKER__": AUTHORIZATION_MARKER,
                 "__SOURCE_RESPONSE_MARKER__": SOURCE_RESPONSE_MARKER,
                 "__SESSION_EXPORT_MARKER__": SESSION_EXPORT_MARKER,
@@ -213,6 +237,7 @@ def _run_collect(
         "PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"],
         "GH_TOKEN": AUTHORIZATION_MARKER,
         "TRACEBASE_FAIL_SOURCE": "1" if fail_source else "",
+        "TRACEBASE_PASSWORD_CAPTURE": str(archive.parent / "opencode-password.capture"),
     }
     if source == "opencode":
         environment["PYTHONPATH"] = (
@@ -249,6 +274,11 @@ def _assert_authorization_is_not_disclosed(
     result: subprocess.CompletedProcess[str], archive: Path
 ) -> None:
     sensitive_values = [AUTHORIZATION_MARKER]
+    password_capture = archive.parent / "opencode-password.capture"
+    if password_capture.exists():
+        password = password_capture.read_text(encoding="utf-8")
+        assert password
+        sensitive_values.append(password)
     output = result.stdout + result.stderr
     archive_content = _archive_bytes(archive)
     for value in sensitive_values:
@@ -337,7 +367,9 @@ def test_successful_sources_share_the_published_archive_contract(
     [
         ("2026-01-01T00:00:00", COLLECTION_TO),
         ("2026-01-01T00:00:00.1Z", COLLECTION_TO),
+        ("not-a-timestamp", COLLECTION_TO),
         (COLLECTION_FROM, COLLECTION_FROM),
+        (COLLECTION_TO, COLLECTION_FROM),
     ],
 )
 def test_both_commands_reject_invalid_ranges_before_staging(
@@ -400,7 +432,19 @@ def test_failed_sources_remain_inspectable_but_do_not_enter_overlap_registry(
     assert not (archive / "runs").exists()
     staging_runs = list((archive / ".staging").iterdir())
     assert len(staging_runs) == 1
-    assert (staging_runs[0] / "snapshots").is_dir()
+    staging_snapshot = (
+        staging_runs[0]
+        / "snapshots"
+        / ("issue" if source == "github" else "session")
+        / _encode_path_id(SOURCE_IDS[source])
+    )
+    assert staging_snapshot.is_dir()
+    if source == "github":
+        assert (staging_snapshot / "issue.json").read_bytes() == GITHUB_ISSUE_RESPONSE
+    else:
+        assert (
+            staging_snapshot / "session.json"
+        ).read_bytes() == OPENCODE_SESSION_EXPORT
     _assert_authorization_is_not_disclosed(failed, archive)
 
     recovered = _run_collect(source, archive, fixture_directory)
