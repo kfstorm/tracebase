@@ -148,6 +148,7 @@ elif len(arguments) == 2 and arguments[0] == "export":
         "ends-at-start": "ends-at-start.json",
         "overlaps-start": "overlaps-start.json",
         "session/unsafe:1": "session-unsafe-1.json",
+        "updated-after-end": "session-unsafe-1.json",
     }
     export_path = Path(os.environ["TRACEBASE_EXPORT_DIR"], filenames[session_id])
     sys.stdout.buffer.write(export_path.read_bytes())
@@ -159,7 +160,9 @@ else:
         executable.chmod(0o755)
         return directory
 
-    def test_collects_intersecting_sessions_with_raw_exports_and_metadata(self) -> None:
+    def test_collects_sessions_updated_in_range_with_raw_exports_and_metadata(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             result = self.run_cli(root / "archive", self.make_fake_opencode(root))
@@ -185,6 +188,9 @@ else:
                 "ends-at-start",
                 "overlaps-start",
                 "session/unsafe:1",
+            }
+            assert "updated-after-end" not in {
+                entry["source_id"] for entry in run_manifest["snapshots"]
             }
 
             source_id = "session/unsafe:1"
@@ -260,9 +266,9 @@ else:
                 root / "archive",
                 self.make_fake_opencode(root),
                 "--from",
-                "2026-01-01T02:00:00+00:00",
-                "--to",
                 "2026-01-01T03:00:00+00:00",
+                "--to",
+                "2026-01-01T04:00:00+00:00",
             )
 
             assert result.returncode == 0

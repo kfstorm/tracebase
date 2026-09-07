@@ -193,10 +193,10 @@ def collect(
     list_completed_at = _observation_time()
     selected: list[dict[str, Any]] = []
     for session in sessions:
-        created, updated = _session_interval(session)
+        _, updated = _session_interval(session)
         # The API bounds updated timestamps with start/cursor. Keep this
         # predicate defensive in case a server does not honor those filters.
-        if created < run.collection_range.end and run.collection_range.start <= updated:
+        if run.collection_range.start <= updated < run.collection_range.end:
             selected.append(session)
 
     reporter.emit(
