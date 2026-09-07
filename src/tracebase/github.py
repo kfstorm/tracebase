@@ -358,6 +358,14 @@ def _review_thread_comment_page(data: dict[str, Any], thread_id: str) -> dict[st
     return connection
 
 
+def _review_comment_nodes(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not all(
+        isinstance(comment, dict) for comment in value
+    ):
+        raise ArchiveError("GitHub review-thread comments response was invalid")
+    return value
+
+
 def _review_thread_evidence(github: _GitHub, candidate: _Candidate) -> list[_Evidence]:
     evidence: list[_Evidence] = []
     thread_cursor: str | None = None
@@ -389,8 +397,7 @@ def _review_thread_evidence(github: _GitHub, candidate: _Candidate) -> list[_Evi
                 or not isinstance(comments.get("pageInfo"), dict)
             ):
                 raise ArchiveError("GitHub review-thread response was invalid")
-            if not all(isinstance(comment, dict) for comment in comments["nodes"]):
-                raise ArchiveError("GitHub review-thread response was invalid")
+            _review_comment_nodes(comments["nodes"])
             thread_number += 1
             comment_cursor: str | None = None
             comment_page_number = 1
@@ -420,12 +427,7 @@ def _review_thread_evidence(github: _GitHub, candidate: _Candidate) -> list[_Evi
                         },
                     )
                 )
-                if not all(
-                    isinstance(comment, dict) for comment in comment_connection["nodes"]
-                ):
-                    raise ArchiveError(
-                        "GitHub review-thread comments response was invalid"
-                    )
+                _review_comment_nodes(comment_connection["nodes"])
                 has_next_comments, comment_cursor = _graphql_page_info(
                     comment_connection["pageInfo"]
                 )
@@ -672,6 +674,7 @@ def _hydrate(
 ) -> None:
     if run.has_staged_snapshot(candidate.object_kind, candidate.source_id):
         return
+    run.discard_staged_snapshot(candidate.object_kind, candidate.source_id)
     observed_from = _observed_at()
     base = f"/repos/{candidate.repository}"
     issue_endpoint = f"{base}/issues/{candidate.number}"

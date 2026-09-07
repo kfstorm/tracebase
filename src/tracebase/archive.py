@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import secrets
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
@@ -291,10 +292,40 @@ class CollectionRun:
     def has_staged_snapshot(self, object_kind: str, source_id: str) -> bool:
         """Return whether this run already staged an Artifact snapshot."""
 
-        return any(
-            entry["object_kind"] == object_kind and entry["source_id"] == source_id
-            for entry in self._snapshots
-        )
+        for entry in self._snapshots:
+            if entry["object_kind"] != object_kind or entry["source_id"] != source_id:
+                continue
+            snapshot_root = self.staging / PurePosixPath(entry["path"])
+            manifest_path = snapshot_root / "snapshot.json"
+            if not _is_regular_file(manifest_path):
+                return False
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                evidence_files = _normalize_evidence_files(
+                    manifest.get("evidence_files")
+                )
+            except OSError, ArchiveError, json.JSONDecodeError:
+                return False
+            return all(
+                _is_regular_file(snapshot_root / evidence_file["path"])
+                for evidence_file in evidence_files
+            )
+        return False
+
+    def discard_staged_snapshot(self, object_kind: str, source_id: str) -> None:
+        """Remove an incomplete staged Artifact snapshot before retrying it."""
+
+        for index, entry in enumerate(self._snapshots):
+            if entry["object_kind"] != object_kind or entry["source_id"] != source_id:
+                continue
+            snapshot_root = self.staging / PurePosixPath(entry["path"])
+            _ensure_inside(snapshot_root, self.staging / "snapshots")
+            if snapshot_root.is_symlink():
+                raise ArchiveError("Snapshot directory cannot be a symlink")
+            if snapshot_root.exists():
+                shutil.rmtree(snapshot_root)
+            self._snapshots.pop(index)
+            return
 
     def write_snapshot(self, snapshot: Snapshot) -> Path:
         _validate_archive_type(snapshot.source_kind, "source kind")

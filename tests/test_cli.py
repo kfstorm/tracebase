@@ -848,6 +848,18 @@ def test_github_collect_preserves_review_thread_source_native_responses(
         run = build_github_run(Archive(directory))
 
         result = collect(run, build_test_reporter())
+        _hydrate(
+            run,
+            _GitHub(),
+            _Candidate(
+                "pr-node",
+                "octo/example",
+                7,
+                "pull-request",
+                (),
+            ),
+        )
+        assert run.snapshot_count == 1
         published = run.publish(result.coverage)
         snapshot = next((published / "snapshots/pull-request").iterdir())
         manifest = json.loads((snapshot / "snapshot.json").read_text())
@@ -914,18 +926,6 @@ def test_github_collect_preserves_review_thread_source_native_responses(
                 None,
             ),
         ]
-        _hydrate(
-            run,
-            _GitHub(),
-            _Candidate(
-                "pr-node",
-                "octo/example",
-                7,
-                "pull-request",
-                (),
-            ),
-        )
-        assert run.snapshot_count == 1
 
 
 def test_github_collect_failure_keeps_run_unpublished(
@@ -1057,6 +1057,27 @@ if has_escape_flag != (capability == "modern" and is_diff):
 assert "X-GitHub-Api-Version: 2022-11-28" in sys.argv
 headers = b"HTTP/1.1 200 OK\\r\\n\\r\\n"
 item = {"node_id": "pr-node", "number": 7, "repository_url": "https://api.github.com/repos/octo/example", "pull_request": {}}
+def review_thread(thread_id, resolved, outdated, line, original_line, resolver):
+    return {
+        "id": thread_id,
+        "path": "src/example.py",
+        "line": line,
+        "originalLine": original_line,
+        "startLine": line,
+        "originalStartLine": original_line,
+        "diffSide": "RIGHT",
+        "startDiffSide": "RIGHT",
+        "isResolved": resolved,
+        "isOutdated": outdated,
+        "resolvedBy": {"id": "reviewer-id", "login": "reviewer"} if resolver else None,
+        "comments": {
+            "nodes": [
+                {"id": thread_id + "-comment-1", "body": "first"},
+                {"id": thread_id + "-comment-2", "body": "second"},
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+    }
 if endpoint == "/user": body = b'{"node_id":"actor-node","login":"actor"}'
 elif endpoint.startswith("/search/issues?"): body = json.dumps({"total_count": 1, "incomplete_results": False, "items": [item]}).encode()
 elif endpoint == "/repos/octo/example/issues/7": body = b'{"node_id":"pr-node","user":{"node_id":"actor-node"},"pull_request":{}}'
@@ -1066,7 +1087,18 @@ elif endpoint.endswith("/issues/7/comments?per_page=100&page=1"):
 elif endpoint.endswith("/issues/7/comments?per_page=100&page=2"): body = b"[]"
 elif endpoint.endswith("/issues/7/timeline?per_page=100&page=1") or endpoint.endswith("/pulls/7/comments?per_page=100&page=1"): body = b"[]"
 elif endpoint.endswith("/pulls/7/reviews?per_page=100&page=1"): body = b'[{"user":{"node_id":"actor-node"},"submitted_at":"x"}]'
-elif endpoint.startswith("query=query PullRequestReviewThreads"): body = b'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread-cli","path":"src/example.py","line":4,"originalLine":4,"isResolved":true,"isOutdated":false,"resolvedBy":{"id":"reviewer-id","login":"reviewer"},"comments":{"nodes":[{"id":"comment-cli-1","body":"first"},{"id":"comment-cli-2","body":"second"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+elif endpoint.startswith("query=query PullRequestReviewThreads"):
+    body = json.dumps({
+        "data": {"repository": {"pullRequest": {"reviewThreads": {
+            "nodes": [
+                review_thread("thread-cli-resolved-current", True, False, 4, 4, True),
+                review_thread("thread-cli-unresolved-current", False, False, 8, 8, False),
+                review_thread("thread-cli-resolved-outdated", True, True, 12, 12, True),
+                review_thread("thread-cli-unresolved-outdated", False, True, None, 16, False),
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }}}}
+    }).encode()
 elif endpoint == "/repos/octo/example/pulls/7" and any("application/vnd.github.diff" in arg for arg in sys.argv): body = b"diff --git a/a b/a\\n"
 elif endpoint == "/repos/octo/example/pulls/7": body = b'{"node_id":"pr-node"}'
 else: raise SystemExit(2)
@@ -1085,13 +1117,42 @@ sys.stdout.buffer.write(headers + body)
     run = next((archive / "runs").iterdir())
     snapshot = next((run / "snapshots/pull-request").iterdir())
     assert (snapshot / "comments.002.json").read_bytes() == b"[]"
-    thread = json.loads((snapshot / "review-threads.001.json").read_bytes())["data"][
+    threads = json.loads((snapshot / "review-threads.001.json").read_bytes())["data"][
         "repository"
-    ]["pullRequest"]["reviewThreads"]["nodes"][0]
-    assert thread["id"] == "thread-cli"
-    assert [comment["id"] for comment in thread["comments"]["nodes"]] == [
-        "comment-cli-1",
-        "comment-cli-2",
+    ]["pullRequest"]["reviewThreads"]["nodes"]
+    assert [
+        (
+            thread["id"],
+            thread["isResolved"],
+            thread["isOutdated"],
+            thread["line"],
+            thread["originalLine"],
+            thread["resolvedBy"],
+        )
+        for thread in threads
+    ] == [
+        (
+            "thread-cli-resolved-current",
+            True,
+            False,
+            4,
+            4,
+            {"id": "reviewer-id", "login": "reviewer"},
+        ),
+        ("thread-cli-unresolved-current", False, False, 8, 8, None),
+        (
+            "thread-cli-resolved-outdated",
+            True,
+            True,
+            12,
+            12,
+            {"id": "reviewer-id", "login": "reviewer"},
+        ),
+        ("thread-cli-unresolved-outdated", False, True, None, 16, None),
+    ]
+    assert [comment["id"] for comment in threads[0]["comments"]["nodes"]] == [
+        "thread-cli-resolved-current-comment-1",
+        "thread-cli-resolved-current-comment-2",
     ]
     assert (snapshot / "pull-request.diff").read_bytes() == b"diff --git a/a b/a\n"
     assert json.loads((snapshot / "snapshot.json").read_text())["selection_provenance"][
