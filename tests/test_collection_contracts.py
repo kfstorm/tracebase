@@ -104,6 +104,16 @@ sys.stdout.buffer.write(
 
 def _make_opencode_fixture(directory: Path) -> None:
     source_id = repr(SOURCE_IDS["opencode"])
+    (directory / "secrets.py").write_text(
+        "import time\n"
+        "\n"
+        "def randbits(bit_count: int) -> int:\n"
+        "    return time.time_ns() & ((1 << bit_count) - 1)\n"
+        "\n"
+        "def token_urlsafe(_nbytes: int = 32) -> str:\n"
+        f"    return {AUTHORIZATION_MARKER!r}\n",
+        encoding="utf-8",
+    )
     _write_executable(
         directory / "opencode",
         _render_fixture(
@@ -199,18 +209,22 @@ def _run_collect(
     ]
     if source == "opencode":
         arguments.extend(["--instance-id", "synthetic-instance-18"])
+    environment = os.environ | {
+        "PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"],
+        "GH_TOKEN": AUTHORIZATION_MARKER,
+        "TRACEBASE_FAIL_SOURCE": "1" if fail_source else "",
+    }
+    if source == "opencode":
+        environment["PYTHONPATH"] = (
+            str(fixture_directory) + os.pathsep + os.environ.get("PYTHONPATH", "")
+        )
     return subprocess.run(
         arguments,
         cwd=PROJECT_ROOT,
         text=True,
         capture_output=True,
         check=False,
-        env=os.environ
-        | {
-            "PATH": str(fixture_directory) + os.pathsep + os.environ["PATH"],
-            "GH_TOKEN": AUTHORIZATION_MARKER,
-            "TRACEBASE_FAIL_SOURCE": "1" if fail_source else "",
-        },
+        env=environment,
     )
 
 
