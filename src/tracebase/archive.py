@@ -139,6 +139,19 @@ def _is_regular_file(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
 
 
+def _validate_declared_evidence(snapshot_root: Path, evidence_files: Any) -> set[str]:
+    declared = _normalize_evidence_files(evidence_files)
+    declared_paths = {evidence_file["path"] for evidence_file in declared}
+    for evidence_file in declared:
+        evidence_path = snapshot_root.joinpath(
+            *PurePosixPath(evidence_file["path"]).parts
+        )
+        _ensure_inside(evidence_path, snapshot_root)
+        if not _is_regular_file(evidence_path):
+            raise ArchiveError("declared evidence file is missing or not regular")
+    return declared_paths
+
+
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -301,15 +314,14 @@ class CollectionRun:
                 return False
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                evidence_files = _normalize_evidence_files(
-                    manifest.get("evidence_files")
+                if not isinstance(manifest, dict):
+                    return False
+                _validate_declared_evidence(
+                    snapshot_root, manifest.get("evidence_files")
                 )
             except OSError, ArchiveError, json.JSONDecodeError:
                 return False
-            return all(
-                _is_regular_file(snapshot_root / evidence_file["path"])
-                for evidence_file in evidence_files
-            )
+            return True
         return False
 
     def discard_staged_snapshot(self, object_kind: str, source_id: str) -> None:
@@ -443,19 +455,9 @@ class CollectionRun:
             for field in ("source_kind", "object_kind", "source_id"):
                 if snapshot_manifest.get(field) != entry[field]:
                     raise ArchiveError(f"Snapshot {field} is inconsistent")
-            declared = _normalize_evidence_files(
-                snapshot_manifest.get("evidence_files")
+            declared_paths = _validate_declared_evidence(
+                snapshot_root, snapshot_manifest.get("evidence_files")
             )
-            declared_paths = {evidence_file["path"] for evidence_file in declared}
-            for evidence_file in declared:
-                evidence_path = snapshot_root.joinpath(
-                    *PurePosixPath(evidence_file["path"]).parts
-                )
-                _ensure_inside(evidence_path, snapshot_root)
-                if not _is_regular_file(evidence_path):
-                    raise ArchiveError(
-                        "declared evidence file is missing or not regular"
-                    )
 
             actual_paths: set[str] = set()
             for path in snapshot_root.rglob("*"):
