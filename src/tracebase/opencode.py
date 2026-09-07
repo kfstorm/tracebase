@@ -103,6 +103,7 @@ def _discover_sessions(
     query = urlencode(
         {
             "start": int(run.collection_range.start.timestamp() * 1000),
+            "cursor": int(run.collection_range.end.timestamp() * 1000),
             "archived": "true",
             "limit": _DISCOVERY_LIMIT,
         }
@@ -277,6 +278,7 @@ def collect(
             "session_discovery_endpoint": "/experimental/session",
             "session_discovery_options": {
                 "start": int(run.collection_range.start.timestamp() * 1000),
+                "cursor": int(run.collection_range.end.timestamp() * 1000),
                 "archived": True,
                 "limit": _DISCOVERY_LIMIT,
             },

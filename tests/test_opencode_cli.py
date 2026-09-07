@@ -35,8 +35,11 @@ class TestOpenCodeCollectionCli:
         discovery: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         from_text = "2026-01-01T00:00:00+00:00"
+        to_text = "2026-01-01T01:00:00+00:00"
         if "--from" in arguments:
             from_text = arguments[arguments.index("--from") + 1]
+        if "--to" in arguments:
+            to_text = arguments[arguments.index("--to") + 1]
         environment = os.environ | {
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
             "TRACEBASE_DISCOVERY": str(discovery or FIXTURES / "session-list.json"),
@@ -45,6 +48,9 @@ class TestOpenCodeCollectionCli:
             "TRACEBASE_NEXT_CURSOR": next_cursor,
             "TRACEBASE_EXPECTED_START": str(
                 int(datetime.fromisoformat(from_text).timestamp() * 1000)
+            ),
+            "TRACEBASE_EXPECTED_CURSOR": str(
+                int(datetime.fromisoformat(to_text).timestamp() * 1000)
             ),
             "TRACEBASE_SERVER_PID": str(fake_bin / "server.pid"),
         }
@@ -95,6 +101,7 @@ elif arguments == [
             parsed = urlparse(self.path)
             expected = {
                 "start": [os.environ["TRACEBASE_EXPECTED_START"]],
+                "cursor": [os.environ["TRACEBASE_EXPECTED_CURSOR"]],
                 "archived": ["true"],
                 "limit": ["10000"],
             }
@@ -166,6 +173,12 @@ else:
             assert run_manifest["source"] == {
                 "kind": "opencode",
                 "scope_id": "opaque-global-instance",
+            }
+            assert run_manifest["coverage"]["session_discovery_options"] == {
+                "start": 1767225600000,
+                "cursor": 1767229200000,
+                "archived": True,
+                "limit": 10000,
             }
             assert run_manifest["coverage"]["selected_session_count"] == 3
             assert {entry["source_id"] for entry in run_manifest["snapshots"]} == {
