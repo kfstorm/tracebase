@@ -4,12 +4,12 @@ from io import StringIO
 import pytest
 
 from tracebase.progress import (
-    LineProgressReporter,
+    LineProgressSink,
     NullProgressSink,
     ProgressEvent,
     ProgressProtocolError,
     ProgressReporter,
-    RichProgressReporter,
+    RichProgressSink,
 )
 
 
@@ -21,7 +21,7 @@ class TTYBuffer(StringIO):
 def test_rich_progress_renders_complete_lifecycle_after_removed_task() -> None:
     stream = TTYBuffer()
 
-    with RichProgressReporter(stream) as progress:
+    with RichProgressSink(stream) as progress:
         progress.emit(
             ProgressEvent(
                 kind="start",
@@ -111,7 +111,7 @@ def test_line_progress_reports_complete_lifecycle_for_non_tty() -> None:
     stream = StringIO()
     timestamp = datetime(2026, 9, 7, 4, 1, 22, tzinfo=UTC)
 
-    with LineProgressReporter(stream, clock=lambda: timestamp) as progress:
+    with LineProgressSink(stream, clock=lambda: timestamp) as progress:
         progress.emit(
             ProgressEvent(
                 kind="start",
@@ -170,11 +170,11 @@ def test_line_progress_reports_complete_lifecycle_for_non_tty() -> None:
     ]
 
 
-@pytest.mark.parametrize("sink_type", [LineProgressReporter, RichProgressReporter])
+@pytest.mark.parametrize("sink_type", [LineProgressSink, RichProgressSink])
 def test_progress_reporter_fails_fast_on_invalid_task_lifecycle(
     sink_type: type,
 ) -> None:
-    stream = TTYBuffer() if sink_type is RichProgressReporter else StringIO()
+    stream = TTYBuffer() if sink_type is RichProgressSink else StringIO()
     sink = sink_type(stream)
     reporter = ProgressReporter(sink)
 

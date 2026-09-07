@@ -19,10 +19,10 @@ from .opencode import (
     resolve_context as resolve_opencode_context,
 )
 from .progress import (
-    LineProgressReporter,
+    LineProgressSink,
     ProgressEvent,
     ProgressReporter,
-    RichProgressReporter,
+    RichProgressSink,
 )
 
 
@@ -94,9 +94,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = archive.new_run_id()
 
     sink = (
-        RichProgressReporter(sys.stderr)
+        RichProgressSink(sys.stderr)
         if sys.stderr.isatty()
-        else LineProgressReporter(sys.stderr)
+        else LineProgressSink(sys.stderr)
     )
     with sink:
         progress = ProgressReporter(sink)

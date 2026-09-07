@@ -86,7 +86,7 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class LineProgressReporter:
+class LineProgressSink:
     """Write one operational progress line for every lifecycle event."""
 
     def __init__(self, stream: TextIO, clock: ProgressClock = _utc_now) -> None:
@@ -94,7 +94,7 @@ class LineProgressReporter:
         self._clock = clock
         self._tasks: dict[str, ProgressEvent] = {}
 
-    def __enter__(self) -> LineProgressReporter:
+    def __enter__(self) -> LineProgressSink:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -163,7 +163,7 @@ def _join_status(*parts: str) -> str:
     return " ".join(part for part in parts if part)
 
 
-class RichProgressReporter:
+class RichProgressSink:
     """Render progress events as interactive Rich tasks."""
 
     def __init__(self, stream: TextIO) -> None:
@@ -181,7 +181,7 @@ class RichProgressReporter:
         self._totals: dict[str, int | None] = {}
         self._labels: dict[str, str] = {}
 
-    def __enter__(self) -> RichProgressReporter:
+    def __enter__(self) -> RichProgressSink:
         self._progress.start()
         return self
 
