@@ -34,6 +34,7 @@ class ProgressEvent:
     parent_task_id: str | None = None
     completed: int | None = None
     total: int | None = None
+    phase: str = ""
     current: str = ""
     message: str = ""
 
@@ -110,6 +111,7 @@ class LineProgressSink:
                     event.completed if event.completed is not None else task.completed
                 ),
                 total=event.total if event.total is not None else task.total,
+                phase=event.phase,
                 current=event.current,
                 message=event.message,
             )
@@ -131,7 +133,7 @@ class LineProgressSink:
         completed = event.completed if event.completed is not None else task.completed
         if total is not None and completed is not None:
             counts = f"{completed}/{total}"
-        return _join_status(counts, event.current, event.message)
+        return _join_status(counts, event.phase, event.current, event.message)
 
     @staticmethod
     def _finish_status(task: ProgressEvent, event: ProgressEvent) -> str:
@@ -210,8 +212,8 @@ class RichProgressSink:
         if event.total is not None:
             updates["total"] = event.total
             self._totals[event.task_id] = event.total
-        if event.current or event.message:
-            updates["status"] = _join_status(event.current, event.message)
+        if event.phase or event.current or event.message:
+            updates["status"] = _join_status(event.phase, event.current, event.message)
         if updates:
             self._progress.update(task_id, **updates)
 

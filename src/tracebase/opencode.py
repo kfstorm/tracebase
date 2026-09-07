@@ -229,6 +229,7 @@ def collect(
                 task_id="opencode.hydrate",
                 completed=completed - 1,
                 total=len(selected),
+                phase="starting",
                 current=session["id"],
             )
         )
@@ -263,6 +264,7 @@ def collect(
                 task_id="opencode.hydrate",
                 completed=completed,
                 total=len(selected),
+                phase="completed",
                 current=session["id"],
             )
         )
