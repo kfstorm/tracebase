@@ -135,6 +135,7 @@ def test_github_context_projects_native_records_without_fix_inference(
             "created_at": "2025-12-31T23:00:00Z",
             "updated_at": "2026-01-01T00:30:00Z",
             "body": "See https://github.com/example/repo/issues/99",
+            "html_url": "https://github.com/example/repo/pull/1",
             "user": {"login": "author"},
         },
         "pull-request.json": {"node_id": source_id},
@@ -145,7 +146,11 @@ def test_github_context_projects_native_records_without_fix_inference(
                 "user": {"login": "reviewer"},
             }
         ],
-        "timeline.001.json": [{"id": 10, "event": "commented"}],
+        "timeline.001.json": [
+            {"id": 10, "event": "commented"},
+            {"id": 20, "event": "reviewed", "actor": {"login": "reviewer"}},
+            {"id": 40, "event": "closed", "actor": {"login": "closer"}},
+        ],
         "reviews.001.json": [
             {
                 "id": 20,
@@ -234,7 +239,7 @@ def test_github_context_projects_native_records_without_fix_inference(
             {
                 "node_id": source_id,
                 "created_at": "2025-12-31T23:00:00Z",
-                "updated_at": "2026-01-01T00:45:00Z",
+                "updated_at": "2026-01-02T00:45:00Z",
             }
         ).encode(),
     )
@@ -280,9 +285,7 @@ def test_github_context_projects_native_records_without_fix_inference(
         "review-inline-comment",
         "thread-inline-comment",
     }
-    assert projection["gaps"] == [
-        {"detail": "does_not_establish_fix_or_commit", "kind": "aggregate_diff"}
-    ]
+    assert projection["gaps"] == []
     assert next(
         record
         for record in projection["records"]
@@ -294,6 +297,14 @@ def test_github_context_projects_native_records_without_fix_inference(
         if record["kind"] == "ordinary-comment"
     )
     assert len(ordinary_comment["representations"]) == 2
+    review = next(
+        record for record in projection["records"] if record["kind"] == "review"
+    )
+    assert len(review["representations"]) == 2
+    lifecycle = next(
+        record for record in projection["records"] if record["native_id"] == "40"
+    )
+    assert lifecycle["actor"] == {"login": "closer"}
     pull_request = next(
         record for record in projection["records"] if record["kind"] == "pull-request"
     )
@@ -303,7 +314,15 @@ def test_github_context_projects_native_records_without_fix_inference(
         "github-run",
         "github-run-later",
     }
-    assert "Gaps and Uncertainty" in (output / "index.md").read_text()
+    assert pull_request["temporal_roles"] == [
+        "in_range_work",
+        "earlier_background",
+        "later_progression",
+    ]
+    assert (
+        "Aggregate diffs do not establish a fix"
+        in (output / item["view_path"]).read_text()
+    )
     assert manifest["unresolved_references"] == []
     assert (
         manifest["relations"][-1]["url"] == "https://github.com/example/repo/issues/99"

@@ -43,8 +43,8 @@ def _timestamp(value: Any) -> datetime | None:
 
 
 def _actor(value: dict[str, Any]) -> dict[str, str] | None:
-    user = value.get("user")
-    login = user.get("login") if isinstance(user, dict) else None
+    source = value.get("user", value.get("actor"))
+    login = source.get("login") if isinstance(source, dict) else None
     return {"login": login} if isinstance(login, str) else None
 
 
@@ -124,12 +124,14 @@ def _roles(record: dict[str, Any], start: datetime, end: datetime) -> tuple[str,
         if isinstance(value, str)
         if (timestamp := _timestamp(value)) is not None
     ]
-    if any(start <= timestamp < end for timestamp in timestamps):
-        return ("in_range_work",)
     if timestamps:
         return tuple(
             role
             for role, present in (
+                (
+                    "in_range_work",
+                    any(start <= timestamp < end for timestamp in timestamps),
+                ),
                 (
                     "earlier_background",
                     any(timestamp < start for timestamp in timestamps),
@@ -185,9 +187,9 @@ def project_github(  # noqa: PLR0915
                     ):
                         kind = "ordinary-comment"
                     elif value.get("event") == "reviewed" and isinstance(
-                        value.get("review_id"), int
+                        value.get("id"), int
                     ):
-                        kind, identifier = "review", value["review_id"]
+                        kind, identifier = "review", value["id"]
                     _add_record(
                         records, _record(kind, str(identifier), value, path, snapshot)
                     )
@@ -300,7 +302,6 @@ def project_github(  # noqa: PLR0915
                     ],
                 },
             )
-            gaps.add(("aggregate_diff", "does_not_establish_fix_or_commit"))
     ordered = tuple(
         sorted(
             records.values(),

@@ -150,11 +150,11 @@ def extract_context(
         if item.github is not None
         for record in item.github.records
         for representation in record["representations"]
-        for value in (
-            [representation["value"].get("html_url")]
+        for value in [
+            representation["value"].get("html_url")
             if isinstance(representation["value"], dict)
-            else []
-        )
+            else None
+        ]
         if isinstance(value, str)
     }
     relations: list[dict[str, str]] = []
@@ -164,8 +164,10 @@ def extract_context(
             continue
         for record in item.github.records:
             for representation in record["representations"]:
-                for url in _GITHUB_ITEM_URL.findall(
-                    json.dumps(representation["value"])
+                value = representation["value"]
+                body = value.get("body") if isinstance(value, dict) else None
+                for url in (
+                    _GITHUB_ITEM_URL.findall(body) if isinstance(body, str) else ()
                 ):
                     reference = {
                         "kind": "explicit-github-reference",
@@ -235,6 +237,7 @@ def _render_source_view(item_root: Path, item: ContextItem) -> str:
         lines.append(
             "Review thread state is observed current state, not proof of a fix."
         )
+        lines.append("Aggregate diffs do not establish a fix or fixing commit.")
         (item_root / "github.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return f"{item.path}/github.md"
     view_path = f"{item.path}/{source.manifest['source_kind']}.md"
