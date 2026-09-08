@@ -181,22 +181,16 @@ def _record_sort_key(
         if isinstance(representation["value"], dict)
         for timestamp in _occurrence_times(representation["value"])
     ]
-    in_range = [timestamp for timestamp in timestamps if start <= timestamp < end]
-    if in_range:
+    if timestamps:
+        in_range = [timestamp for timestamp in timestamps if start <= timestamp < end]
+        relevant = in_range if in_range else timestamps
         return (
             0,
-            min(timestamp.timestamp() for timestamp in in_range),
+            min(timestamp.timestamp() for timestamp in relevant),
             record["kind"],
             record["native_id"],
         )
-    if timestamps:
-        return (
-            1,
-            min(timestamp.timestamp() for timestamp in timestamps),
-            record["kind"],
-            record["native_id"],
-        )
-    return (2, 0.0, record["kind"], record["native_id"])
+    return (1, 0.0, record["kind"], record["native_id"])
 
 
 def project_github(  # noqa: PLR0915

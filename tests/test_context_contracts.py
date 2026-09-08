@@ -158,6 +158,7 @@ def test_github_context_projects_native_records_without_fix_inference(  # noqa: 
             {"id": 10, "event": "commented"},
             {"id": 20, "event": "reviewed", "actor": {"login": "reviewer"}},
             {"id": 40, "event": "closed", "actor": {"login": "closer"}},
+            {"id": 60, "event": "labeled", "created_at": "2025-12-31T23:50:00Z"},
             {
                 "id": 50,
                 "event": "cross-referenced",
@@ -315,6 +316,12 @@ def test_github_context_projects_native_records_without_fix_inference(  # noqa: 
         if record["kind"] == "ordinary-comment"
     )
     assert review_index < comment_index
+    earlier_index = next(
+        index
+        for index, record in enumerate(projection["records"])
+        if record["native_id"] == "60"
+    )
+    assert earlier_index < review_index
     review = next(
         record for record in projection["records"] if record["kind"] == "review"
     )
