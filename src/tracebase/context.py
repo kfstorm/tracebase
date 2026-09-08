@@ -165,11 +165,17 @@ def _cleanup_staging(staging: Path) -> None:
         raise ContextError("context output cleanup failed") from None
 
 
+def _observation_name(index: int, run_id: str) -> str:
+    return f"{index:03d}-{run_id}"
+
+
 def _github_records_for_output(item: ContextItem) -> tuple[dict[str, Any], ...]:
     if item.github is None:
         return ()
     observation_paths = {
-        snapshot.run["run_id"]: (f"observations/{index:03d}-{snapshot.run['run_id']}")
+        snapshot.run["run_id"]: (
+            f"observations/{_observation_name(index, snapshot.run['run_id'])}"
+        )
         for index, snapshot in enumerate(item.snapshots, start=1)
     }
     records: list[dict[str, Any]] = []
@@ -234,7 +240,7 @@ def _render_source_view(
         "",
     ]
     for observation_index, snapshot in enumerate(item.snapshots, start=1):
-        observation_name = f"{observation_index:03d}-{snapshot.run['run_id']}"
+        observation_name = _observation_name(observation_index, snapshot.run["run_id"])
         lines.extend(
             f"- [{name}](observations/{observation_name}/{name})"
             for name in sorted(snapshot.evidence)
@@ -251,7 +257,7 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
     provenance: list[dict[str, Any]] = []
     for observation_index, snapshot in enumerate(item.snapshots, start=1):
         run_id = snapshot.run["run_id"]
-        observation_name = f"{observation_index:03d}-{run_id}"
+        observation_name = _observation_name(observation_index, run_id)
         observation_root = item_root / "observations" / observation_name
         for name, content in sorted(snapshot.evidence.items()):
             destination = observation_root.joinpath(*PurePosixPath(name).parts)
