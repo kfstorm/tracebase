@@ -239,6 +239,26 @@ def test_github_context_projects_native_records_without_fix_inference(
         ).encode(),
     )
     later.write_evidence(later_snapshot, "pull-request.json", b'{"node_id": "PR_1"}')
+    target_snapshot = later.write_snapshot(
+        Snapshot(
+            "github",
+            "issue",
+            "ISSUE_99",
+            later.collection_range.as_manifest(),
+            ({"path": "issue.json"},),
+        )
+    )
+    later.write_evidence(
+        target_snapshot,
+        "issue.json",
+        json.dumps(
+            {
+                "node_id": "ISSUE_99",
+                "created_at": "2025-01-01T00:00:00Z",
+                "html_url": "https://github.com/example/repo/issues/99",
+            }
+        ).encode(),
+    )
     later.publish({})
 
     output = tmp_path / "output"
@@ -284,14 +304,8 @@ def test_github_context_projects_native_records_without_fix_inference(
         "github-run-later",
     }
     assert "Gaps and Uncertainty" in (output / "index.md").read_text()
-    assert manifest["unresolved_references"] == [
-        {
-            "from_native_id": source_id,
-            "from_path": item["path"],
-            "kind": "explicit-github-reference",
-            "url": "https://github.com/example/repo/issues/99",
-        }
-    ]
+    assert manifest["unresolved_references"] == []
+    assert manifest["relations"][-1]["to_path"].endswith("SVNTVUVfOTk")
     assert "fixed" not in (output / item["view_path"]).read_text().lower()
 
 
