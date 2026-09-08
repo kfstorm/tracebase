@@ -134,6 +134,7 @@ def test_github_context_projects_native_records_without_fix_inference(
             "node_id": source_id,
             "created_at": "2025-12-31T23:00:00Z",
             "updated_at": "2026-01-01T00:30:00Z",
+            "body": "See https://github.com/example/repo/issues/99",
             "user": {"login": "author"},
         },
         "pull-request.json": {"node_id": source_id},
@@ -154,11 +155,19 @@ def test_github_context_projects_native_records_without_fix_inference(
         ],
         "review-comments.001.json": [
             {
+                "id": 30,
                 "node_id": "comment-node",
                 "pull_request_review_id": 20,
                 "created_at": "2026-01-01T00:21:00Z",
                 "user": {"login": "reviewer"},
-            }
+            },
+            {
+                "id": 31,
+                "node_id": "reply-node",
+                "in_reply_to_id": 30,
+                "created_at": "2026-01-01T00:22:00Z",
+                "user": {"login": "reviewer"},
+            },
         ],
         "review-threads.001.json": {
             "data": {
@@ -175,6 +184,14 @@ def test_github_context_projects_native_records_without_fix_inference(
                             ]
                         }
                     }
+                }
+            }
+        },
+        "review-thread-comments.001.002.json": {
+            "data": {
+                "node": {
+                    "id": "thread-node",
+                    "comments": {"nodes": [{"id": "reply-node"}]},
                 }
             }
         },
@@ -209,6 +226,7 @@ def test_github_context_projects_native_records_without_fix_inference(
     )
     assert thread["representations"][0]["value"]["isResolved"]
     assert {relation["kind"] for relation in projection["relations"]} == {
+        "inline-reply",
         "review-inline-comment",
         "thread-inline-comment",
     }
@@ -221,6 +239,14 @@ def test_github_context_projects_native_records_without_fix_inference(
         if record["kind"] == "ordinary-comment"
     )["temporal_roles"] == ["in_range_work"]
     assert "Gaps and Uncertainty" in (output / "index.md").read_text()
+    assert manifest["unresolved_references"] == [
+        {
+            "from_native_id": source_id,
+            "from_path": item["path"],
+            "kind": "explicit-github-reference",
+            "url": "https://github.com/example/repo/issues/99",
+        }
+    ]
     assert "fixed" not in (output / item["view_path"]).read_text().lower()
 
 
