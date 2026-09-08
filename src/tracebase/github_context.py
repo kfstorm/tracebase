@@ -48,6 +48,44 @@ def _actor(value: dict[str, Any]) -> dict[str, str] | None:
     return {"login": login} if isinstance(login, str) else None
 
 
+def _timestamps(value: dict[str, Any]) -> dict[str, str]:
+    timestamps = {
+        name: value[name]
+        for name in ("created_at", "updated_at", "submitted_at")
+        if isinstance(value.get(name), str)
+    }
+    if value.get("event") == "committed":
+        author = value.get("author")
+        committer = value.get("committer")
+        if isinstance(author, dict) and isinstance(author.get("date"), str):
+            timestamps["author_date"] = author["date"]
+        if isinstance(committer, dict) and isinstance(committer.get("date"), str):
+            timestamps["committer_date"] = committer["date"]
+    return timestamps
+
+
+def _occurrence_times(value: dict[str, Any]) -> tuple[datetime, ...]:
+    timestamps = _timestamps(value)
+    candidates: tuple[str | None, ...]
+    if value.get("event") == "committed":
+        candidates = (timestamps.get("committer_date"), timestamps.get("author_date"))
+        for candidate in candidates:
+            if (timestamp := _timestamp(candidate)) is not None:
+                return (timestamp,)
+        return ()
+    else:
+        candidates = (
+            timestamps.get("created_at"),
+            timestamps.get("updated_at"),
+            timestamps.get("submitted_at"),
+        )
+    return tuple(
+        timestamp
+        for value in candidates
+        if (timestamp := _timestamp(value)) is not None
+    )
+
+
 def _record(
     kind: str,
     native_id: str,
@@ -55,11 +93,7 @@ def _record(
     evidence_path: str,
     snapshot: PublishedSnapshot,
 ) -> dict[str, Any]:
-    timestamps = {
-        name: value[name]
-        for name in ("created_at", "updated_at", "submitted_at")
-        if isinstance(value.get(name), str)
-    }
+    timestamps = _timestamps(value)
     result: dict[str, Any] = {
         "kind": kind,
         "native_id": native_id,
@@ -119,10 +153,7 @@ def _roles(record: dict[str, Any], start: datetime, end: datetime) -> tuple[str,
         timestamp
         for representation in record["representations"]
         if isinstance(representation["value"], dict)
-        for name in ("created_at", "updated_at", "submitted_at")
-        for value in [representation["value"].get(name)]
-        if isinstance(value, str)
-        if (timestamp := _timestamp(value)) is not None
+        for timestamp in _occurrence_times(representation["value"])
     ]
     if timestamps:
         return tuple(
@@ -144,6 +175,23 @@ def _roles(record: dict[str, Any], start: datetime, end: datetime) -> tuple[str,
             if present
         )
     return ("observed_state",)
+
+
+def _record_sort_key(record: dict[str, Any]) -> tuple[int, float, str, str]:
+    timestamps = [
+        timestamp
+        for representation in record["representations"]
+        if isinstance(representation["value"], dict)
+        for timestamp in _occurrence_times(representation["value"])
+    ]
+    if timestamps:
+        return (
+            0,
+            min(timestamp.timestamp() for timestamp in timestamps),
+            record["kind"],
+            record["native_id"],
+        )
+    return (1, 0.0, record["kind"], record["native_id"])
 
 
 def project_github(  # noqa: PLR0915
@@ -306,11 +354,7 @@ def project_github(  # noqa: PLR0915
     ordered = tuple(
         sorted(
             records.values(),
-            key=lambda record: (
-                min(record["timestamps"].values(), default=""),
-                record["kind"],
-                record["native_id"],
-            ),
+            key=_record_sort_key,
         )
     )
     selected = [

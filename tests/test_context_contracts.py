@@ -150,6 +150,18 @@ def test_github_context_projects_native_records_without_fix_inference(
             {"id": 10, "event": "commented"},
             {"id": 20, "event": "reviewed", "actor": {"login": "reviewer"}},
             {"id": 40, "event": "closed", "actor": {"login": "closer"}},
+            {
+                "node_id": "commit-first",
+                "event": "committed",
+                "author": {"date": "2025-12-31T23:00:00Z"},
+                "committer": {"date": "2026-01-01T01:00:00+01:00"},
+            },
+            {
+                "node_id": "commit-second",
+                "event": "committed",
+                "author": {"date": "2025-12-31T23:00:00Z"},
+                "committer": {"date": "2026-01-01T00:30:00Z"},
+            },
         ],
         "reviews.001.json": [
             {
@@ -308,6 +320,18 @@ def test_github_context_projects_native_records_without_fix_inference(
         record for record in projection["records"] if record["native_id"] == "40"
     )
     assert lifecycle["actor"] == {"login": "closer"}
+    first_commit = next(
+        record
+        for record in projection["records"]
+        if record["native_id"] == "commit-first"
+    )
+    assert first_commit["timestamps"] == {
+        "author_date": "2025-12-31T23:00:00Z",
+        "committer_date": "2026-01-01T01:00:00+01:00",
+    }
+    assert first_commit["temporal_roles"] == ["in_range_work"]
+    record_ids = [record["native_id"] for record in projection["records"]]
+    assert record_ids.index("commit-first") < record_ids.index("commit-second")
     pull_request = next(
         record for record in projection["records"] if record["kind"] == "pull-request"
     )
