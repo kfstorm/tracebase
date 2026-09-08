@@ -330,6 +330,7 @@ def project_github(  # noqa: PLR0915
             if parent is not None:
                 relations.add(("inline-reply", parent, node_id))
         if "pull-request.diff" in snapshot.evidence:
+            gaps.add(("aggregate_diff", "does_not_establish_fix_or_commit"))
             _add_record(
                 records,
                 {
