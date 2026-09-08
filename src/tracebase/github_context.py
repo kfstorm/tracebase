@@ -103,21 +103,36 @@ def _thread_nodes(snapshot: PublishedSnapshot, path: str) -> list[dict[str, Any]
     return nodes
 
 
-def _in_range(value: str, start: datetime, end: datetime) -> bool:
-    timestamp = _timestamp(value)
-    return timestamp is not None and start <= timestamp < end
-
-
 def _roles(record: dict[str, Any], start: datetime, end: datetime) -> tuple[str, ...]:
-    timestamps = record["timestamps"]
-    if any(_in_range(value, start, end) for value in timestamps.values()):
+    timestamps = [
+        timestamp
+        for representation in record["representations"]
+        if isinstance(representation["value"], dict)
+        for value in representation["value"].values()
+        if isinstance(value, str)
+        if (timestamp := _timestamp(value)) is not None
+    ]
+    if any(start <= timestamp < end for timestamp in timestamps):
         return ("in_range_work",)
     if timestamps:
-        return ("earlier_background", "later_progression")
+        return tuple(
+            role
+            for role, present in (
+                (
+                    "earlier_background",
+                    any(timestamp < start for timestamp in timestamps),
+                ),
+                (
+                    "later_progression",
+                    any(timestamp >= end for timestamp in timestamps),
+                ),
+            )
+            if present
+        )
     return ("observed_state",)
 
 
-def project_github(
+def project_github(  # noqa: PLR0915
     snapshots: tuple[PublishedSnapshot, ...], start: datetime, end: datetime
 ) -> GitHubProjection:
     """Project archived GitHub payloads without inferring causal history."""
@@ -127,6 +142,8 @@ def project_github(
     source_id = snapshots[0].manifest["source_id"]
     object_kind = snapshots[0].manifest["object_kind"]
     for snapshot in snapshots:
+        inline_nodes_by_rest_id: dict[int, str] = {}
+        inline_replies: list[tuple[int, str]] = []
         issue = _json(snapshot, "issue.json")
         if not isinstance(issue, dict) or issue.get("node_id") != source_id:
             raise ArchiveError("GitHub Item evidence identity was invalid")
@@ -146,13 +163,16 @@ def project_github(
             for value in _list(snapshot, path):
                 identifier = value.get("node_id", value.get("id"))
                 if isinstance(identifier, (str, int)):
-                    _add_record(
-                        records, _record("timeline", str(identifier), value, path)
-                    )
-                    if isinstance(value.get("id"), int):
-                        relations.add(
-                            ("timeline-mirror", str(value["id"]), str(value["id"]))
-                        )
+                    kind = "timeline"
+                    if value.get("event") == "commented" and isinstance(
+                        value.get("id"), int
+                    ):
+                        kind = "ordinary-comment"
+                    elif value.get("event") == "reviewed" and isinstance(
+                        value.get("review_id"), int
+                    ):
+                        kind, identifier = "review", value["review_id"]
+                    _add_record(records, _record(kind, str(identifier), value, path))
         if object_kind != "pull-request":
             continue
         pull = _json(snapshot, "pull-request.json")
@@ -178,12 +198,14 @@ def project_github(
                 if not isinstance(node_id, str):
                     raise ArchiveError("GitHub review-comment evidence was invalid")
                 _add_record(records, _record("inline-comment", node_id, value, path))
+                if isinstance(value.get("id"), int):
+                    inline_nodes_by_rest_id[value["id"]] = node_id
                 review_id = value.get("pull_request_review_id")
                 if isinstance(review_id, int):
                     relations.add(("review-inline-comment", str(review_id), node_id))
                 reply_id = value.get("in_reply_to_id")
                 if isinstance(reply_id, int):
-                    relations.add(("inline-reply", str(reply_id), node_id))
+                    inline_replies.append((reply_id, node_id))
         for path in sorted(
             name for name in snapshot.evidence if name.startswith("review-threads.")
         ):
@@ -200,7 +222,50 @@ def project_github(
                     ):
                         raise ArchiveError("GitHub review-thread evidence was invalid")
                     relations.add(("thread-inline-comment", thread_id, comment["id"]))
+        for path in sorted(
+            name
+            for name in snapshot.evidence
+            if name.startswith("review-thread-comments.")
+        ):
+            thread_page = _json(snapshot, path)
+            if not isinstance(thread_page, dict):
+                raise ArchiveError("GitHub review-thread comments were invalid")
+            try:
+                node = thread_page["data"]["node"]
+                thread_id, nodes = node["id"], node["comments"]["nodes"]
+            except KeyError, TypeError:
+                raise ArchiveError(
+                    "GitHub review-thread comments were invalid"
+                ) from None
+            if not isinstance(thread_id, str) or not isinstance(nodes, list):
+                raise ArchiveError("GitHub review-thread comments were invalid")
+            for comment in nodes:
+                if not isinstance(comment, dict) or not isinstance(
+                    comment.get("id"), str
+                ):
+                    raise ArchiveError("GitHub review-thread comments were invalid")
+                relations.add(("thread-inline-comment", thread_id, comment["id"]))
+        for reply_id, node_id in inline_replies:
+            parent = inline_nodes_by_rest_id.get(reply_id)
+            if parent is not None:
+                relations.add(("inline-reply", parent, node_id))
         if "pull-request.diff" in snapshot.evidence:
+            _add_record(
+                records,
+                {
+                    "kind": "aggregate-diff",
+                    "native_id": source_id,
+                    "timestamps": {},
+                    "representations": [
+                        {
+                            "evidence_path": "pull-request.diff",
+                            "value": snapshot.evidence["pull-request.diff"].decode(
+                                "utf-8"
+                            ),
+                        }
+                    ],
+                },
+            )
             gaps.add(("aggregate_diff", "does_not_establish_fix_or_commit"))
     ordered = tuple(
         sorted(

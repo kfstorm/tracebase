@@ -211,7 +211,6 @@ def test_github_context_projects_native_records_without_fix_inference(
     assert {relation["kind"] for relation in projection["relations"]} == {
         "review-inline-comment",
         "thread-inline-comment",
-        "timeline-mirror",
     }
     assert projection["gaps"] == [
         {"detail": "does_not_establish_fix_or_commit", "kind": "aggregate_diff"}
