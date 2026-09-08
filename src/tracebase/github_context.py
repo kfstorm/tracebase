@@ -19,7 +19,6 @@ class GitHubProjection:
     temporal_roles: tuple[str, ...]
     records: tuple[dict[str, Any], ...]
     relations: tuple[dict[str, str], ...]
-    gaps: tuple[dict[str, str], ...]
 
 
 def _json(snapshot: PublishedSnapshot, path: str) -> dict[str, Any] | list[Any]:
@@ -93,11 +92,9 @@ def _record(
     evidence_path: str,
     snapshot: PublishedSnapshot,
 ) -> dict[str, Any]:
-    timestamps = _timestamps(value)
     result: dict[str, Any] = {
         "kind": kind,
         "native_id": native_id,
-        "timestamps": timestamps,
         "representations": [
             {
                 "evidence_path": evidence_path,
@@ -122,8 +119,6 @@ def _add_record(
         records[key] = record
         return
     prior["representations"].extend(record["representations"])
-    for name, value in record["timestamps"].items():
-        prior["timestamps"].setdefault(name, value)
 
 
 def _list(snapshot: PublishedSnapshot, path: str) -> list[dict[str, Any]]:
@@ -200,7 +195,6 @@ def project_github(  # noqa: PLR0915
     """Project archived GitHub payloads without inferring causal history."""
     records: dict[tuple[str, str], dict[str, Any]] = {}
     relations: set[tuple[str, str, str]] = set()
-    gaps: set[tuple[str, str]] = set()
     source_id = snapshots[0].manifest["source_id"]
     object_kind = snapshots[0].manifest["object_kind"]
     for snapshot in snapshots:
@@ -335,7 +329,6 @@ def project_github(  # noqa: PLR0915
                 {
                     "kind": "aggregate-diff",
                     "native_id": source_id,
-                    "timestamps": {},
                     "limitations": ["does_not_establish_fix_or_commit"],
                     "representations": [
                         {
@@ -379,5 +372,4 @@ def project_github(  # noqa: PLR0915
             {"kind": kind, "from_native_id": left, "to_native_id": right}
             for kind, left, right in sorted(relations)
         ),
-        tuple({"kind": kind, "detail": detail} for kind, detail in sorted(gaps)),
     )

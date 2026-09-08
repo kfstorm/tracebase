@@ -289,7 +289,6 @@ def test_github_context_projects_native_records_without_fix_inference(
         "review-inline-comment",
         "thread-inline-comment",
     }
-    assert projection["gaps"] == []
     assert next(
         record for record in projection["records"] if record["kind"] == "aggregate-diff"
     )["limitations"] == ["does_not_establish_fix_or_commit"]
@@ -317,10 +316,6 @@ def test_github_context_projects_native_records_without_fix_inference(
         for record in projection["records"]
         if record["native_id"] == "commit-first"
     )
-    assert first_commit["timestamps"] == {
-        "author_date": "2025-12-31T23:00:00Z",
-        "committer_date": "2026-01-01T01:00:00+01:00",
-    }
     assert first_commit["temporal_roles"] == ["in_range_work"]
     record_ids = [record["native_id"] for record in projection["records"]]
     assert record_ids.index("commit-first") < record_ids.index("commit-second")

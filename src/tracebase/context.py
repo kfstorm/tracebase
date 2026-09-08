@@ -165,7 +165,31 @@ def _cleanup_staging(staging: Path) -> None:
         raise ContextError("context output cleanup failed") from None
 
 
-def _render_source_view(item_root: Path, item: ContextItem) -> str:
+def _github_records_for_output(item: ContextItem) -> tuple[dict[str, Any], ...]:
+    if item.github is None:
+        return ()
+    observation_paths = {
+        snapshot.run["run_id"]: (f"observations/{index:03d}-{snapshot.run['run_id']}")
+        for index, snapshot in enumerate(item.snapshots, start=1)
+    }
+    records: list[dict[str, Any]] = []
+    for record in item.github.records:
+        representations = []
+        for representation in record["representations"]:
+            output_path = (
+                f"{observation_paths[representation['run_id']]}/"
+                f"{representation['evidence_path']}"
+            )
+            representations.append({**representation, "output_path": output_path})
+        records.append({**record, "representations": representations})
+    return tuple(records)
+
+
+def _render_source_view(
+    item_root: Path,
+    item: ContextItem,
+    github_records: tuple[dict[str, Any], ...] = (),
+) -> str:
     """Render the shared source-view shell; source projections extend this seam."""
     source = item.source
     if item.github is not None:
@@ -176,13 +200,12 @@ def _render_source_view(item_root: Path, item: ContextItem) -> str:
                 "schema_version": 1,
                 "inclusion_reasons": projection.inclusion_reasons,
                 "temporal_roles": projection.temporal_roles,
-                "records": projection.records,
+                "records": github_records,
                 "relations": projection.relations,
-                "gaps": projection.gaps,
             },
         )
         lines = ["# GitHub Item", "", "## Source-native Records", ""]
-        for record in projection.records:
+        for record in github_records:
             links = ", ".join(
                 f"[{representation['evidence_path']}]({representation['output_path']})"
                 for representation in record["representations"]
@@ -234,14 +257,6 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
             destination = observation_root.joinpath(*PurePosixPath(name).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
-        if item.github is not None:
-            for record in item.github.records:
-                for representation in record["representations"]:
-                    if representation["run_id"] == run_id:
-                        representation["output_path"] = (
-                            f"observations/{observation_name}/"
-                            f"{representation['evidence_path']}"
-                        )
         provenance.append(
             {
                 "run_id": run_id,
@@ -252,7 +267,8 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
             }
         )
     source = item.source
-    view_path = _render_source_view(item_root, item)
+    github_records = _github_records_for_output(item)
+    view_path = _render_source_view(item_root, item, github_records)
     result = {
         "source_kind": source.manifest["source_kind"],
         "source_scope_id": source.run["source"]["scope_id"],
@@ -293,15 +309,6 @@ def _render_index(
         )
     else:
         lines.append("No source items are available.")
-    gaps = [
-        gap
-        for item in result.items
-        if item.github is not None
-        for gap in item.github.gaps
-    ]
-    if gaps:
-        lines.extend(["", "## Gaps and Uncertainty", ""])
-        lines.extend(f"- `{gap['kind']}`: {gap['detail']}" for gap in gaps)
     (staging / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -313,7 +320,6 @@ def _render_manifest(
         for path in staging.rglob("*")
         if path.is_file()
     )
-    github = [item.github for item in result.items if item.github is not None]
     _write_json(
         staging / "context.json",
         {
@@ -322,7 +328,7 @@ def _render_manifest(
             "source_items": items,
             "relations": [],
             "unresolved_references": [],
-            "gaps": [gap for projection in github for gap in projection.gaps],
+            "gaps": [],
             "output_inventory": [*inventory, "context.json"],
         },
     )
