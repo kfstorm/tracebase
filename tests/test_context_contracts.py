@@ -1,13 +1,17 @@
 import json
+import shutil
+import urllib.request
 from pathlib import Path
 
 import pytest
 
 from tracebase import cli
+from tracebase import context as context_module
 from tracebase.archive import Archive, CollectionRange, CollectionRun, Snapshot
 from tracebase.context import (
     ContextError,
     ContextRequest,
+    extract_context,
     generate_context,
     load_archive,
 )
@@ -38,7 +42,7 @@ def _archive_with_record(root: Path) -> None:
             "opencode",
             "session",
             "session-1",
-            {},
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
             ({"path": "session.json"},),
         )
     )
@@ -48,6 +52,37 @@ def _archive_with_record(root: Path) -> None:
         b'{"timestamp":"2026-01-01T00:00:00.500000Z","body":"native"}',
     )
     run.publish({})
+
+
+def _snapshot_root(archive: Archive) -> Path:
+    run_root = next((archive.root / "runs").iterdir())
+    return next((run_root / "snapshots" / "session").iterdir())
+
+
+def _render_session(
+    tmp_path: Path, session_id: str, evidence: bytes
+) -> dict[str, object]:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            session_id,
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
+            ({"path": "session.json"},),
+        )
+    )
+    run.write_evidence(snapshot, "session.json", evidence)
+    run.publish({})
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    return json.loads((output / "context.json").read_text())
 
 
 def test_context_request_accepts_fractional_offsets_and_half_open_range() -> None:
@@ -108,7 +143,7 @@ def test_context_reads_current_archive_and_publishes_stable_source_bytes(
         / "session"
         / "c2Vzc2lvbi0x"
         / "observations"
-        / "run-1"
+        / "001-run-1"
         / "session.json"
     ).read_bytes() == b'{"timestamp":"2026-01-01T00:00:00.500000Z","body":"native"}'
 
@@ -122,22 +157,49 @@ def test_opencode_numeric_times_select_and_classify_grouped_observations(
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     observations = (
-        ("run-before", "2025-12-31T00:00:00Z", "2025-12-31T01:00:00Z", 1767139200000),
-        ("run-in", "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z", 1767268800000),
-        ("run-after", "2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z", 1767312000000),
+        (
+            "z-before",
+            "2025-12-31T00:00:00Z",
+            "2025-12-31T01:00:00Z",
+            1767139200000,
+            1767139200000,
+        ),
+        (
+            "a-in",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T01:00:00Z",
+            1767139200000,
+            1767268800000,
+        ),
+        (
+            "m-after",
+            "2026-01-02T00:00:00Z",
+            "2026-01-03T00:00:00Z",
+            1767312000000,
+            1767312000000,
+        ),
     )
-    for run_id, start, end, created in observations:
+    for run_id, start, end, created, updated in observations:
         run = _run(archive, run_id, start, end)
         snapshot = run.write_snapshot(
             Snapshot(
-                "opencode", "session", "same-session", {}, ({"path": "session.json"},)
+                "opencode",
+                "session",
+                "same-session",
+                {"from": start, "to": end},
+                ({"path": "session.json"},),
             )
         )
         run.write_evidence(
             snapshot,
             "session.json",
             json.dumps(
-                {"time": {"created": created, "updated": created}, "status": "done"}
+                {
+                    "role": "assistant",
+                    "time": {"created": created, "updated": updated},
+                    "status": "done",
+                    "text": "done",
+                }
             ).encode(),
         )
         run.publish({"observed": True})
@@ -152,12 +214,21 @@ def test_opencode_numeric_times_select_and_classify_grouped_observations(
         "later_development",
         "observed_state",
     ]
-    assert {entry["run_id"] for entry in item["provenance"]} == {
-        "run-before",
-        "run-in",
-        "run-after",
-    }
+    assert item["inclusion_reasons"] == [
+        "source_record_in_range",
+        "prior_background",
+        "later_evidence",
+        "observed_state",
+    ]
+    assert [entry["run_id"] for entry in item["provenance"]] == [
+        "z-before",
+        "a-in",
+        "m-after",
+    ]
     assert item["provenance"][0]["coverage"] == {"observed": True}
+    assert "collector" in item["provenance"][0]
+    assert "started_at" in item["provenance"][0]
+    assert "completed_at" in item["provenance"][0]
     assert (
         len(list((output / item["path"] / "observations").rglob("session.json"))) == 3
     )
@@ -201,3 +272,541 @@ def test_cli_structural_diagnostics_do_not_expose_paths(
         == 1
     )
     assert capsys.readouterr().err == "context operation failed\n"
+
+
+def test_opencode_session_envelope_does_not_establish_work(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "envelope-only",
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
+            ({"path": "session.json"},),
+        )
+    )
+    run.write_evidence(
+        snapshot,
+        "session.json",
+        b'{"time":{"created":1767225600000,"updated":1767229200000},"messages":[]}',
+    )
+    run.publish({})
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    assert json.loads((output / "context.json").read_text())["source_items"] == []
+
+
+def test_compaction_and_synthetic_records_do_not_establish_work_or_gaps(
+    tmp_path: Path,
+) -> None:
+    manifest = _render_session(
+        tmp_path,
+        "context-only",
+        b'{"messages":[{"type":"compaction","synthetic":true,"time":{"created":1767226200000}}]}',
+    )
+    assert manifest["source_items"] == []
+    assert manifest["gaps"] == []
+
+
+def test_source_views_and_explicit_github_references_are_rendered(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    github = CollectionRun(
+        archive,
+        "github",
+        "github-scope",
+        CollectionRange.parse("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
+        "test",
+        {},
+        run_id="github-run",
+    )
+    github_snapshot = github.write_snapshot(
+        Snapshot(
+            "github",
+            "issue",
+            "issue-native",
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
+            ({"path": "issue.json"},),
+        )
+    )
+    github.write_evidence(
+        github_snapshot,
+        "issue.json",
+        b'{"html_url":"https://github.com/acme/project/issues/7",'
+        b'"number":7,"body":"mentions https://github.com/acme/project/issues/9",'
+        b'"updated_at":"2026-01-01T00:10:00Z"}',
+    )
+    github.publish({})
+    repeated_github = CollectionRun(
+        archive,
+        "github",
+        "github-scope",
+        CollectionRange.parse("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"),
+        "test",
+        {},
+        run_id="github-run-2",
+    )
+    repeated_snapshot = repeated_github.write_snapshot(
+        Snapshot(
+            "github",
+            "issue",
+            "issue-native",
+            {"from": "2026-01-02T00:00:00Z", "to": "2026-01-02T01:00:00Z"},
+            ({"path": "issue.json"},),
+        )
+    )
+    repeated_github.write_evidence(
+        repeated_snapshot,
+        "issue.json",
+        b'{"html_url":"https://github.com/acme/project/issues/7","number":7,"updated_at":"2026-01-02T00:10:00Z"}',
+    )
+    repeated_github.publish({})
+
+    opencode = _run(archive, "opencode-run")
+    session = opencode.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "reference-session",
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
+            ({"path": "session.json"},),
+        )
+    )
+    opencode.write_evidence(
+        session,
+        "session.json",
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "time": {"created": 1767226200000},
+                        "text": (
+                            "See https://github.com/acme/project/issues/7, "
+                            "https://github.com/acme/project/pull/8, and "
+                            "https://github.com/acme/project/issues/9"
+                        ),
+                    }
+                ]
+            }
+        ).encode(),
+    )
+    opencode.publish({})
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    manifest = json.loads((output / "context.json").read_text())
+    opencode_item = next(
+        item for item in manifest["source_items"] if item["source_kind"] == "opencode"
+    )
+    github_item = next(
+        item for item in manifest["source_items"] if item["source_kind"] == "github"
+    )
+    assert (output / opencode_item["view_path"]).is_file()
+    assert (output / github_item["view_path"]).is_file()
+    assert github_item["view_path"] in (output / "index.md").read_text()
+    github_view = (output / github_item["view_path"]).read_text()
+    opencode_view = (output / opencode_item["view_path"]).read_text()
+    assert "# GitHub Issue" in github_view
+    assert "issue payload" in github_view
+    assert "# OpenCode Session" in opencode_view
+    assert "messages" in opencode_view
+    assert len(manifest["relations"]) == 1
+    assert manifest["relations"][0]["target"]["source_id"] == "issue-native"
+    assert manifest["relations"][0]["occurrence"] == {
+        "evidence_path": "session.json",
+        "json_path": "$.messages[0].text",
+        "offset": 4,
+        "length": len("https://github.com/acme/project/issues/7"),
+    }
+    assert len(manifest["unresolved_references"]) == 2
+    assert {reference["url"] for reference in manifest["unresolved_references"]} == {
+        "https://github.com/acme/project/pull/8",
+        "https://github.com/acme/project/issues/9",
+    }
+    index = (output / "index.md").read_text()
+    assert "## Explicit References" in index
+    assert "## Gaps" in index
+    assert "session.json" in index
+
+    result = extract_context(
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        load_archive(archive.root),
+    )
+    explicit = [
+        relation
+        for relation in result.direct_relations
+        if relation.kind == "explicit_reference"
+    ]
+    assert len(explicit) == 1
+    assert explicit[0].target is not None
+    assert explicit[0].target.manifest["source_id"] == "issue-native"
+
+
+def test_snapshot_observation_and_encoded_path_identity_are_required(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _archive_with_record(archive.root)
+    run_root = next((archive.root / "runs").iterdir())
+    snapshot_entry = json.loads((run_root / "run.json").read_text())["snapshots"][0]
+    snapshot_entry["path"] = "snapshots/session/not-the-source-id"
+    run_manifest = json.loads((run_root / "run.json").read_text())
+    run_manifest["snapshots"][0] = snapshot_entry
+    (run_root / "run.json").write_text(json.dumps(run_manifest))
+    with pytest.raises(ContextError, match="snapshot"):
+        load_archive(archive.root)
+
+
+def test_snapshot_observation_window_must_be_ordered_and_offset_aware(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _archive_with_record(archive.root)
+    snapshot_root = _snapshot_root(archive)
+    snapshot_manifest = json.loads((snapshot_root / "snapshot.json").read_text())
+    snapshot_manifest["observation_window"] = {
+        "from": "2026-01-01T01:00:00",
+        "to": "2026-01-01T00:00:00Z",
+    }
+    (snapshot_root / "snapshot.json").write_text(json.dumps(snapshot_manifest))
+    with pytest.raises(ContextError, match="observation window"):
+        load_archive(archive.root)
+
+
+def test_invalid_declared_json_and_unsupported_object_kind_fail_fast(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _archive_with_record(archive.root)
+    snapshot_root = _snapshot_root(archive)
+    (snapshot_root / "session.json").write_text("not json")
+    with pytest.raises(ContextError, match="JSON evidence"):
+        load_archive(archive.root)
+
+    archive = Archive(tmp_path / "unsupported")
+    archive.root.mkdir()
+    run = _run(archive)
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "unsupported",
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
+            ({"path": "session.json"},),
+        )
+    )
+    run.write_evidence(snapshot, "session.json", b"{}")
+    published = run.publish({})
+    manifest_path = published / "run.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["snapshots"][0]["object_kind"] = "unsupported"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ContextError, match="snapshot"):
+        load_archive(archive.root)
+
+
+def test_required_collection_run_provenance_fields_are_validated(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _archive_with_record(archive.root)
+    run_root = next((archive.root / "runs").iterdir())
+    manifest_path = run_root / "run.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["collector"]
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ContextError, match="collector"):
+        load_archive(archive.root)
+
+
+def test_in_range_tool_start_with_unknown_completion_is_a_gap(
+    tmp_path: Path,
+) -> None:
+    manifest = _render_session(
+        tmp_path,
+        "tool-session",
+        b'{"parts":[{"type":"tool","callID":"call-1","time":{"start":1767226200000}}]}',
+    )
+    assert manifest["source_items"][0]["temporal_roles"] == ["in_range_record"]
+    assert manifest["gaps"] == [
+        {
+            "kind": "unknown_completion",
+            "object_kind": "session",
+            "source_id": "tool-session",
+            "source_kind": "opencode",
+        }
+    ]
+
+
+def test_symlinked_nested_evidence_parent_is_rejected(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "symlink-session",
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
+            ({"path": "nested/session.json"},),
+        )
+    )
+    run.write_evidence(
+        snapshot,
+        "nested/session.json",
+        b'{"role":"assistant","timestamp":"2026-01-01T00:10:00Z","text":"work"}',
+    )
+    published = run.publish({})
+    snapshot_root = published / "snapshots" / "session" / "c3ltbGluay1zZXNzaW9u"
+    nested = snapshot_root / "nested"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (nested / "session.json").unlink()
+    nested.rmdir()
+    nested.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ContextError, match="symlink"):
+        load_archive(archive.root)
+
+
+def test_source_gaps_include_truncation_unknown_parts_and_missing_relationships(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "gap-session",
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
+            ({"path": "session.json"},),
+        )
+    )
+    run.write_evidence(
+        snapshot,
+        "session.json",
+        b'{"messages":[{"role":"assistant","time":{"created":1767226200000},"type":"mystery","truncated":true,"parentID":"missing-parent"}]}',
+    )
+    run.publish({})
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    gaps = json.loads((output / "context.json").read_text())["gaps"]
+    assert {gap["kind"] for gap in gaps} == {
+        "source_truncated",
+        "unknown_part_type",
+    }
+    relations = json.loads((output / "context.json").read_text())["relations"]
+    assert [relation["kind"] for relation in relations] == ["message_parent"]
+
+
+def test_compaction_tail_is_native_evidence_not_session_context(
+    tmp_path: Path,
+) -> None:
+    manifest = _render_session(
+        tmp_path,
+        "compaction-session",
+        b'{"messages":[{"role":"assistant","time":{"created":1767226200000}},'
+        b'{"type":"compaction","parentID":"tail-session",'
+        b'"time":{"created":1767226200000}}]}',
+    )
+    assert [relation["kind"] for relation in manifest["relations"]] == [
+        "compaction_tail"
+    ]
+    assert manifest["source_items"][0]["source_id"] == "compaction-session"
+
+
+def test_opencode_parent_chain_and_direct_child_context_are_bounded(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+
+    def add_session(
+        run_id: str,
+        session_id: str,
+        start: str,
+        end: str,
+        timestamp: int,
+        payload: dict[str, object],
+    ) -> None:
+        run = _run(archive, run_id, start, end)
+        snapshot = run.write_snapshot(
+            Snapshot(
+                "opencode",
+                "session",
+                session_id,
+                {"from": start, "to": end},
+                ({"path": "session.json"},),
+            )
+        )
+        payload = {"role": "assistant", "time": {"created": timestamp}, **payload}
+        run.write_evidence(snapshot, "session.json", json.dumps(payload).encode())
+        run.publish({})
+
+    add_session(
+        "grand-run",
+        "grand",
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+        1767226200000,
+        {},
+    )
+    add_session(
+        "parent-run",
+        "parent",
+        "2026-01-02T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        1767312600000,
+        {"parentID": "grand", "childID": ["child", "sibling"]},
+    )
+    add_session(
+        "child-run",
+        "child",
+        "2026-01-03T00:00:00Z",
+        "2026-01-04T00:00:00Z",
+        1767399000000,
+        {"parentID": "parent", "childID": "child-support"},
+    )
+    add_session(
+        "support-run",
+        "child-support",
+        "2026-01-04T00:00:00Z",
+        "2026-01-05T00:00:00Z",
+        1767485400000,
+        {"childID": "unexpanded-descendant"},
+    )
+    add_session(
+        "sibling-run",
+        "sibling",
+        "2026-01-05T00:00:00Z",
+        "2026-01-06T00:00:00Z",
+        1767571800000,
+        {},
+    )
+
+    request = ContextRequest.parse("2026-01-03T00:00:00Z", "2026-01-04T00:00:00Z")
+    loaded = load_archive(archive.root)
+    result = extract_context(request, loaded)
+    direct_kinds = [relation.kind for relation in result.direct_relations]
+    assert direct_kinds.count("parent_session") == 2
+    assert direct_kinds.count("child_task") == 1
+    assert {
+        relation.target.source.manifest["source_id"]
+        for relation in result.direct_relations
+    } == {"parent", "grand", "child-support"}
+    output = tmp_path / "output"
+    generate_context(archive.root, request, output)
+    manifest = json.loads((output / "context.json").read_text())
+    ids = {item["source_id"] for item in manifest["source_items"]}
+    assert ids == {"child", "parent", "grand", "child-support"}
+    assert "sibling" not in ids
+    assert "unexpanded-descendant" not in ids
+    child_support = next(
+        item
+        for item in manifest["source_items"]
+        if item["source_id"] == "child-support"
+    )
+    assert "child_context" in child_support["inclusion_reasons"]
+    assert all(
+        relation["kind"] in {"parent_session", "child_task"}
+        for relation in manifest["relations"]
+    )
+
+
+def test_context_refresh_does_not_retain_removed_archive_items(tmp_path: Path) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    _archive_with_record(archive)
+    request = ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")
+    first = tmp_path / "first"
+    generate_context(archive, request, first)
+    assert json.loads((first / "context.json").read_text())["source_items"]
+
+    shutil.rmtree(next((archive / "runs").iterdir()))
+    second = tmp_path / "second"
+    generate_context(archive, request, second)
+    assert json.loads((second / "context.json").read_text())["source_items"] == []
+
+
+def test_context_generation_is_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fail_urlopen(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("network access is not allowed")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    _archive_with_record(archive)
+    generate_context(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+    )
+
+
+def test_context_publication_failure_is_atomic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    _archive_with_record(archive)
+
+    def fail_rename(self: Path, target: Path) -> Path:
+        raise OSError("secret publication path")
+
+    monkeypatch.setattr(Path, "rename", fail_rename)
+    with pytest.raises(ContextError, match="publication failed"):
+        generate_context(
+            archive,
+            ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+            tmp_path / "output",
+        )
+    assert not (tmp_path / "output").exists()
+    assert list(tmp_path.glob(".output.*")) == []
+
+
+def test_context_cleanup_failure_is_safe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    _archive_with_record(archive)
+
+    def fail_write(path: Path, value: object) -> None:
+        raise OSError("secret write path")
+
+    def fail_cleanup(path: Path) -> None:
+        raise OSError("secret cleanup path")
+
+    monkeypatch.setattr(context_module, "_write_json", fail_write)
+    monkeypatch.setattr(context_module.shutil, "rmtree", fail_cleanup)
+    with pytest.raises(ContextError, match="cleanup failed") as error:
+        generate_context(
+            archive,
+            ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+            tmp_path / "output",
+        )
+    assert str(error.value) == "context output cleanup failed"
