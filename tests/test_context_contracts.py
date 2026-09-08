@@ -11,7 +11,6 @@ from tracebase.archive import Archive, CollectionRange, CollectionRun, Snapshot
 from tracebase.context import (
     ContextError,
     ContextRequest,
-    extract_context,
     generate_context,
     load_archive,
 )
@@ -57,32 +56,6 @@ def _archive_with_record(root: Path) -> None:
 def _snapshot_root(archive: Archive) -> Path:
     run_root = next((archive.root / "runs").iterdir())
     return next((run_root / "snapshots" / "session").iterdir())
-
-
-def _render_session(
-    tmp_path: Path, session_id: str, evidence: bytes
-) -> dict[str, object]:
-    archive = Archive(tmp_path / "archive")
-    archive.root.mkdir()
-    run = _run(archive)
-    snapshot = run.write_snapshot(
-        Snapshot(
-            "opencode",
-            "session",
-            session_id,
-            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
-            ({"path": "session.json"},),
-        )
-    )
-    run.write_evidence(snapshot, "session.json", evidence)
-    run.publish({})
-    output = tmp_path / "output"
-    generate_context(
-        archive.root,
-        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
-        output,
-    )
-    return json.loads((output / "context.json").read_text())
 
 
 def test_context_request_accepts_fractional_offsets_and_half_open_range() -> None:
@@ -212,13 +185,11 @@ def test_opencode_numeric_times_select_and_classify_grouped_observations(
         "in_range_record",
         "prior_background",
         "later_development",
-        "observed_state",
     ]
     assert item["inclusion_reasons"] == [
         "source_record_in_range",
         "prior_background",
         "later_evidence",
-        "observed_state",
     ]
     assert [entry["run_id"] for entry in item["provenance"]] == [
         "z-before",
@@ -302,18 +273,6 @@ def test_opencode_session_envelope_does_not_establish_work(tmp_path: Path) -> No
     assert json.loads((output / "context.json").read_text())["source_items"] == []
 
 
-def test_compaction_and_synthetic_records_do_not_establish_work_or_gaps(
-    tmp_path: Path,
-) -> None:
-    manifest = _render_session(
-        tmp_path,
-        "context-only",
-        b'{"messages":[{"type":"compaction","synthetic":true,"time":{"created":1767226200000}}]}',
-    )
-    assert manifest["source_items"] == []
-    assert manifest["gaps"] == []
-
-
 def test_source_views_and_explicit_github_references_are_rendered(
     tmp_path: Path,
 ) -> None:
@@ -340,7 +299,7 @@ def test_source_views_and_explicit_github_references_are_rendered(
     github.write_evidence(
         github_snapshot,
         "issue.json",
-        b'{"html_url":"https://github.com/acme/project/issues/7",'
+        b'{"node_id":"issue-native","html_url":"https://github.com/acme/project/issues/7",'
         b'"number":7,"body":"mentions https://github.com/acme/project/issues/9",'
         b'"updated_at":"2026-01-01T00:10:00Z"}',
     )
@@ -366,7 +325,7 @@ def test_source_views_and_explicit_github_references_are_rendered(
     repeated_github.write_evidence(
         repeated_snapshot,
         "issue.json",
-        b'{"html_url":"https://github.com/acme/project/issues/7","number":7,"updated_at":"2026-01-02T00:10:00Z"}',
+        b'{"node_id":"issue-native","html_url":"https://github.com/acme/project/issues/7","number":7,"updated_at":"2026-01-02T00:10:00Z"}',
     )
     repeated_github.publish({})
 
@@ -422,7 +381,6 @@ def test_source_views_and_explicit_github_references_are_rendered(
     assert "# GitHub Issue" in github_view
     assert "issue payload" in github_view
     assert "# OpenCode Session" in opencode_view
-    assert "messages" in opencode_view
     assert len(manifest["relations"]) == 1
     assert manifest["relations"][0]["target"]["source_id"] == "issue-native"
     assert manifest["relations"][0]["occurrence"] == {
@@ -440,19 +398,6 @@ def test_source_views_and_explicit_github_references_are_rendered(
     assert "## Explicit References" in index
     assert "## Gaps" in index
     assert "session.json" in index
-
-    result = extract_context(
-        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
-        load_archive(archive.root),
-    )
-    explicit = [
-        relation
-        for relation in result.direct_relations
-        if relation.kind == "explicit_reference"
-    ]
-    assert len(explicit) == 1
-    assert explicit[0].target is not None
-    assert explicit[0].target.manifest["source_id"] == "issue-native"
 
 
 def test_snapshot_observation_and_encoded_path_identity_are_required(
@@ -499,6 +444,35 @@ def test_invalid_declared_json_and_unsupported_object_kind_fail_fast(
     with pytest.raises(ContextError, match="JSON evidence"):
         load_archive(archive.root)
 
+    (snapshot_root / "session.json").write_text("{}")
+    with pytest.raises(ContextError, match="unsupported source schema"):
+        load_archive(archive.root)
+
+    github_archive = Archive(tmp_path / "empty-github")
+    github_archive.root.mkdir()
+    github_run = CollectionRun(
+        github_archive,
+        "github",
+        "github-scope",
+        CollectionRange.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        "test",
+        {},
+        run_id="github-run",
+    )
+    github_snapshot = github_run.write_snapshot(
+        Snapshot(
+            "github",
+            "issue",
+            "empty-issue",
+            {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T01:00:00Z"},
+            ({"path": "issue.json"},),
+        )
+    )
+    github_run.write_evidence(github_snapshot, "issue.json", b"{}")
+    github_run.publish({})
+    with pytest.raises(ContextError, match="unsupported source schema"):
+        load_archive(github_archive.root)
+
     archive = Archive(tmp_path / "unsupported")
     archive.root.mkdir()
     run = _run(archive)
@@ -536,25 +510,6 @@ def test_required_collection_run_provenance_fields_are_validated(
         load_archive(archive.root)
 
 
-def test_in_range_tool_start_with_unknown_completion_is_a_gap(
-    tmp_path: Path,
-) -> None:
-    manifest = _render_session(
-        tmp_path,
-        "tool-session",
-        b'{"parts":[{"type":"tool","callID":"call-1","time":{"start":1767226200000}}]}',
-    )
-    assert manifest["source_items"][0]["temporal_roles"] == ["in_range_record"]
-    assert manifest["gaps"] == [
-        {
-            "kind": "unknown_completion",
-            "object_kind": "session",
-            "source_id": "tool-session",
-            "source_kind": "opencode",
-        }
-    ]
-
-
 def test_symlinked_nested_evidence_parent_is_rejected(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
@@ -585,7 +540,7 @@ def test_symlinked_nested_evidence_parent_is_rejected(tmp_path: Path) -> None:
         load_archive(archive.root)
 
 
-def test_source_gaps_include_truncation_unknown_parts_and_missing_relationships(
+def test_source_gaps_preserve_explicit_truncation_uncertainty(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -603,7 +558,7 @@ def test_source_gaps_include_truncation_unknown_parts_and_missing_relationships(
     run.write_evidence(
         snapshot,
         "session.json",
-        b'{"messages":[{"role":"assistant","time":{"created":1767226200000},"type":"mystery","truncated":true,"parentID":"missing-parent"}]}',
+        b'{"messages":[{"role":"assistant","time":{"created":1767226200000},"truncated":true}]}',
     )
     run.publish({})
     output = tmp_path / "output"
@@ -615,124 +570,7 @@ def test_source_gaps_include_truncation_unknown_parts_and_missing_relationships(
     gaps = json.loads((output / "context.json").read_text())["gaps"]
     assert {gap["kind"] for gap in gaps} == {
         "source_truncated",
-        "unknown_part_type",
     }
-    relations = json.loads((output / "context.json").read_text())["relations"]
-    assert [relation["kind"] for relation in relations] == ["message_parent"]
-
-
-def test_compaction_tail_is_native_evidence_not_session_context(
-    tmp_path: Path,
-) -> None:
-    manifest = _render_session(
-        tmp_path,
-        "compaction-session",
-        b'{"messages":[{"role":"assistant","time":{"created":1767226200000}},'
-        b'{"type":"compaction","parentID":"tail-session",'
-        b'"time":{"created":1767226200000}}]}',
-    )
-    assert [relation["kind"] for relation in manifest["relations"]] == [
-        "compaction_tail"
-    ]
-    assert manifest["source_items"][0]["source_id"] == "compaction-session"
-
-
-def test_opencode_parent_chain_and_direct_child_context_are_bounded(
-    tmp_path: Path,
-) -> None:
-    archive = Archive(tmp_path / "archive")
-    archive.root.mkdir()
-
-    def add_session(
-        run_id: str,
-        session_id: str,
-        start: str,
-        end: str,
-        timestamp: int,
-        payload: dict[str, object],
-    ) -> None:
-        run = _run(archive, run_id, start, end)
-        snapshot = run.write_snapshot(
-            Snapshot(
-                "opencode",
-                "session",
-                session_id,
-                {"from": start, "to": end},
-                ({"path": "session.json"},),
-            )
-        )
-        payload = {"role": "assistant", "time": {"created": timestamp}, **payload}
-        run.write_evidence(snapshot, "session.json", json.dumps(payload).encode())
-        run.publish({})
-
-    add_session(
-        "grand-run",
-        "grand",
-        "2026-01-01T00:00:00Z",
-        "2026-01-02T00:00:00Z",
-        1767226200000,
-        {},
-    )
-    add_session(
-        "parent-run",
-        "parent",
-        "2026-01-02T00:00:00Z",
-        "2026-01-03T00:00:00Z",
-        1767312600000,
-        {"parentID": "grand", "childID": ["child", "sibling"]},
-    )
-    add_session(
-        "child-run",
-        "child",
-        "2026-01-03T00:00:00Z",
-        "2026-01-04T00:00:00Z",
-        1767399000000,
-        {"parentID": "parent", "childID": "child-support"},
-    )
-    add_session(
-        "support-run",
-        "child-support",
-        "2026-01-04T00:00:00Z",
-        "2026-01-05T00:00:00Z",
-        1767485400000,
-        {"childID": "unexpanded-descendant"},
-    )
-    add_session(
-        "sibling-run",
-        "sibling",
-        "2026-01-05T00:00:00Z",
-        "2026-01-06T00:00:00Z",
-        1767571800000,
-        {},
-    )
-
-    request = ContextRequest.parse("2026-01-03T00:00:00Z", "2026-01-04T00:00:00Z")
-    loaded = load_archive(archive.root)
-    result = extract_context(request, loaded)
-    direct_kinds = [relation.kind for relation in result.direct_relations]
-    assert direct_kinds.count("parent_session") == 2
-    assert direct_kinds.count("child_task") == 1
-    assert {
-        relation.target.source.manifest["source_id"]
-        for relation in result.direct_relations
-    } == {"parent", "grand", "child-support"}
-    output = tmp_path / "output"
-    generate_context(archive.root, request, output)
-    manifest = json.loads((output / "context.json").read_text())
-    ids = {item["source_id"] for item in manifest["source_items"]}
-    assert ids == {"child", "parent", "grand", "child-support"}
-    assert "sibling" not in ids
-    assert "unexpanded-descendant" not in ids
-    child_support = next(
-        item
-        for item in manifest["source_items"]
-        if item["source_id"] == "child-support"
-    )
-    assert "child_context" in child_support["inclusion_reasons"]
-    assert all(
-        relation["kind"] in {"parent_session", "child_task"}
-        for relation in manifest["relations"]
-    )
 
 
 def test_context_refresh_does_not_retain_removed_archive_items(tmp_path: Path) -> None:

@@ -6,7 +6,7 @@ import json
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -136,24 +136,11 @@ class ContextExtractionResult:
     gaps: tuple[dict[str, str], ...]
     relations: tuple[dict[str, Any], ...] = ()
     unresolved_references: tuple[dict[str, str], ...] = ()
-    direct_relations: tuple[ContextRelation, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ContextRelation:
-    """An in-memory relation retaining direct loaded-object references."""
-
-    kind: str
-    source: ContextItem
-    target: ContextItem | LoadedSnapshot | None
-    occurrence: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _TemporalRecord:
     start: datetime
-    end: datetime | None = None
-    kind: str = "point"
 
 
 def _json_file(path: Path, label: str) -> dict[str, Any]:
@@ -194,30 +181,8 @@ def _record_fields(value: dict[str, Any]) -> list[tuple[str, datetime]]:
 
 
 def _is_actual_opencode_record(value: dict[str, Any]) -> bool:
-    if {"role", "callID", "tool", "body", "text"} & value.keys():
-        return True
-    if isinstance(value.get("parts"), list) and value["parts"]:
-        return True
-    record_type = value.get("type")
-    return isinstance(record_type, str) and record_type not in {
-        "session",
-        "session-export",
-    }
-
-
-def _is_context_only_opencode_record(value: dict[str, Any]) -> bool:
-    record_type = value.get("type")
-    return bool(
-        value.get("synthetic") is True
-        or value.get("isSynthetic") is True
-        or record_type
-        in {
-            "compaction",
-            "compaction-summary",
-            "synthetic",
-            "synthetic-continuation",
-            "continuation",
-        }
+    return bool({"role", "callID", "tool", "body", "text"} & value.keys()) or (
+        isinstance(value.get("parts"), list) and bool(value["parts"])
     )
 
 
@@ -226,64 +191,7 @@ def _opencode_records(value: Any) -> list[_TemporalRecord]:
     if isinstance(value, dict):
         fields = _record_fields(value)
         if fields and _is_actual_opencode_record(value):
-            if _is_context_only_opencode_record(value):
-                records.extend(
-                    _TemporalRecord(timestamp, kind="context")
-                    for _, timestamp in fields
-                )
-            else:
-                execution = bool(
-                    {"tool", "callID"} & value.keys()
-                    or value.get("type")
-                    in {"tool", "tool-call", "tool_result", "function"}
-                )
-                end_keys = {
-                    "end",
-                    "ended",
-                    "ended_at",
-                    "completed",
-                    "completed_at",
-                    "completedAt",
-                }
-                start_keys = {
-                    "start",
-                    "started",
-                    "started_at",
-                    "startedAt",
-                    "created",
-                    "created_at",
-                    "createdAt",
-                    "timestamp",
-                }
-                start_fields = [
-                    timestamp for key, timestamp in fields if key in start_keys
-                ]
-                end_fields = [timestamp for key, timestamp in fields if key in end_keys]
-                if execution and start_fields:
-                    records.append(
-                        _TemporalRecord(
-                            min(start_fields),
-                            max(end_fields) if end_fields else None,
-                            "execution",
-                        )
-                    )
-                records.extend(
-                    _TemporalRecord(timestamp)
-                    for key, timestamp in fields
-                    if key
-                    not in {
-                        "start",
-                        "started",
-                        "started_at",
-                        "startedAt",
-                        "end",
-                        "ended",
-                        "ended_at",
-                        "completed",
-                        "completed_at",
-                        "completedAt",
-                    }
-                )
+            records.extend(_TemporalRecord(timestamp) for _, timestamp in fields)
         for child in value.values():
             records.extend(_opencode_records(child))
     elif isinstance(value, list):
@@ -305,17 +213,28 @@ def _ensure_within(path: Path, root: Path) -> None:
         raise ContextError("archive path escapes its boundary") from None
 
 
-def _load_snapshot(  # noqa: PLR0915
+def _snapshot_entry_path(entry: Any) -> PurePosixPath:
+    if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+        raise ContextError("run snapshot entry is invalid")
+    try:
+        relative = _archive_relative_path(entry["path"])
+    except ArchiveError:
+        raise ContextError("run snapshot entry is invalid") from None
+    if len(relative.parts) != _SNAPSHOT_PATH_PARTS or relative.parts[0] != "snapshots":
+        raise ContextError("run snapshot entry is invalid")
+    return relative
+
+
+def _snapshot_identity(
     run_root: Path, run: dict[str, Any], entry: Any
-) -> LoadedSnapshot:
+) -> tuple[str, str, str, Path]:
     if not isinstance(entry, dict):
         raise ContextError("run snapshot entry is invalid")
     try:
         object_kind = entry["object_kind"]
         source_kind = entry["source_kind"]
         source_id = entry["source_id"]
-        relative = _archive_relative_path(entry["path"])
-    except KeyError, ArchiveError:
+    except KeyError:
         raise ContextError("run snapshot entry is invalid") from None
     if not all(
         isinstance(value, str) and value
@@ -326,15 +245,22 @@ def _load_snapshot(  # noqa: PLR0915
         "kind"
     ] or object_kind not in _SUPPORTED_OBJECT_KINDS.get(source_kind, set()):
         raise ContextError("snapshot identity is inconsistent")
+    relative = _snapshot_entry_path(entry)
     expected_relative = PurePosixPath(
         "snapshots", object_kind, encode_path_id(source_id)
     )
     if relative != expected_relative:
         raise ContextError("snapshot path identity is inconsistent")
-    root: Path = run_root.joinpath(*relative.parts)
+    root = run_root.joinpath(*relative.parts)
     _ensure_within(root, run_root / "snapshots")
     if not root.is_dir() or root.is_symlink():
         raise ContextError("snapshot directory is not regular")
+    return source_kind, object_kind, source_id, root
+
+
+def _validate_snapshot_manifest(
+    root: Path, source_kind: str, object_kind: str, source_id: str
+) -> dict[str, Any]:
     manifest = _json_file(root / "snapshot.json", "snapshot manifest")
     if manifest.get("format_version") != FORMAT_VERSION:
         raise ContextError("unsupported snapshot schema")
@@ -345,10 +271,10 @@ def _load_snapshot(  # noqa: PLR0915
     if manifest.get("source_id") != source_id:
         raise ContextError("snapshot identity is inconsistent")
     observation_window = manifest.get("observation_window")
-    if not isinstance(observation_window, dict):
-        raise ContextError("snapshot observation window is invalid")
-    if not isinstance(observation_window.get("from"), str) or not isinstance(
-        observation_window.get("to"), str
+    if (
+        not isinstance(observation_window, dict)
+        or not isinstance(observation_window.get("from"), str)
+        or not isinstance(observation_window.get("to"), str)
     ):
         raise ContextError("snapshot observation window is invalid")
     try:
@@ -358,6 +284,10 @@ def _load_snapshot(  # noqa: PLR0915
         raise ContextError("snapshot observation window is invalid") from None
     if observation_start >= observation_end:
         raise ContextError("snapshot observation window is invalid")
+    return manifest
+
+
+def _load_declared_evidence(root: Path, manifest: dict[str, Any]) -> dict[str, bytes]:
     declared = manifest.get("evidence_files")
     if not isinstance(declared, list):
         raise ContextError("snapshot evidence files are invalid")
@@ -370,7 +300,7 @@ def _load_snapshot(  # noqa: PLR0915
         path = _archive_relative_path(descriptor["path"])
         if path == PurePosixPath("snapshot.json") or path.as_posix() in evidence:
             raise ContextError("snapshot evidence path is invalid")
-        file_path: Path = root.joinpath(*path.parts)
+        file_path = root.joinpath(*path.parts)
         _ensure_within(file_path, root)
         if not _is_regular_file(file_path):
             raise ContextError("declared evidence file is not regular")
@@ -384,6 +314,10 @@ def _load_snapshot(  # noqa: PLR0915
             except UnicodeError, json.JSONDecodeError:
                 raise ContextError("declared JSON evidence is invalid") from None
         evidence[path.as_posix()] = content
+    return evidence
+
+
+def _validate_evidence_tree(root: Path, evidence: dict[str, bytes]) -> None:
     actual: set[str] = set()
     for child in root.rglob("*"):
         _ensure_within(child, root)
@@ -407,10 +341,159 @@ def _load_snapshot(  # noqa: PLR0915
     }
     if actual_directories != declared_directories:
         raise ContextError("snapshot directories do not match its manifest")
+
+
+def _native_json_object(content: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(content)
+    except UnicodeError, json.JSONDecodeError:
+        raise ContextError(f"{label} is invalid") from None
+    if not isinstance(value, dict):
+        raise ContextError(f"{label} is invalid")
+    return value
+
+
+def _validate_native_schema(
+    source_kind: str, object_kind: str, evidence: dict[str, bytes]
+) -> None:
+    required_evidence: tuple[str, ...] = ("issue.json",)
+    if source_kind == "github" and object_kind == "pull-request":
+        required_evidence = ("issue.json", "pull-request.json")
+    elif source_kind == "opencode":
+        required_evidence = ("session.json",)
+    if any(name not in evidence for name in required_evidence):
+        raise ContextError("unsupported source schema")
+    if source_kind == "opencode":
+        payload = _native_json_object(evidence["session.json"], "session evidence")
+        if (
+            not payload
+            or not {"messages", "parts", "role", "text", "body", "payload"}
+            & payload.keys()
+        ):
+            raise ContextError("unsupported source schema")
+        return
+    issue = _native_json_object(evidence["issue.json"], "GitHub issue evidence")
+    if not isinstance(issue.get("node_id"), str) or not issue["node_id"]:
+        raise ContextError("unsupported source schema")
+    if ("pull_request" in issue) != (object_kind == "pull-request"):
+        raise ContextError("unsupported source schema")
+    if object_kind == "pull-request":
+        pull_request = _native_json_object(
+            evidence["pull-request.json"], "GitHub pull request evidence"
+        )
+        if (
+            not isinstance(pull_request.get("node_id"), str)
+            or not pull_request["node_id"]
+        ):
+            raise ContextError("unsupported source schema")
+
+
+def _load_snapshot(run_root: Path, run: dict[str, Any], entry: Any) -> LoadedSnapshot:
+    source_kind, object_kind, source_id, root = _snapshot_identity(run_root, run, entry)
+    manifest = _validate_snapshot_manifest(root, source_kind, object_kind, source_id)
+    evidence = _load_declared_evidence(root, manifest)
+    _validate_evidence_tree(root, evidence)
+    _validate_native_schema(source_kind, object_kind, evidence)
     return LoadedSnapshot(run, manifest, evidence, root)
 
 
-def load_archive(root: str | Path) -> tuple[LoadedRun, ...]:  # noqa: PLR0915
+def _validate_run_manifest(run_root: Path) -> dict[str, Any]:
+    run = _json_file(run_root / "run.json", "run manifest")
+    if (
+        run.get("format_version") != FORMAT_VERSION
+        or run.get("run_id") != run_root.name
+    ):
+        raise ContextError("run manifest identity is invalid")
+    source = run.get("source")
+    if not isinstance(source, dict) or source.get("kind") not in {"github", "opencode"}:
+        raise ContextError("unsupported source schema")
+    if not isinstance(source.get("scope_id"), str) or not source["scope_id"]:
+        raise ContextError("run source identity is invalid")
+    if not isinstance(run.get("coverage"), dict):
+        raise ContextError("run coverage is invalid")
+    started_at = run.get("started_at")
+    completed_at = run.get("completed_at")
+    if not isinstance(started_at, str) or not isinstance(completed_at, str):
+        raise ContextError("run timestamps are invalid")
+    try:
+        started = ContextRequest._endpoint(started_at)
+        completed = ContextRequest._endpoint(completed_at)
+    except ContextError:
+        raise ContextError("run timestamps are invalid") from None
+    if started > completed:
+        raise ContextError("run timestamps are invalid")
+    collector = run.get("collector")
+    if not isinstance(collector, dict):
+        raise ContextError("run collector is invalid")
+    if not isinstance(collector.get("version"), str) or not collector["version"]:
+        raise ContextError("run collector is invalid")
+    if not isinstance(collector.get("effective_options"), dict):
+        raise ContextError("run collector is invalid")
+    collection = run.get("collection_range")
+    if (
+        not isinstance(collection, dict)
+        or not isinstance(collection.get("from"), str)
+        or not isinstance(collection.get("to"), str)
+    ):
+        raise ContextError("run collection range is invalid")
+    try:
+        CollectionRange.parse(collection["from"], collection["to"])
+    except ArchiveError:
+        raise ContextError("run collection range is invalid") from None
+    return run
+
+
+def _validate_snapshot_entries(
+    run: dict[str, Any],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    entries = run.get("snapshots")
+    if not isinstance(entries, list):
+        raise ContextError("run snapshots are invalid")
+    listed_paths: set[str] = set()
+    expected_object_kinds: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+            if entry["path"] in listed_paths:
+                raise ContextError("run snapshot paths are not unique")
+            listed_paths.add(entry["path"])
+        snapshot_path = _snapshot_entry_path(entry)
+        expected_object_kinds.add(snapshot_path.parts[1])
+    return entries, expected_object_kinds
+
+
+def _validate_published_layout(
+    run_root: Path, entries: list[dict[str, Any]], expected_object_kinds: set[str]
+) -> None:
+    if {path.name for path in run_root.iterdir()} != {"run.json", "snapshots"}:
+        raise ContextError("published run contains unregistered entries")
+    snapshots_root = run_root / "snapshots"
+    if not snapshots_root.is_dir() or snapshots_root.is_symlink():
+        raise ContextError("run snapshot root is invalid")
+    listed_paths = {entry["path"] for entry in entries}
+    actual_snapshot_paths = {
+        path.parent.relative_to(run_root).as_posix()
+        for path in snapshots_root.glob("*/*/snapshot.json")
+        if path.is_file() and not path.is_symlink()
+    }
+    if actual_snapshot_paths != listed_paths:
+        raise ContextError("run snapshots do not match its manifest")
+    actual_object_kinds = {path.name for path in snapshots_root.iterdir()}
+    if actual_object_kinds != expected_object_kinds:
+        raise ContextError("snapshot object directories do not match its manifest")
+    for object_root in snapshots_root.iterdir():
+        if not object_root.is_dir() or object_root.is_symlink():
+            raise ContextError("snapshot object directory is invalid")
+        expected_snapshots = {
+            PurePosixPath(entry["path"]).parts[2]
+            for entry in entries
+            if entry["path"].startswith(f"snapshots/{object_root.name}/")
+        }
+        actual_snapshots = {path.name for path in object_root.iterdir()}
+        if actual_snapshots != expected_snapshots:
+            raise ContextError("snapshot directories do not match its manifest")
+
+
+def load_archive(root: str | Path) -> tuple[LoadedRun, ...]:
     """Load and validate every published run without consulting external sources."""
     archive = Path(root).absolute()
     runs_root = archive / "runs"
@@ -423,100 +506,9 @@ def load_archive(root: str | Path) -> tuple[LoadedRun, ...]:  # noqa: PLR0915
         _ensure_within(run_root, runs_root)
         if not run_root.is_dir() or run_root.is_symlink():
             raise ContextError("published run is not a regular directory")
-        run = _json_file(run_root / "run.json", "run manifest")
-        if {path.name for path in run_root.iterdir()} != {"run.json", "snapshots"}:
-            raise ContextError("published run contains unregistered entries")
-        if (
-            run.get("format_version") != FORMAT_VERSION
-            or run.get("run_id") != run_root.name
-        ):
-            raise ContextError("run manifest identity is invalid")
-        source = run.get("source")
-        if not isinstance(source, dict) or source.get("kind") not in {
-            "github",
-            "opencode",
-        }:
-            raise ContextError("unsupported source schema")
-        if not isinstance(source.get("scope_id"), str) or not source["scope_id"]:
-            raise ContextError("run source identity is invalid")
-        if not isinstance(run.get("coverage"), dict):
-            raise ContextError("run coverage is invalid")
-        started_at = run.get("started_at")
-        completed_at = run.get("completed_at")
-        if not isinstance(started_at, str) or not isinstance(completed_at, str):
-            raise ContextError("run timestamps are invalid")
-        try:
-            started = ContextRequest._endpoint(started_at)
-            completed = ContextRequest._endpoint(completed_at)
-        except ContextError:
-            raise ContextError("run timestamps are invalid") from None
-        if started > completed:
-            raise ContextError("run timestamps are invalid")
-        collector = run.get("collector")
-        if not isinstance(collector, dict):
-            raise ContextError("run collector is invalid")
-        if not isinstance(collector.get("version"), str) or not collector["version"]:
-            raise ContextError("run collector is invalid")
-        if not isinstance(collector.get("effective_options"), dict):
-            raise ContextError("run collector is invalid")
-        collection = run.get("collection_range")
-        if (
-            not isinstance(collection, dict)
-            or not isinstance(collection.get("from"), str)
-            or not isinstance(collection.get("to"), str)
-        ):
-            raise ContextError("run collection range is invalid")
-        try:
-            CollectionRange.parse(collection["from"], collection["to"])
-        except ArchiveError:
-            raise ContextError("run collection range is invalid") from None
-        snapshots_root = run_root / "snapshots"
-        if not snapshots_root.is_dir() or snapshots_root.is_symlink():
-            raise ContextError("run snapshot root is invalid")
-        entries = run.get("snapshots")
-        if not isinstance(entries, list):
-            raise ContextError("run snapshots are invalid")
-        listed_paths: set[str] = set()
-        for entry in entries:
-            if isinstance(entry, dict) and isinstance(entry.get("path"), str):
-                if entry["path"] in listed_paths:
-                    raise ContextError("run snapshot paths are not unique")
-                listed_paths.add(entry["path"])
-        actual_snapshot_paths = {
-            path.parent.relative_to(run_root).as_posix()
-            for path in snapshots_root.glob("*/*/snapshot.json")
-            if path.is_file() and not path.is_symlink()
-        }
-        if actual_snapshot_paths != listed_paths:
-            raise ContextError("run snapshots do not match its manifest")
-        expected_object_kinds: set[str] = set()
-        for entry in entries:
-            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
-                raise ContextError("run snapshot entry is invalid")
-            try:
-                snapshot_path = _archive_relative_path(entry["path"])
-            except ArchiveError:
-                raise ContextError("run snapshot entry is invalid") from None
-            if (
-                len(snapshot_path.parts) != _SNAPSHOT_PATH_PARTS
-                or snapshot_path.parts[0] != "snapshots"
-            ):
-                raise ContextError("run snapshot entry is invalid")
-            expected_object_kinds.add(snapshot_path.parts[1])
-        actual_object_kinds = {path.name for path in snapshots_root.iterdir()}
-        if actual_object_kinds != expected_object_kinds:
-            raise ContextError("snapshot object directories do not match its manifest")
-        for object_root in snapshots_root.iterdir():
-            if not object_root.is_dir() or object_root.is_symlink():
-                raise ContextError("snapshot object directory is invalid")
-            expected_snapshots = {
-                PurePosixPath(entry["path"]).parts[2]
-                for entry in entries
-                if entry["path"].startswith(f"snapshots/{object_root.name}/")
-            }
-            actual_snapshots = {path.name for path in object_root.iterdir()}
-            if actual_snapshots != expected_snapshots:
-                raise ContextError("snapshot directories do not match its manifest")
+        run = _validate_run_manifest(run_root)
+        entries, expected_object_kinds = _validate_snapshot_entries(run)
+        _validate_published_layout(run_root, entries, expected_object_kinds)
         snapshots = tuple(_load_snapshot(run_root, run, entry) for entry in entries)
         loaded.append(LoadedRun(run, snapshots))
     return tuple(loaded)
@@ -562,7 +554,7 @@ def _snapshot_records(snapshot: LoadedSnapshot) -> list[_TemporalRecord]:
                 records.extend(_opencode_records(value))
             elif isinstance(value, (dict, list)):
                 records.extend(
-                    _TemporalRecord(timestamp, None) for timestamp in _timestamps(value)
+                    _TemporalRecord(timestamp) for timestamp in _timestamps(value)
                 )
         except UnicodeError, json.JSONDecodeError:
             continue
@@ -570,13 +562,7 @@ def _snapshot_records(snapshot: LoadedSnapshot) -> list[_TemporalRecord]:
 
 
 def _record_intersects(record: _TemporalRecord, request: ContextRequest) -> bool:
-    if record.kind == "context":
-        return False
-    if record.end is None:
-        return request.start <= record.start < request.end
-    if record.start == record.end:
-        return request.start <= record.start < request.end
-    return record.start < request.end and record.end > request.start
+    return request.start <= record.start < request.end
 
 
 def _snapshot_semantic_time(
@@ -614,18 +600,10 @@ def _make_context_item(
     snapshots: list[LoadedSnapshot],
     record_map: dict[int, list[_TemporalRecord]],
     request: ContextRequest,
-    extra_reasons: tuple[str, ...] = (),
 ) -> ContextItem:
     all_records = [
         record for snapshot in snapshots for record in record_map[id(snapshot)]
     ]
-    selected_snapshot_ids = {
-        id(snapshot)
-        for snapshot in snapshots
-        if any(
-            _record_intersects(record, request) for record in record_map[id(snapshot)]
-        )
-    }
     selected = any(_record_intersects(record, request) for record in all_records)
     roles: list[str] = []
     if selected:
@@ -634,24 +612,13 @@ def _make_context_item(
         roles.append("prior_background")
     if any(record.start >= request.end for record in all_records):
         roles.append("later_development")
-    if any(_has_observed_state(snapshot) for snapshot in snapshots):
-        roles.append("observed_state")
-    reasons = list(extra_reasons)
+    reasons: list[str] = []
     if selected:
-        reasons.insert(0, "source_record_in_range")
+        reasons.append("source_record_in_range")
     if "prior_background" in roles:
         reasons.append("prior_background")
     if "later_development" in roles:
         reasons.append("later_evidence")
-    if "observed_state" in roles:
-        reasons.append("observed_state")
-    if any(
-        id(snapshot) not in selected_snapshot_ids for snapshot in snapshots
-    ) and not any(
-        reason in reasons
-        for reason in ("prior_background", "later_evidence", "observed_state")
-    ):
-        reasons.append("object_context")
     return ContextItem(
         tuple(
             sorted(
@@ -668,19 +635,6 @@ def _make_context_item(
         tuple(roles),
         _item_path(key),
     )
-
-
-def _snapshot_relationships(
-    snapshot: LoadedSnapshot,
-) -> list[tuple[str, str, str]]:
-    relationships: list[tuple[str, str, str]] = []
-    for name, content in snapshot.evidence.items():
-        if name.endswith(".json"):
-            relationships.extend(
-                (kind, target, name)
-                for kind, target in _relationship_references(json.loads(content))
-            )
-    return relationships
 
 
 def _group_context_snapshots(
@@ -704,120 +658,16 @@ def _select_context_items(
     grouped: dict[tuple[str, str, str, str], list[LoadedSnapshot]],
     record_map: dict[int, list[_TemporalRecord]],
     request: ContextRequest,
-) -> tuple[
-    dict[tuple[str, str, str, str], ContextItem],
-    set[tuple[str, str, str, str]],
-    list[dict[str, str]],
-]:
+) -> dict[tuple[str, str, str, str], ContextItem]:
     items_by_key: dict[tuple[str, str, str, str], ContextItem] = {}
-    selected_keys: set[tuple[str, str, str, str]] = set()
-    gaps: list[dict[str, str]] = []
     for key, snapshots in grouped.items():
         all_records = [
             record for snapshot in snapshots for record in record_map[id(snapshot)]
         ]
-        selected_records = [
-            record for record in all_records if _record_intersects(record, request)
-        ]
-        if not selected_records:
+        if not any(_record_intersects(record, request) for record in all_records):
             continue
         items_by_key[key] = _make_context_item(key, snapshots, record_map, request)
-        selected_keys.add(key)
-        gaps.extend(
-            {
-                "kind": "unknown_completion",
-                "source_kind": key[0],
-                "object_kind": key[2],
-                "source_id": key[3],
-            }
-            for record in selected_records
-            if record.kind == "execution" and record.end is None
-        )
-    return items_by_key, selected_keys, gaps
-
-
-def _expand_session_relations(
-    grouped: dict[tuple[str, str, str, str], list[LoadedSnapshot]],
-    record_map: dict[int, list[_TemporalRecord]],
-    items_by_key: dict[tuple[str, str, str, str], ContextItem],
-    selected_keys: set[tuple[str, str, str, str]],
-    request: ContextRequest,
-) -> tuple[
-    list[tuple[str, tuple[str, str, str, str], tuple[str, str, str, str]]],
-    list[dict[str, str]],
-]:
-    parent_child_relation_keys: list[
-        tuple[str, tuple[str, str, str, str], tuple[str, str, str, str]]
-    ] = []
-    gaps: list[dict[str, str]] = []
-    relation_keys_seen: set[
-        tuple[str, tuple[str, str, str, str], tuple[str, str, str, str]]
-    ] = set()
-    parent_queue = sorted(selected_keys)
-    processed_parent_keys: set[tuple[str, str, str, str]] = set()
-    while parent_queue:
-        source_key = parent_queue.pop(0)
-        if source_key[0] != "opencode" or source_key[2] != "session":
-            processed_parent_keys.add(source_key)
-            continue
-        source_item = items_by_key[source_key]
-        source_scope = source_key[1]
-        for relationship, target_id, _ in (
-            relationship
-            for snapshot in source_item.snapshots
-            for relationship in _snapshot_relationships(snapshot)
-        ):
-            target_key = ("opencode", source_scope, "session", target_id)
-            if relationship == "parent_session":
-                relation_kind = "parent_session"
-                supporting_reason = "parent_context"
-            elif relationship == "child_task" and source_key in selected_keys:
-                relation_kind = "child_task"
-                supporting_reason = "child_context"
-            else:
-                continue
-            if target_key not in grouped:
-                gaps.append(
-                    {
-                        "kind": (
-                            "missing_parent_reference"
-                            if relationship == "parent_session"
-                            else "missing_child_reference"
-                        ),
-                        "source_kind": source_key[0],
-                        "source_scope_id": source_scope,
-                        "object_kind": source_key[2],
-                        "source_id": source_key[3],
-                        "target_id": target_id,
-                    }
-                )
-                continue
-            if target_key not in items_by_key:
-                items_by_key[target_key] = _make_context_item(
-                    target_key,
-                    grouped[target_key],
-                    record_map,
-                    request,
-                    (supporting_reason,),
-                )
-            else:
-                target_item = items_by_key[target_key]
-                if supporting_reason not in target_item.reasons:
-                    items_by_key[target_key] = replace(
-                        target_item,
-                        reasons=(*target_item.reasons, supporting_reason),
-                    )
-            relation_key = (relation_kind, source_key, target_key)
-            if relation_key not in relation_keys_seen:
-                relation_keys_seen.add(relation_key)
-                parent_child_relation_keys.append(relation_key)
-            if (
-                relationship == "parent_session"
-                and target_key not in processed_parent_keys
-            ):
-                parent_queue.append(target_key)
-        processed_parent_keys.add(source_key)
-    return parent_child_relation_keys, gaps
+    return items_by_key
 
 
 def extract_context(
@@ -825,13 +675,8 @@ def extract_context(
 ) -> ContextExtractionResult:
     """Build a disposable result whose items directly reference loaded snapshots."""
     grouped, record_map = _group_context_snapshots(runs)
-    items_by_key, selected_keys, gaps = _select_context_items(
-        grouped, record_map, request
-    )
-    parent_child_relation_keys, relation_gaps = _expand_session_relations(
-        grouped, record_map, items_by_key, selected_keys, request
-    )
-    gaps.extend(relation_gaps)
+    items_by_key = _select_context_items(grouped, record_map, request)
+    gaps: list[dict[str, str]] = []
     items = sorted(
         items_by_key.values(), key=lambda item: (item.path, item.source.run["run_id"])
     )
@@ -844,28 +689,10 @@ def extract_context(
                     "object_kind": snapshot.manifest["object_kind"],
                     "source_id": snapshot.manifest["source_id"],
                 }
-                for gap in _snapshot_semantic_gaps(snapshot)
+                for gap in _snapshot_gaps(snapshot)
             )
-    relations, unresolved, reference_gaps, explicit_relations = _reference_data(
-        tuple(items), runs
-    )
+    relations, unresolved, reference_gaps = _reference_data(tuple(items), runs)
     gaps.extend(reference_gaps)
-    native_relations = _native_relation_data(tuple(items))
-    direct_relations: list[ContextRelation] = list(explicit_relations)
-    for relation_kind, source_key, target_key in parent_child_relation_keys:
-        source_item = items_by_key[source_key]
-        target_item = items_by_key[target_key]
-        direct_relations.append(
-            ContextRelation(relation_kind, source_item, target_item)
-        )
-        relations += (
-            {
-                "kind": relation_kind,
-                "from": source_item.path,
-                "target": target_item.path,
-            },
-        )
-    relations = (*native_relations, *relations)
     return ContextExtractionResult(
         request,
         runs,
@@ -873,15 +700,6 @@ def extract_context(
         tuple(gaps),
         relations,
         unresolved,
-        tuple(direct_relations),
-    )
-
-
-def _has_observed_state(snapshot: LoadedSnapshot) -> bool:
-    return any(
-        marker in content.decode("utf-8", errors="ignore")
-        for content in snapshot.evidence.values()
-        for marker in ('"isResolved"', '"isOutdated"', '"status"')
     )
 
 
@@ -977,11 +795,10 @@ def _reference_data(
     tuple[dict[str, Any], ...],
     tuple[dict[str, str], ...],
     list[dict[str, str]],
-    tuple[ContextRelation, ...],
 ]:
     targets: dict[
         tuple[str, str, str, str],
-        dict[tuple[str, str, str, str], tuple[dict[str, str], LoadedSnapshot]],
+        dict[tuple[str, str, str, str], dict[str, str]],
     ] = {}
     for run in runs:
         for snapshot in run.snapshots:
@@ -1004,11 +821,10 @@ def _reference_data(
                     target["object_kind"],
                     target["source_id"],
                 )
-                targets.setdefault(key, {})[logical_key] = (target, snapshot)
+                targets.setdefault(key, {})[logical_key] = target
     relations: list[dict[str, Any]] = []
     unresolved: list[dict[str, str]] = []
     gaps: list[dict[str, str]] = []
-    direct_relations: list[ContextRelation] = []
     seen_occurrences: set[tuple[str, str, str, int, str]] = set()
     for item in items:
         if item.source.manifest["source_kind"] != "opencode":
@@ -1035,12 +851,12 @@ def _reference_data(
                     matches = sorted(
                         targets.get(reference_key, {}).values(),
                         key=lambda target: (
-                            target[0]["source_scope_id"],
-                            target[0]["source_id"],
+                            target["source_scope_id"],
+                            target["source_id"],
                         ),
                     )
                     if matches:
-                        for target, target_snapshot in matches:
+                        for target in matches:
                             occurrence = {
                                 "evidence_path": evidence_path,
                                 "json_path": json_path,
@@ -1054,14 +870,6 @@ def _reference_data(
                                     "target": target,
                                     "occurrence": occurrence,
                                 }
-                            )
-                            direct_relations.append(
-                                ContextRelation(
-                                    "explicit_reference",
-                                    item,
-                                    target_snapshot,
-                                    occurrence,
-                                )
                             )
                     else:
                         unresolved.append(
@@ -1084,221 +892,47 @@ def _reference_data(
                             }
                         )
                     match = _GITHUB_REFERENCE.search(text, match.end())
-    return tuple(relations), tuple(unresolved), gaps, tuple(direct_relations)
+    return tuple(relations), tuple(unresolved), gaps
 
 
-def _github_evidence_category(  # noqa: PLR0911
-    object_kind: str, name: str
-) -> str:
+def _github_evidence_category(object_kind: str, name: str) -> str:
     if name == "issue.json":
         return "issue payload"
     if name == "pull-request.json":
         return "pull request payload"
-    if name.startswith("comments."):
-        return "ordinary comments"
-    if name.startswith("timeline."):
-        return "timeline entries"
-    if name.startswith("reviews."):
-        return "submitted reviews"
-    if name.startswith("review-comments."):
-        return "inline review comments"
-    if name.startswith("review-threads.") or name.startswith("review-thread-comments."):
-        return "review threads"
-    if name == "pull-request.diff":
-        return "aggregate pull request diff"
-    return f"{object_kind} source-native evidence"
+    return f"GitHub {object_kind} source-native evidence"
 
 
-def _contains_key(value: Any, keys: set[str]) -> bool:
+def _contains_true_flag(value: Any, keys: set[str]) -> bool:
     if isinstance(value, dict):
-        return bool(keys & value.keys()) or any(
-            _contains_key(child, keys) for child in value.values()
+        return any(
+            (key in keys and child is True) or _contains_true_flag(child, keys)
+            for key, child in value.items()
         )
-    if isinstance(value, list):
-        return any(_contains_key(child, keys) for child in value)
-    return False
+    return isinstance(value, list) and any(
+        _contains_true_flag(child, keys) for child in value
+    )
 
 
-def _contains_flag(value: Any, keys: set[str]) -> bool:
-    if isinstance(value, dict):
-        if any(key in keys and child is True for key, child in value.items()):
-            return True
-        return any(_contains_flag(child, keys) for child in value.values())
-    if isinstance(value, list):
-        return any(_contains_flag(child, keys) for child in value)
-    return False
-
-
-def _unknown_opencode_types(value: Any) -> set[str]:
-    known = {
-        "session",
-        "session-export",
-        "message",
-        "user",
-        "assistant",
-        "system",
-        "developer",
-        "text",
-        "reasoning",
-        "tool",
-        "tool-call",
-        "tool-result",
-        "tool_result",
-        "step-start",
-        "step-finish",
-        "patch",
-        "file",
-        "compaction",
-        "compaction-summary",
-        "synthetic",
-        "synthetic-continuation",
-        "continuation",
-    }
-    found: set[str] = set()
-    if isinstance(value, dict):
-        record_type = value.get("type")
-        if isinstance(record_type, str) and record_type not in known:
-            found.add(record_type)
-        for child in value.values():
-            found.update(_unknown_opencode_types(child))
-    elif isinstance(value, list):
-        for child in value:
-            found.update(_unknown_opencode_types(child))
-    return found
-
-
-def _relationship_references(
-    value: Any, context: str = "root"
-) -> list[tuple[str, str]]:
-    references: list[tuple[str, str]] = []
-    if isinstance(value, dict):
-        record_type = value.get("type")
-        if record_type in {"compaction", "compaction-summary"}:
-            context = "compaction"
-        elif context == "root" and (
-            "tool" in value or "callID" in value or record_type in {"tool", "tool-call"}
-        ):
-            context = "task"
-        for key, child in value.items():
-            normalized = key.replace("_", "").lower()
-            if normalized in {"parentmessageid", "messageparentid"}:
-                relation = "message_parent"
-            elif normalized in {
-                "compactiontailid",
-                "tailid",
-                "continuationid",
-            } or (context == "compaction" and normalized == "parentid"):
-                relation = "compaction_tail"
-            elif normalized in {"childid", "childsessionid", "taskchildid", "children"}:
-                relation = "child_task"
-            elif normalized == "parentsessionid":
-                relation = "parent_session"
-            elif normalized == "parentid":
-                relation = (
-                    "message_parent" if context == "message" else "parent_session"
-                )
-            else:
-                relation = None
-            if relation is not None:
-                if isinstance(child, str):
-                    references.append((relation, child))
-                elif isinstance(child, list):
-                    references.extend(
-                        (relation, target)
-                        for target in child
-                        if isinstance(target, str)
-                    )
-            child_context = context
-            if normalized in {"messages", "message", "messagehistory"}:
-                child_context = "message"
-            references.extend(_relationship_references(child, child_context))
-    elif isinstance(value, list):
-        for child in value:
-            references.extend(_relationship_references(child, context))
-    return references
-
-
-def _native_relation_data(
-    items: tuple[ContextItem, ...],
-) -> tuple[dict[str, Any], ...]:
-    relations: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    for item in items:
-        for snapshot in item.snapshots:
-            for kind, target_id, evidence_path in _snapshot_relationships(snapshot):
-                if kind in {"parent_session", "child_task"}:
-                    continue
-                relation_key = (item.path, kind, target_id, evidence_path)
-                if relation_key in seen:
-                    continue
-                seen.add(relation_key)
-                relations.append(
-                    {
-                        "kind": kind,
-                        "from": item.path,
-                        "target_id": target_id,
-                        "source_scope_id": snapshot.run["source"]["scope_id"],
-                        "evidence_path": evidence_path,
-                    }
-                )
-    return tuple(relations)
-
-
-def _snapshot_semantic_gaps(snapshot: LoadedSnapshot) -> list[dict[str, str]]:
+def _snapshot_gaps(snapshot: LoadedSnapshot) -> list[dict[str, str]]:
     gaps: list[dict[str, str]] = []
     for name, content in snapshot.evidence.items():
         if not name.endswith(".json"):
             continue
         value = json.loads(content)
-        if _contains_flag(value, {"truncated", "isTruncated", "incomplete_results"}):
+        if _contains_true_flag(
+            value, {"truncated", "isTruncated", "incomplete_results"}
+        ):
             gaps.append({"kind": "source_truncated", "evidence_path": name})
-        if snapshot.manifest["source_kind"] == "opencode":
-            gaps.extend(
-                {
-                    "kind": "unknown_part_type",
-                    "evidence_path": name,
-                    "part_type": part_type,
-                }
-                for part_type in sorted(_unknown_opencode_types(value))
-            )
     return gaps
 
 
-def _opencode_evidence_categories(name: str, content: bytes) -> tuple[str, ...]:
-    categories: set[str] = {"session export"} if name == "session.json" else set()
-    text = content.decode("utf-8", errors="ignore")
-    try:
-        value = json.loads(content)
-    except UnicodeError, json.JSONDecodeError:
-        return ("source-native evidence",)
-    if _contains_key(value, {"messages"}):
-        categories.add("messages")
-    if _contains_key(value, {"parts"}):
-        categories.add("message parts")
-    if _contains_key(value, {"tool", "callID"}) or (
-        _contains_key(value, {"type"})
-        and any(marker in text for marker in ('"tool"', '"tool-call"', '"callID"'))
-    ):
-        categories.add("tool records")
-    if _contains_key(value, {"status", "error"}):
-        categories.add("tool status/results")
-    if _contains_key(value, {"truncated", "isTruncated"}):
-        categories.add("truncation markers")
-    if _contains_key(value, {"compaction", "compactionSummary"}) or any(
-        marker in text for marker in ('"type":"compaction"', '"type": "compaction"')
-    ):
-        categories.add("compaction summaries")
-    if _contains_key(value, {"synthetic", "isSynthetic"}) or any(
-        marker in text for marker in ('"type":"synthetic"', '"type": "synthetic"')
-    ):
-        categories.add("synthetic continuations")
-    if _unknown_opencode_types(value):
-        categories.add("unknown part types")
-    if _contains_key(
-        value, {"parentID", "parent_id", "childID", "child_id", "children"}
-    ):
-        categories.add("parent/child relationships")
-    return tuple(sorted(categories or {"source-native evidence"}))
+def _opencode_evidence_category(name: str) -> str:
+    return (
+        "session export"
+        if name == "session.json"
+        else "OpenCode source-native evidence"
+    )
 
 
 def _relation_index_line(relation: dict[str, Any]) -> str:
@@ -1386,9 +1020,7 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
             + (
                 _github_evidence_category(object_kind, name)
                 if source_kind == "github"
-                else ", ".join(
-                    _opencode_evidence_categories(name, snapshot.evidence[name])
-                )
+                else _opencode_evidence_category(name)
             )
             for name in sorted(snapshot.evidence)
         )
