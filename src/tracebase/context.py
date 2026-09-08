@@ -18,6 +18,7 @@ from .archive import (
     encode_path_id,
     load_published_archive,
 )
+from .github_context import GitHubProjection, project_github
 
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
@@ -75,6 +76,7 @@ class ContextRequest:
 class ContextItem:
     snapshots: tuple[PublishedSnapshot, ...]
     path: str
+    github: GitHubProjection | None = None
 
     @property
     def source(self) -> PublishedSnapshot:
@@ -128,14 +130,23 @@ def extract_context(
         for snapshot in run.snapshots:
             _validate_context_source(snapshot)
             grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
-    items = tuple(
-        ContextItem(
-            tuple(sorted(snapshots, key=lambda value: value.run["run_id"])),
-            _item_path(key),
+    all_items: list[ContextItem] = []
+    for key, snapshots in sorted(grouped.items()):
+        ordered = tuple(sorted(snapshots, key=lambda value: value.run["run_id"]))
+        projection = (
+            project_github(ordered, request.start, request.end)
+            if key[0] == "github"
+            else None
         )
-        for key, snapshots in sorted(grouped.items())
+        all_items.append(ContextItem(ordered, _item_path(key), projection))
+    items = tuple(
+        item for item in all_items if item.github is None or item.github.selected
     )
-    return ContextExtractionResult(request, runs, items)
+    return ContextExtractionResult(
+        request,
+        runs,
+        items,
+    )
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -154,9 +165,68 @@ def _cleanup_staging(staging: Path) -> None:
         raise ContextError("context output cleanup failed") from None
 
 
-def _render_source_view(item_root: Path, item: ContextItem) -> str:
+def _observation_name(index: int, run_id: str) -> str:
+    return f"{index:03d}-{run_id}"
+
+
+def _github_records_for_output(item: ContextItem) -> tuple[dict[str, Any], ...]:
+    if item.github is None:
+        return ()
+    observation_paths = {
+        snapshot.run["run_id"]: (
+            f"observations/{_observation_name(index, snapshot.run['run_id'])}"
+        )
+        for index, snapshot in enumerate(item.snapshots, start=1)
+    }
+    records: list[dict[str, Any]] = []
+    for record in item.github.records:
+        representations = []
+        for representation in record["representations"]:
+            output_path = (
+                f"{observation_paths[representation['run_id']]}/"
+                f"{representation['evidence_path']}"
+            )
+            representations.append({**representation, "output_path": output_path})
+        records.append({**record, "representations": representations})
+    return tuple(records)
+
+
+def _render_source_view(
+    item_root: Path,
+    item: ContextItem,
+    github_records: tuple[dict[str, Any], ...] = (),
+) -> str:
     """Render the shared source-view shell; source projections extend this seam."""
     source = item.source
+    if item.github is not None:
+        projection = item.github
+        _write_json(
+            item_root / "github.json",
+            {
+                "schema_version": 1,
+                "inclusion_reasons": projection.inclusion_reasons,
+                "temporal_roles": projection.temporal_roles,
+                "records": github_records,
+                "relations": projection.relations,
+            },
+        )
+        lines = ["# GitHub Item", "", "## Source-native Records", ""]
+        for record in github_records:
+            links = ", ".join(
+                f"[{representation['evidence_path']}]({representation['output_path']})"
+                for representation in record["representations"]
+            )
+            lines.append(
+                f"- `{record['kind']}` `{record['native_id']}` "
+                f"({', '.join(record['temporal_roles'])}; {links})"
+            )
+        lines.extend(["", "## Observation State", ""])
+        lines.append(
+            "Review thread state is observed current state, not proof of a fix."
+        )
+        lines.append("Aggregate diffs do not establish a fix or fixing commit.")
+        (item_root / "github.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return f"{item.path}/github.md"
     view_path = f"{item.path}/{source.manifest['source_kind']}.md"
     lines = [
         "# Source Item",
@@ -170,7 +240,7 @@ def _render_source_view(item_root: Path, item: ContextItem) -> str:
         "",
     ]
     for observation_index, snapshot in enumerate(item.snapshots, start=1):
-        observation_name = f"{observation_index:03d}-{snapshot.run['run_id']}"
+        observation_name = _observation_name(observation_index, snapshot.run["run_id"])
         lines.extend(
             f"- [{name}](observations/{observation_name}/{name})"
             for name in sorted(snapshot.evidence)
@@ -187,7 +257,7 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
     provenance: list[dict[str, Any]] = []
     for observation_index, snapshot in enumerate(item.snapshots, start=1):
         run_id = snapshot.run["run_id"]
-        observation_name = f"{observation_index:03d}-{run_id}"
+        observation_name = _observation_name(observation_index, run_id)
         observation_root = item_root / "observations" / observation_name
         for name, content in sorted(snapshot.evidence.items()):
             destination = observation_root.joinpath(*PurePosixPath(name).parts)
@@ -203,8 +273,9 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
             }
         )
     source = item.source
-    view_path = _render_source_view(item_root, item)
-    return {
+    github_records = _github_records_for_output(item)
+    view_path = _render_source_view(item_root, item, github_records)
+    result = {
         "source_kind": source.manifest["source_kind"],
         "source_scope_id": source.run["source"]["scope_id"],
         "object_kind": source.manifest["object_kind"],
@@ -213,6 +284,11 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
         "view_path": view_path,
         "provenance": provenance,
     }
+    if item.github is not None:
+        result["inclusion_reasons"] = item.github.inclusion_reasons
+        result["temporal_roles"] = item.github.temporal_roles
+        result["github_path"] = f"{item.path}/github.json"
+    return result
 
 
 def _render_index(
@@ -229,6 +305,12 @@ def _render_index(
     if items:
         lines.extend(
             f"- `{item['path']}/` [{item['source_kind']} view]({item['view_path']})"
+            + (
+                f": {', '.join(item['inclusion_reasons'])}; "
+                f"{', '.join(item['temporal_roles'])}"
+                if "inclusion_reasons" in item
+                else ""
+            )
             for item in items
         )
     else:

@@ -117,6 +117,268 @@ def test_context_groups_all_archive_observations_without_payload_interpretation(
     assert "temporal_roles" not in items[0]
 
 
+def test_github_context_projects_native_records_without_fix_inference(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(
+        archive,
+        "github-run",
+        source_kind="github",
+        scope_id="tracked-actor",
+    )
+    source_id = "PR_1"
+    evidence = {
+        "issue.json": {
+            "node_id": source_id,
+            "created_at": "2025-12-31T23:00:00Z",
+            "updated_at": "2026-01-01T00:30:00Z",
+            "body": (
+                "See https://github.com/example/repo/issues/99 and "
+                "https://github.com/example/repo/issues/99, not "
+                "https://github.com/example/repo/issues/99x, "
+                "xhttps://github.com/example/repo/issues/99, or "
+                "https://github.com/example-/repo/issues/99; then "
+                "<https://github.com/example/repo/issues/99>"
+            ),
+            "html_url": "https://github.com/example/repo/pull/1",
+            "user": {"login": "author"},
+        },
+        "pull-request.json": {"node_id": source_id},
+        "comments.001.json": [
+            {
+                "id": 10,
+                "created_at": "2025-12-31T23:15:00Z",
+                "updated_at": "2026-01-01T00:25:00Z",
+                "user": {"login": "reviewer"},
+            }
+        ],
+        "timeline.001.json": [
+            {"id": 10, "event": "commented"},
+            {"id": 20, "event": "reviewed", "actor": {"login": "reviewer"}},
+            {"id": 40, "event": "closed", "actor": {"login": "closer"}},
+            {"id": 60, "event": "labeled", "created_at": "2025-12-31T23:50:00Z"},
+            {
+                "id": 50,
+                "event": "cross-referenced",
+                "source": {"issue": {"node_id": "SOURCE_PR"}},
+            },
+            {
+                "node_id": "commit-first",
+                "event": "committed",
+                "author": {"date": "2025-12-31T23:00:00Z"},
+                "committer": {"date": "2026-01-01T01:00:00+01:00"},
+            },
+            {
+                "node_id": "commit-second",
+                "event": "committed",
+                "author": {"date": "2025-12-31T23:00:00Z"},
+                "committer": {"date": "2026-01-01T00:30:00Z"},
+            },
+        ],
+        "reviews.001.json": [
+            {
+                "id": 20,
+                "submitted_at": "2026-01-01T00:20:00Z",
+                "user": {"login": "reviewer"},
+            }
+        ],
+        "review-comments.001.json": [
+            {
+                "id": 30,
+                "node_id": "comment-node",
+                "pull_request_review_id": 20,
+                "created_at": "2026-01-01T00:21:00Z",
+                "user": {"login": "reviewer"},
+            },
+            {
+                "id": 31,
+                "node_id": "reply-node",
+                "in_reply_to_id": 30,
+                "created_at": "2026-01-01T00:22:00Z",
+                "user": {"login": "reviewer"},
+            },
+        ],
+        "review-threads.001.json": {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "thread-node",
+                                    "isResolved": True,
+                                    "isOutdated": True,
+                                    "comments": {"nodes": [{"id": "comment-node"}]},
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "review-thread-comments.001.002.json": {
+            "data": {
+                "node": {
+                    "id": "thread-node",
+                    "comments": {"nodes": [{"id": "reply-node"}]},
+                }
+            }
+        },
+        "pull-request.diff": "diff --git a/a b/a\n",
+    }
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "github",
+            "pull-request",
+            source_id,
+            run.collection_range.as_manifest(),
+            tuple({"path": name} for name in evidence),
+        )
+    )
+    for name, value in evidence.items():
+        content = value if isinstance(value, str) else json.dumps(value)
+        run.write_evidence(snapshot, name, content.encode())
+    run.publish({})
+    later = _run(
+        archive,
+        "github-run-later",
+        "2026-01-02T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        source_kind="github",
+        scope_id="tracked-actor",
+    )
+    later_snapshot = later.write_snapshot(
+        Snapshot(
+            "github",
+            "pull-request",
+            source_id,
+            later.collection_range.as_manifest(),
+            ({"path": "issue.json"}, {"path": "pull-request.json"}),
+        )
+    )
+    later.write_evidence(
+        later_snapshot,
+        "issue.json",
+        json.dumps(
+            {
+                "node_id": source_id,
+                "created_at": "2025-12-31T23:00:00Z",
+                "updated_at": "2026-01-02T00:45:00Z",
+            }
+        ).encode(),
+    )
+    later.write_evidence(later_snapshot, "pull-request.json", b'{"node_id": "PR_1"}')
+    later.publish({})
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    manifest = json.loads((output / "context.json").read_text())
+    item = manifest["source_items"][0]
+    projection = json.loads((output / item["github_path"]).read_text())
+    assert item["inclusion_reasons"] == ["in_range_source_record"]
+    thread = next(
+        record for record in projection["records"] if record["kind"] == "review-thread"
+    )
+    assert thread["representations"][0]["value"]["isResolved"]
+    assert {relation["kind"] for relation in projection["relations"]} == {
+        "inline-reply",
+        "review-inline-comment",
+        "thread-inline-comment",
+    }
+    assert next(
+        record for record in projection["records"] if record["kind"] == "aggregate-diff"
+    )["limitations"] == ["does_not_establish_fix_or_commit"]
+    assert next(
+        record
+        for record in projection["records"]
+        if record["kind"] == "ordinary-comment"
+    )["temporal_roles"] == ["in_range_work", "earlier_background"]
+    ordinary_comment = next(
+        record
+        for record in projection["records"]
+        if record["kind"] == "ordinary-comment"
+    )
+    assert len(ordinary_comment["representations"]) == 2
+    review_index = next(
+        index
+        for index, record in enumerate(projection["records"])
+        if record["kind"] == "review"
+    )
+    comment_index = next(
+        index
+        for index, record in enumerate(projection["records"])
+        if record["kind"] == "ordinary-comment"
+    )
+    assert review_index < comment_index
+    earlier_index = next(
+        index
+        for index, record in enumerate(projection["records"])
+        if record["native_id"] == "60"
+    )
+    assert earlier_index < review_index
+    review = next(
+        record for record in projection["records"] if record["kind"] == "review"
+    )
+    assert len(review["representations"]) == 2
+    assert review["actor"] == {"login": "reviewer"}
+    lifecycle = next(
+        record for record in projection["records"] if record["native_id"] == "40"
+    )
+    assert lifecycle["actor"] == {"login": "closer"}
+    first_commit = next(
+        record
+        for record in projection["records"]
+        if record["native_id"] == "commit-first"
+    )
+    assert first_commit["temporal_roles"] == ["in_range_work"]
+    record_ids = [record["native_id"] for record in projection["records"]]
+    assert record_ids.index("commit-first") < record_ids.index("commit-second")
+    pull_request = next(
+        record for record in projection["records"] if record["kind"] == "pull-request"
+    )
+    assert "actor" not in pull_request
+    assert {
+        representation["run_id"] for representation in pull_request["representations"]
+    } == {
+        "github-run",
+        "github-run-later",
+    }
+    assert pull_request["temporal_roles"] == [
+        "in_range_work",
+        "earlier_background",
+        "later_progression",
+    ]
+    assert (
+        "Aggregate diffs do not establish a fix"
+        in (output / item["view_path"]).read_text()
+    )
+    assert manifest["relations"] == []
+    assert manifest["unresolved_references"] == []
+    assert manifest["gaps"] == []
+    issue = next(
+        record for record in projection["records"] if record["kind"] == "pull-request"
+    )
+    assert (
+        "https://github.com/example/repo/issues/99"
+        in issue["representations"][0]["value"]["body"]
+    )
+    cross_reference = next(
+        record for record in projection["records"] if record["native_id"] == "50"
+    )
+    assert cross_reference["representations"][0]["value"] == {
+        "id": 50,
+        "event": "cross-referenced",
+        "source": {"issue": {"node_id": "SOURCE_PR"}},
+    }
+    assert "fixed" not in (output / item["view_path"]).read_text().lower()
+
+
 def test_scope_aware_identity_and_source_paths_are_deterministic(
     tmp_path: Path,
 ) -> None:
