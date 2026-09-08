@@ -119,7 +119,8 @@ def _roles(record: dict[str, Any], start: datetime, end: datetime) -> tuple[str,
         timestamp
         for representation in record["representations"]
         if isinstance(representation["value"], dict)
-        for value in representation["value"].values()
+        for name in ("created_at", "updated_at", "submitted_at")
+        for value in [representation["value"].get(name)]
         if isinstance(value, str)
         if (timestamp := _timestamp(value)) is not None
     ]

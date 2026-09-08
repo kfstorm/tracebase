@@ -341,6 +341,15 @@ def _render_index(
             f"- Unresolved: `{reference['url']}`"
             for reference in result.unresolved_references
         )
+    gaps = [
+        gap
+        for item in result.items
+        if item.github is not None
+        for gap in item.github.gaps
+    ]
+    if gaps:
+        lines.extend(["", "## Gaps and Uncertainty", ""])
+        lines.extend(f"- `{gap['kind']}`: {gap['detail']}" for gap in gaps)
     (staging / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

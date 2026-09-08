@@ -215,6 +215,12 @@ def test_github_context_projects_native_records_without_fix_inference(
     assert projection["gaps"] == [
         {"detail": "does_not_establish_fix_or_commit", "kind": "aggregate_diff"}
     ]
+    assert next(
+        record
+        for record in projection["records"]
+        if record["kind"] == "ordinary-comment"
+    )["temporal_roles"] == ["in_range_work"]
+    assert "Gaps and Uncertainty" in (output / "index.md").read_text()
     assert "fixed" not in (output / item["view_path"]).read_text().lower()
 
 
