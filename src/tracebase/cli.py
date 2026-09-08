@@ -106,8 +106,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             request = ContextRequest.parse(arguments.from_text, arguments.to_text)
             published = generate_context(arguments.archive, request, arguments.output)
-        except (ContextError, OSError) as error:
+        except ContextError as error:
             print(str(error), file=sys.stderr)
+            return 1
+        except OSError, TypeError, ValueError, RuntimeError:
+            print("context operation failed", file=sys.stderr)
             return 1
         print(f"context output published at {published}")
         return 0

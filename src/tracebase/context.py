@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -36,6 +36,8 @@ _TIMESTAMP_KEYS = {
     "startedAt",
     "completedAt",
 }
+_NUMERIC_TIMESTAMP_KEYS = {"created", "updated", "started", "ended", "completed"}
+_SNAPSHOT_PATH_PARTS = 3
 
 
 class ContextError(ArchiveError):
@@ -97,10 +99,15 @@ class LoadedRun:
 
 @dataclass(frozen=True, slots=True)
 class ContextItem:
-    source: LoadedSnapshot
+    snapshots: tuple[LoadedSnapshot, ...]
     reasons: tuple[str, ...]
     temporal_roles: tuple[str, ...]
     path: str
+
+    @property
+    def source(self) -> LoadedSnapshot:
+        """Return the first direct source reference for compatibility with readers."""
+        return self.snapshots[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +130,7 @@ def _json_file(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _inside(path: Path, root: Path) -> None:
+def _ensure_within(path: Path, root: Path) -> None:
     if path.is_symlink():
         raise ContextError("archive contains a symlink")
     try:
@@ -132,7 +139,9 @@ def _inside(path: Path, root: Path) -> None:
         raise ContextError("archive path escapes its boundary") from None
 
 
-def _load_snapshot(run_root: Path, run: dict[str, Any], entry: Any) -> LoadedSnapshot:
+def _load_snapshot(  # noqa: PLR0915
+    run_root: Path, run: dict[str, Any], entry: Any
+) -> LoadedSnapshot:
     if not isinstance(entry, dict):
         raise ContextError("run snapshot entry is invalid")
     try:
@@ -147,7 +156,7 @@ def _load_snapshot(run_root: Path, run: dict[str, Any], entry: Any) -> LoadedSna
     ):
         raise ContextError("snapshot identity is inconsistent")
     root: Path = run_root.joinpath(*relative.parts)
-    _inside(root, run_root / "snapshots")
+    _ensure_within(root, run_root / "snapshots")
     if not root.is_dir() or root.is_symlink():
         raise ContextError("snapshot directory is not regular")
     manifest = _json_file(root / "snapshot.json", "snapshot manifest")
@@ -174,7 +183,7 @@ def _load_snapshot(run_root: Path, run: dict[str, Any], entry: Any) -> LoadedSna
         if path == PurePosixPath("snapshot.json") or path.as_posix() in evidence:
             raise ContextError("snapshot evidence path is invalid")
         file_path: Path = root.joinpath(*path.parts)
-        _inside(file_path, root)
+        _ensure_within(file_path, root)
         if not _is_regular_file(file_path):
             raise ContextError("declared evidence file is not regular")
         try:
@@ -183,7 +192,7 @@ def _load_snapshot(run_root: Path, run: dict[str, Any], entry: Any) -> LoadedSna
             raise ContextError("declared evidence file is unreadable") from None
     actual: set[str] = set()
     for child in root.rglob("*"):
-        _inside(child, root)
+        _ensure_within(child, root)
         if child == root / "snapshot.json" or child.is_dir():
             continue
         if not _is_regular_file(child):
@@ -191,10 +200,23 @@ def _load_snapshot(run_root: Path, run: dict[str, Any], entry: Any) -> LoadedSna
         actual.add(child.relative_to(root).as_posix())
     if actual != set(evidence):
         raise ContextError("snapshot evidence does not match its manifest")
+    declared_directories: set[str] = set()
+    for evidence_path in evidence:
+        parent = PurePosixPath(evidence_path).parent
+        while parent != PurePosixPath("."):
+            declared_directories.add(parent.as_posix())
+            parent = parent.parent
+    actual_directories = {
+        child.relative_to(root).as_posix()
+        for child in root.rglob("*")
+        if child.is_dir()
+    }
+    if actual_directories != declared_directories:
+        raise ContextError("snapshot directories do not match its manifest")
     return LoadedSnapshot(run, manifest, evidence, root)
 
 
-def load_archive(root: str | Path) -> tuple[LoadedRun, ...]:
+def load_archive(root: str | Path) -> tuple[LoadedRun, ...]:  # noqa: PLR0915
     """Load and validate every published run without consulting external sources."""
     archive = Path(root).absolute()
     runs_root = archive / "runs"
@@ -204,10 +226,12 @@ def load_archive(root: str | Path) -> tuple[LoadedRun, ...]:
         raise ContextError("published runs root is not a regular directory")
     loaded: list[LoadedRun] = []
     for run_root in sorted(runs_root.iterdir(), key=lambda path: path.name):
-        _inside(run_root, runs_root)
+        _ensure_within(run_root, runs_root)
         if not run_root.is_dir() or run_root.is_symlink():
             raise ContextError("published run is not a regular directory")
         run = _json_file(run_root / "run.json", "run manifest")
+        if {path.name for path in run_root.iterdir()} != {"run.json", "snapshots"}:
+            raise ContextError("published run contains unregistered entries")
         if (
             run.get("format_version") != FORMAT_VERSION
             or run.get("run_id") != run_root.name
@@ -251,6 +275,34 @@ def load_archive(root: str | Path) -> tuple[LoadedRun, ...]:
         }
         if actual_snapshot_paths != listed_paths:
             raise ContextError("run snapshots do not match its manifest")
+        expected_object_kinds: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                raise ContextError("run snapshot entry is invalid")
+            try:
+                snapshot_path = _archive_relative_path(entry["path"])
+            except ArchiveError:
+                raise ContextError("run snapshot entry is invalid") from None
+            if (
+                len(snapshot_path.parts) != _SNAPSHOT_PATH_PARTS
+                or snapshot_path.parts[0] != "snapshots"
+            ):
+                raise ContextError("run snapshot entry is invalid")
+            expected_object_kinds.add(snapshot_path.parts[1])
+        actual_object_kinds = {path.name for path in snapshots_root.iterdir()}
+        if actual_object_kinds != expected_object_kinds:
+            raise ContextError("snapshot object directories do not match its manifest")
+        for object_root in snapshots_root.iterdir():
+            if not object_root.is_dir() or object_root.is_symlink():
+                raise ContextError("snapshot object directory is invalid")
+            expected_snapshots = {
+                PurePosixPath(entry["path"]).parts[2]
+                for entry in entries
+                if entry["path"].startswith(f"snapshots/{object_root.name}/")
+            }
+            actual_snapshots = {path.name for path in object_root.iterdir()}
+            if actual_snapshots != expected_snapshots:
+                raise ContextError("snapshot directories do not match its manifest")
         snapshots = tuple(_load_snapshot(run_root, run, entry) for entry in entries)
         loaded.append(LoadedRun(run, snapshots))
     return tuple(loaded)
@@ -268,6 +320,15 @@ def _timestamps(value: Any) -> list[datetime]:
                 try:
                     found.append(ContextRequest._endpoint(child))
                 except ContextError:
+                    continue
+            if (
+                key in _NUMERIC_TIMESTAMP_KEYS
+                and isinstance(child, (int, float))
+                and not isinstance(child, bool)
+            ):
+                try:
+                    found.append(datetime.fromtimestamp(child / 1000, tz=UTC))
+                except OverflowError, OSError, ValueError:
                     continue
             found.extend(_timestamps(child))
     elif isinstance(value, list):
@@ -292,27 +353,55 @@ def extract_context(
     request: ContextRequest, runs: tuple[LoadedRun, ...]
 ) -> ContextExtractionResult:
     """Build a disposable result whose items directly reference loaded snapshots."""
-    items: list[ContextItem] = []
+    grouped: dict[tuple[str, str, str, str], list[LoadedSnapshot]] = {}
+    timestamp_map: dict[int, list[datetime]] = {}
     gaps: list[dict[str, str]] = []
     for run in runs:
         for snapshot in run.snapshots:
             timestamps = _snapshot_timestamps(snapshot)
-            selected = [
-                value for value in timestamps if request.start <= value < request.end
-            ]
-            if not selected:
-                continue
-            roles: tuple[str, ...] = ("in_range_record",)
-            if any(value < request.start for value in timestamps):
-                roles += ("prior_background",)
-            relative = (
-                f"{snapshot.manifest['source_kind']}/{encode_path_id(run.manifest['source']['scope_id'])}/"
-                f"{snapshot.manifest['object_kind']}/{encode_path_id(snapshot.manifest['source_id'])}"
+            timestamp_map[id(snapshot)] = timestamps
+            key = (
+                snapshot.manifest["source_kind"],
+                run.manifest["source"]["scope_id"],
+                snapshot.manifest["object_kind"],
+                snapshot.manifest["source_id"],
             )
-            reasons = ("source_record_in_range",)
-            items.append(ContextItem(snapshot, reasons, roles, relative))
+            grouped.setdefault(key, []).append(snapshot)
+    items: list[ContextItem] = []
+    for key, snapshots in grouped.items():
+        all_timestamps = [
+            value for snapshot in snapshots for value in timestamp_map[id(snapshot)]
+        ]
+        if not any(request.start <= value < request.end for value in all_timestamps):
+            continue
+        roles: list[str] = ["in_range_record"]
+        if any(value < request.start for value in all_timestamps):
+            roles.append("prior_background")
+        if any(value >= request.end for value in all_timestamps):
+            roles.append("later_development")
+        if any(_has_observed_state(snapshot) for snapshot in snapshots):
+            roles.append("observed_state")
+        relative = (
+            f"{key[0]}/{encode_path_id(key[1])}/{key[2]}/{encode_path_id(key[3])}"
+        )
+        items.append(
+            ContextItem(
+                tuple(sorted(snapshots, key=lambda snapshot: snapshot.run["run_id"])),
+                ("source_record_in_range",),
+                tuple(roles),
+                relative,
+            )
+        )
     items.sort(key=lambda item: (item.path, item.source.run["run_id"]))
     return ContextExtractionResult(request, runs, tuple(items), tuple(gaps))
+
+
+def _has_observed_state(snapshot: LoadedSnapshot) -> bool:
+    return any(
+        marker in content.decode("utf-8", errors="ignore")
+        for content in snapshot.evidence.values()
+        for marker in ('"isResolved"', '"isOutdated"', '"status"')
+    )
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -335,10 +424,25 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
         for item in result.items:
             item_root = staging.joinpath(*PurePosixPath(item.path).parts)
             item_root.mkdir(parents=True, exist_ok=True)
-            for name, content in sorted(item.source.evidence.items()):
-                destination = item_root.joinpath(*PurePosixPath(name).parts)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(content)
+            provenance: list[dict[str, Any]] = []
+            for snapshot in item.snapshots:
+                run = snapshot.run
+                run_id = run["run_id"]
+                observation_root = item_root / "observations" / run_id
+                for name, content in sorted(snapshot.evidence.items()):
+                    destination = observation_root.joinpath(*PurePosixPath(name).parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(content)
+                provenance.append(
+                    {
+                        "run_id": run_id,
+                        "source": run["source"],
+                        "collection_range": run["collection_range"],
+                        "coverage": run.get("coverage", {}),
+                        "snapshot": snapshot.manifest,
+                        "output_path": f"{item.path}/observations/{run_id}",
+                    }
+                )
             item_manifests.append(
                 {
                     "source_kind": item.source.manifest["source_kind"],
@@ -348,10 +452,7 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
                     "inclusion_reasons": list(item.reasons),
                     "temporal_roles": list(item.temporal_roles),
                     "path": item.path,
-                    "provenance": {
-                        "run_id": item.source.run["run_id"],
-                        "snapshot": item.source.manifest,
-                    },
+                    "provenance": provenance,
                 }
             )
         inventory = sorted(
