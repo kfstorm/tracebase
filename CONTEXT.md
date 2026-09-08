@@ -49,7 +49,7 @@ The start and end of the collector's observation of one source object. It is dis
 _Avoid_: Snapshot time, source update time
 
 **Context Extraction Result**:
-A disposable, in-memory result derived offline from the current archive for a mandatory, explicit half-open work time range. It distinguishes in-range source records from prior background, later developments, and observed state, retaining source-specific meaning, inclusion reasons, direct references to the loaded source objects, and uncertainty. It is not serialized independently: the same process uses it to assemble consumer input from those objects. Its work time range is distinct from Collection Range; the result is neither Source-native Evidence, a Snapshot, nor a synchronized view of the source.
+A disposable, in-memory result derived offline from the current archive for a mandatory, explicit half-open work time range. The shared v1 foundation groups every loaded Snapshot by Source Item identity and retains direct references to the loaded source objects without treating Observation Window as work time or interpreting source-native records. Source-specific projections later select source records for the requested range and add inclusion meaning, relations, and uncertainty. It is not serialized independently: the same process uses it to assemble consumer input from those objects. Its work time range is distinct from Collection Range; the result is neither Source-native Evidence, a Snapshot, nor a synchronized view of the source.
 _Avoid_: Projection, synchronized view
 
 **Context Output**:

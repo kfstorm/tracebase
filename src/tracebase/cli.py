@@ -10,6 +10,7 @@ from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
 from .collector import CollectionContext, CollectionResult
+from .context import ContextError, ContextRequest, generate_context
 from .github import collect as collect_github
 from .github import resolve_context as resolve_github_context
 from .opencode import (
@@ -84,6 +85,11 @@ def _parser() -> argparse.ArgumentParser:
         source_parser.add_argument("--to", dest="to_text", required=True)
         if source == "opencode":
             source_parser.add_argument("--instance-id", required=True)
+    context = commands.add_parser("context", add_help=True, allow_abbrev=False)
+    context.add_argument("--archive", required=True)
+    context.add_argument("--from", dest="from_text", required=True)
+    context.add_argument("--to", dest="to_text", required=True)
+    context.add_argument("--output", required=True)
     return parser
 
 
@@ -91,7 +97,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Intentionally let collection/orchestration exceptions propagate.
     # Progress output provides context while the original traceback remains
     # visible for debugging; source content and credentials stay excluded.
-    arguments = _parser().parse_args(argv)
+    try:
+        arguments = _parser().parse_args(argv)
+    except ArchiveError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    if arguments.command == "context":
+        try:
+            request = ContextRequest.parse(arguments.from_text, arguments.to_text)
+            published = generate_context(arguments.archive, request, arguments.output)
+        except ContextError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        except OSError, TypeError, ValueError, RuntimeError:
+            print("context operation failed", file=sys.stderr)
+            return 1
+        print(f"context output published at {published}")
+        return 0
     collection_range = CollectionRange.parse(arguments.from_text, arguments.to_text)
     archive = Archive(arguments.archive)
     run_id = archive.new_run_id()

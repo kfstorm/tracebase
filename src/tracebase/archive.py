@@ -18,6 +18,7 @@ FORMAT_VERSION = 1
 _PATH_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _ARCHIVE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
 _FRACTIONAL_SECOND_PATTERN = re.compile(r"[.,]")
+_SNAPSHOT_PATH_PARTS = 3
 
 
 class ArchiveError(ValueError):
@@ -206,6 +207,233 @@ class Snapshot:
     evidence_files: tuple[dict[str, Any], ...] = ()
     selection_provenance: tuple[dict[str, Any], ...] = ()
     metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class PublishedSnapshot:
+    """A validated Snapshot read from a published Collection Run."""
+
+    run: dict[str, Any]
+    manifest: dict[str, Any]
+    evidence: dict[str, bytes]
+    root: Path
+
+
+@dataclass(frozen=True)
+class PublishedRun:
+    """A validated published Collection Run."""
+
+    manifest: dict[str, Any]
+    snapshots: tuple[PublishedSnapshot, ...]
+
+
+def _read_published_object(path: Path, label: str) -> dict[str, Any]:
+    if not _is_regular_file(path):
+        raise ArchiveError(f"{label} is not a regular file")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, json.JSONDecodeError:
+        raise ArchiveError(f"{label} is invalid") from None
+    if not isinstance(value, dict):
+        raise ArchiveError(f"{label} is invalid")
+    return value
+
+
+def _published_snapshot_path(entry: Any) -> PurePosixPath:
+    if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+        raise ArchiveError("run snapshot entry is invalid")
+    path = _archive_relative_path(entry["path"])
+    if len(path.parts) != _SNAPSHOT_PATH_PARTS or path.parts[0] != "snapshots":
+        raise ArchiveError("run snapshot entry is invalid")
+    return path
+
+
+def _parse_published_timestamp(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ArchiveError("run timestamps are invalid")
+    normalized = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ArchiveError("run timestamps are invalid") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ArchiveError("run timestamps are invalid")
+    return parsed
+
+
+def _parse_observation_window(value: Any) -> tuple[datetime, datetime]:
+    if not isinstance(value, dict):
+        raise ArchiveError("snapshot observation window is invalid")
+    try:
+        start = _parse_published_timestamp(value["from"])
+        end = _parse_published_timestamp(value["to"])
+    except ArchiveError, KeyError, TypeError:
+        raise ArchiveError("snapshot observation window is invalid") from None
+    if start >= end:
+        raise ArchiveError("snapshot observation window is invalid")
+    return start, end
+
+
+def _validate_published_run(run_root: Path) -> dict[str, Any]:
+    run = _read_published_object(run_root / "run.json", "run manifest")
+    if (
+        run.get("format_version") != FORMAT_VERSION
+        or run.get("run_id") != run_root.name
+    ):
+        raise ArchiveError("run manifest identity is invalid")
+    source = run.get("source")
+    if (
+        not isinstance(source, dict)
+        or not isinstance(source.get("kind"), str)
+        or not source["kind"]
+        or not isinstance(source.get("scope_id"), str)
+        or not source["scope_id"]
+    ):
+        raise ArchiveError("run source identity is invalid")
+    _validate_archive_type(source["kind"], "source kind")
+    if not isinstance(run.get("coverage"), dict):
+        raise ArchiveError("run coverage is invalid")
+    if not isinstance(run.get("collector"), dict):
+        raise ArchiveError("run collector is invalid")
+    if (
+        not isinstance(run["collector"].get("version"), str)
+        or not run["collector"]["version"]
+    ):
+        raise ArchiveError("run collector is invalid")
+    if not isinstance(run["collector"].get("effective_options"), dict):
+        raise ArchiveError("run collector is invalid")
+    try:
+        CollectionRange.parse(
+            run["collection_range"]["from"], run["collection_range"]["to"]
+        )
+        started = _parse_published_timestamp(run["started_at"])
+        completed = _parse_published_timestamp(run["completed_at"])
+    except ArchiveError, KeyError, TypeError:
+        raise ArchiveError("run timestamps or collection range are invalid") from None
+    if started > completed:
+        raise ArchiveError("run timestamps are invalid")
+    if not isinstance(run.get("snapshots"), list):
+        raise ArchiveError("run snapshots are invalid")
+    return run
+
+
+def _load_published_snapshot(
+    run_root: Path, run: dict[str, Any], entry: Any
+) -> PublishedSnapshot:
+    path = _published_snapshot_path(entry)
+    try:
+        source_kind = entry["source_kind"]
+        object_kind = entry["object_kind"]
+        source_id = entry["source_id"]
+    except KeyError:
+        raise ArchiveError("run snapshot entry is invalid") from None
+    if not all(
+        isinstance(value, str) and value
+        for value in (source_kind, object_kind, source_id)
+    ):
+        raise ArchiveError("snapshot identity is invalid")
+    _validate_archive_type(source_kind, "source kind")
+    _validate_archive_type(object_kind, "object kind")
+    if source_kind != run["source"]["kind"]:
+        raise ArchiveError("snapshot source kind is inconsistent")
+    expected = PurePosixPath("snapshots", object_kind, encode_path_id(source_id))
+    if path != expected:
+        raise ArchiveError("snapshot path identity is inconsistent")
+    root = run_root.joinpath(*path.parts)
+    _ensure_inside(root, run_root / "snapshots")
+    if not root.is_dir() or root.is_symlink():
+        raise ArchiveError("snapshot directory is not regular")
+    manifest = _read_published_object(root / "snapshot.json", "snapshot manifest")
+    if (
+        manifest.get("format_version") != FORMAT_VERSION
+        or manifest.get("source_kind") != source_kind
+        or manifest.get("object_kind") != object_kind
+        or manifest.get("source_id") != source_id
+    ):
+        raise ArchiveError("snapshot manifest identity is inconsistent")
+    _parse_observation_window(manifest.get("observation_window"))
+    declared = _normalize_evidence_files(manifest.get("evidence_files"))
+    evidence: dict[str, bytes] = {}
+    for descriptor in declared:
+        evidence_path = root.joinpath(*PurePosixPath(descriptor["path"]).parts)
+        _ensure_inside(evidence_path, root)
+        if not _is_regular_file(evidence_path):
+            raise ArchiveError("declared evidence file is missing or not regular")
+        try:
+            evidence[descriptor["path"]] = evidence_path.read_bytes()
+        except OSError:
+            raise ArchiveError("declared evidence file is unreadable") from None
+    actual: set[str] = set()
+    for child in root.rglob("*"):
+        _ensure_inside(child, root)
+        if child == root / "snapshot.json" or child.is_dir():
+            continue
+        if not _is_regular_file(child):
+            raise ArchiveError("snapshot contains a non-regular evidence entry")
+        actual.add(child.relative_to(root).as_posix())
+    if actual != set(evidence):
+        raise ArchiveError("snapshot evidence files do not match its manifest")
+    return PublishedSnapshot(run, manifest, evidence, root)
+
+
+def load_published_archive(root: str | Path) -> tuple[PublishedRun, ...]:
+    """Load every published run using only the shared archive contract."""
+    archive = Path(root).absolute()
+    if not archive.exists():
+        raise ArchiveError("archive root does not exist")
+    if not archive.is_dir() or archive.is_symlink():
+        raise ArchiveError("archive root is not a regular directory")
+    runs_root = archive / "runs"
+    if runs_root.is_symlink():
+        raise ArchiveError("published runs root is not a regular directory")
+    if not runs_root.exists():
+        return ()
+    if not runs_root.is_dir():
+        raise ArchiveError("published runs root is not a regular directory")
+    loaded: list[PublishedRun] = []
+    for run_root in sorted(runs_root.iterdir(), key=lambda path: path.name):
+        _ensure_inside(run_root, runs_root)
+        if not run_root.is_dir() or run_root.is_symlink():
+            raise ArchiveError("published run is not a regular directory")
+        if {path.name for path in run_root.iterdir()} != {"run.json", "snapshots"}:
+            raise ArchiveError("published run contains unregistered entries")
+        run = _validate_published_run(run_root)
+        entries = run["snapshots"]
+        paths = [_published_snapshot_path(entry).as_posix() for entry in entries]
+        if len(paths) != len(set(paths)):
+            raise ArchiveError("run snapshot paths are not unique")
+        snapshots_root = run_root / "snapshots"
+        if not snapshots_root.is_dir() or snapshots_root.is_symlink():
+            raise ArchiveError("run snapshot root is invalid")
+        actual_paths = {
+            path.parent.relative_to(run_root).as_posix()
+            for path in snapshots_root.glob("*/*/snapshot.json")
+            if _is_regular_file(path)
+        }
+        if actual_paths != set(paths):
+            raise ArchiveError("run snapshots do not match its manifest")
+        expected_by_kind: dict[str, set[str]] = {}
+        for path in paths:
+            relative = PurePosixPath(path)
+            expected_by_kind.setdefault(relative.parts[1], set()).add(relative.parts[2])
+        if {path.name for path in snapshots_root.iterdir()} != set(expected_by_kind):
+            raise ArchiveError("snapshot object directories do not match its manifest")
+        for kind_root in snapshots_root.iterdir():
+            if not kind_root.is_dir() or kind_root.is_symlink():
+                raise ArchiveError("snapshot object directory is invalid")
+            if {path.name for path in kind_root.iterdir()} != expected_by_kind[
+                kind_root.name
+            ]:
+                raise ArchiveError("snapshot directories do not match its manifest")
+            if any(
+                not path.is_dir() or path.is_symlink() for path in kind_root.iterdir()
+            ):
+                raise ArchiveError("snapshot directory is not regular")
+        snapshots = tuple(
+            _load_published_snapshot(run_root, run, entry) for entry in entries
+        )
+        loaded.append(PublishedRun(run, snapshots))
+    return tuple(loaded)
 
 
 class Archive:
