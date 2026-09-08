@@ -287,6 +287,9 @@ def test_github_context_projects_native_records_without_fix_inference(
     }
     assert projection["gaps"] == []
     assert next(
+        record for record in projection["records"] if record["kind"] == "aggregate-diff"
+    )["limitations"] == ["does_not_establish_fix_or_commit"]
+    assert next(
         record
         for record in projection["records"]
         if record["kind"] == "ordinary-comment"

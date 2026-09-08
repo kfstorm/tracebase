@@ -288,6 +288,7 @@ def project_github(  # noqa: PLR0915
                     "kind": "aggregate-diff",
                     "native_id": source_id,
                     "timestamps": {},
+                    "limitations": ["does_not_establish_fix_or_commit"],
                     "representations": [
                         {
                             "evidence_path": "pull-request.diff",
