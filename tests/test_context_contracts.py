@@ -137,7 +137,8 @@ def test_github_context_projects_native_records_without_fix_inference(
             "body": (
                 "See https://github.com/example/repo/issues/99 and "
                 "https://github.com/example/repo/issues/99, not "
-                "https://github.com/example/repo/issues/99x"
+                "https://github.com/example/repo/issues/99x; then "
+                "<https://github.com/example/repo/issues/99>"
             ),
             "html_url": "https://github.com/example/repo/pull/1",
             "user": {"login": "author"},
@@ -154,6 +155,11 @@ def test_github_context_projects_native_records_without_fix_inference(
             {"id": 10, "event": "commented"},
             {"id": 20, "event": "reviewed", "actor": {"login": "reviewer"}},
             {"id": 40, "event": "closed", "actor": {"login": "closer"}},
+            {
+                "id": 50,
+                "event": "cross-referenced",
+                "source": {"issue": {"node_id": "SOURCE_PR"}},
+            },
             {
                 "node_id": "commit-first",
                 "event": "committed",
@@ -298,6 +304,7 @@ def test_github_context_projects_native_records_without_fix_inference(
     assert thread["representations"][0]["value"]["isResolved"]
     assert {relation["kind"] for relation in projection["relations"]} == {
         "inline-reply",
+        "cross-referenced",
         "review-inline-comment",
         "thread-inline-comment",
     }
@@ -360,7 +367,7 @@ def test_github_context_projects_native_records_without_fix_inference(
         for relation in manifest["relations"]
         if relation["kind"] == "explicit-github-reference"
     ]
-    assert len(references) == 2
+    assert len(references) == 3
     assert all(
         relation["url"] == "https://github.com/example/repo/issues/99"
         and relation["target_native_ids"] == ["ISSUE_99"]

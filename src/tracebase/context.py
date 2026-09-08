@@ -28,7 +28,8 @@ _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "opencode": {"session"},
 }
 _GITHUB_ITEM_URL = re.compile(
-    r"https://github\.com/[^/\s]+/[^/\s]+/(?:issues|pull)/\d+(?=$|[?#\s),.;:!])"
+    r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+/"
+    r"(?:issues|pull)/\d+(?=$|[?#\s\])}>\"',.;:!])"
 )
 
 
