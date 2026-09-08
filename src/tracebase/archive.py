@@ -379,6 +379,10 @@ def _load_published_snapshot(
 def load_published_archive(root: str | Path) -> tuple[PublishedRun, ...]:
     """Load every published run using only the shared archive contract."""
     archive = Path(root).absolute()
+    if not archive.exists():
+        raise ArchiveError("archive root does not exist")
+    if not archive.is_dir() or archive.is_symlink():
+        raise ArchiveError("archive root is not a regular directory")
     runs_root = archive / "runs"
     if runs_root.is_symlink():
         raise ArchiveError("published runs root is not a regular directory")

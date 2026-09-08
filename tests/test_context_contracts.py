@@ -90,9 +90,10 @@ def test_empty_archive_is_a_complete_deterministic_output(tmp_path: Path) -> Non
     assert manifest["source_items"] == []
     assert manifest["relations"] == []
     assert manifest["unresolved_references"] == []
+    assert manifest["gaps"] == []
 
 
-def test_context_selects_archive_observation_windows_without_payload_interpretation(
+def test_context_groups_all_archive_observations_without_payload_interpretation(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -111,7 +112,7 @@ def test_context_selects_archive_observation_windows_without_payload_interpretat
     )
     items = json.loads((output / "context.json").read_text())["source_items"]
     assert len(items) == 1
-    assert [entry["run_id"] for entry in items[0]["provenance"]] == ["in"]
+    assert [entry["run_id"] for entry in items[0]["provenance"]] == ["before", "in"]
     assert "inclusion_reasons" not in items[0]
     assert "temporal_roles" not in items[0]
 
@@ -155,6 +156,29 @@ def test_shared_archive_loader_accepts_unknown_provider_payloads(
     run.publish({})
     loaded = load_archive(archive.root)
     assert loaded[0].snapshots[0].evidence == {"payload.bin": b"{}"}
+    with pytest.raises(ContextError, match="unsupported context source"):
+        generate_context(
+            archive.root,
+            ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+            tmp_path / "output",
+        )
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "symlink"])
+def test_context_rejects_an_invalid_archive_root(tmp_path: Path, kind: str) -> None:
+    archive = tmp_path / "archive"
+    if kind == "file":
+        archive.write_text("not an archive")
+    elif kind == "symlink":
+        target = tmp_path / "target"
+        target.mkdir()
+        archive.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ContextError, match="archive root"):
+        generate_context(
+            archive,
+            ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+            tmp_path / "output",
+        )
 
 
 def test_archive_loader_accepts_fractional_observation_windows(tmp_path: Path) -> None:
@@ -302,10 +326,10 @@ def test_context_publication_failure_is_atomic(
     archive.mkdir()
     _archive_with_snapshot(archive)
 
-    def fail_publish(*_args: object) -> None:
+    def fail_rename(*_args: object) -> None:
         raise OSError()
 
-    monkeypatch.setattr(context_module, "_publish_staging", fail_publish)
+    monkeypatch.setattr(Path, "rename", fail_rename)
     with pytest.raises(ContextError, match="publication failed"):
         generate_context(
             archive,
@@ -314,40 +338,6 @@ def test_context_publication_failure_is_atomic(
         )
     assert not (tmp_path / "output").exists()
     assert list(tmp_path.glob(".output.*")) == []
-
-
-def test_context_publication_does_not_replace_a_racing_target(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    archive = tmp_path / "archive"
-    archive.mkdir()
-    _archive_with_snapshot(archive)
-    output = tmp_path / "output"
-
-    def race(_staging: Path, target: Path) -> None:
-        target.mkdir()
-        raise ContextError("context output already exists")
-
-    monkeypatch.setattr(context_module, "_publish_staging", race)
-    with pytest.raises(ContextError, match="already exists"):
-        generate_context(
-            archive,
-            ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
-            output,
-        )
-    assert output.is_dir()
-    assert list(output.iterdir()) == []
-
-
-def test_native_publication_rejects_an_existing_target(tmp_path: Path) -> None:
-    staging = tmp_path / "staging"
-    target = tmp_path / "output"
-    staging.mkdir()
-    target.mkdir()
-    with pytest.raises(ContextError, match="already exists"):
-        context_module._publish_staging(staging, target)
-    assert staging.is_dir()
-    assert target.is_dir()
 
 
 def test_context_cleanup_failure_is_safe(

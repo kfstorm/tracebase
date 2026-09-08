@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import json
-import os
 import re
 import shutil
-import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,10 +22,10 @@ from .archive import (
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
 )
-_AT_FDCWD = -2 if sys.platform == "darwin" else -100
-_RENAME_NOREPLACE = 1
-_RENAME_EXCL = 4
-_WINDOWS_EXISTS_ERRORS = {80, 183}
+_SUPPORTED_CONTEXT_OBJECT_KINDS = {
+    "github": {"issue", "pull-request"},
+    "opencode": {"session"},
+}
 
 
 class ContextError(ArchiveError):
@@ -90,7 +86,6 @@ class ContextExtractionResult:
     request: ContextRequest
     runs: tuple[PublishedRun, ...]
     items: tuple[ContextItem, ...]
-    relations: tuple[dict[str, Any], ...] = ()
 
 
 def load_archive(root: str | Path) -> tuple[PublishedRun, ...]:
@@ -114,22 +109,25 @@ def _item_path(key: tuple[str, str, str, str]) -> str:
     return f"{key[0]}/{encode_path_id(key[1])}/{key[2]}/{encode_path_id(key[3])}"
 
 
-def _window_intersects(snapshot: PublishedSnapshot, request: ContextRequest) -> bool:
-    window = snapshot.manifest["observation_window"]
-    start = ContextRequest._endpoint(window["from"])
-    end = ContextRequest._endpoint(window["to"])
-    return start < request.end and request.start < end
+def _validate_context_source(snapshot: PublishedSnapshot) -> None:
+    source_kind = snapshot.manifest["source_kind"]
+    supported_kinds = _SUPPORTED_CONTEXT_OBJECT_KINDS.get(source_kind)
+    if (
+        supported_kinds is None
+        or snapshot.manifest["object_kind"] not in supported_kinds
+    ):
+        raise ContextError("unsupported context source")
 
 
 def extract_context(
     request: ContextRequest, runs: tuple[PublishedRun, ...]
 ) -> ContextExtractionResult:
-    """Group Archive-level observations without provider-native interpretation."""
+    """Group all supported Archive objects without source-record interpretation."""
     grouped: dict[tuple[str, str, str, str], list[PublishedSnapshot]] = {}
     for run in runs:
         for snapshot in run.snapshots:
-            if _window_intersects(snapshot, request):
-                grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
+            _validate_context_source(snapshot)
+            grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
     items = tuple(
         ContextItem(
             tuple(sorted(snapshots, key=lambda value: value.run["run_id"])),
@@ -154,61 +152,6 @@ def _cleanup_staging(staging: Path) -> None:
         shutil.rmtree(staging)
     except OSError:
         raise ContextError("context output cleanup failed") from None
-
-
-def _publish_posix_exclusive(
-    library_name: str | None, symbol: str, flag: int, staging: Path, target: Path
-) -> None:
-    library = ctypes.CDLL(library_name, use_errno=True)
-    rename = getattr(library, symbol, None)
-    if rename is None:
-        raise ContextError("atomic context publication is unavailable")
-    rename.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    rename.restype = ctypes.c_int
-    if (
-        rename(
-            _AT_FDCWD,
-            str(staging).encode(),
-            _AT_FDCWD,
-            str(target).encode(),
-            flag,
-        )
-        == 0
-    ):
-        return
-    if ctypes.get_errno() == errno.EEXIST:
-        raise ContextError("context output already exists")
-    raise OSError("atomic context publication failed")
-
-
-def _publish_windows_exclusive(staging: Path, target: Path) -> None:
-    move_file = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW  # type: ignore[attr-defined]
-    move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
-    move_file.restype = ctypes.c_int
-    if move_file(str(staging), str(target), 0):
-        return
-    if ctypes.get_last_error() in _WINDOWS_EXISTS_ERRORS:  # type: ignore[attr-defined]
-        raise ContextError("context output already exists")
-    raise OSError("atomic context publication failed")
-
-
-def _publish_staging(staging: Path, target: Path) -> None:
-    """Atomically publish without replacing a path created after validation."""
-    if os.name == "nt":
-        _publish_windows_exclusive(staging, target)
-        return
-    if sys.platform == "darwin":
-        _publish_posix_exclusive(
-            "/usr/lib/libSystem.B.dylib", "renameatx_np", _RENAME_EXCL, staging, target
-        )
-        return
-    _publish_posix_exclusive(None, "renameat2", _RENAME_NOREPLACE, staging, target)
 
 
 def _render_source_view(item_root: Path, item: ContextItem) -> str:
@@ -289,7 +232,7 @@ def _render_index(
             for item in items
         )
     else:
-        lines.append("No source items were selected.")
+        lines.append("No source items are available.")
     (staging / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -307,8 +250,9 @@ def _render_manifest(
             "schema_version": 1,
             "request": {"from": result.request.from_text, "to": result.request.to_text},
             "source_items": items,
-            "relations": list(result.relations),
+            "relations": [],
             "unresolved_references": [],
+            "gaps": [],
             "output_inventory": [*inventory, "context.json"],
         },
     )
@@ -325,10 +269,8 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
         items = [_render_item(staging, item) for item in result.items]
         _render_index(staging, result, items)
         _render_manifest(staging, result, items)
-        _publish_staging(staging, target)
+        staging.rename(target)
         return target
-    except ContextError:
-        raise
     except OSError, TypeError, ValueError:
         raise ContextError("context output publication failed") from None
     finally:
