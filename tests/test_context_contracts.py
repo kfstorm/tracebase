@@ -117,7 +117,7 @@ def test_context_groups_all_archive_observations_without_payload_interpretation(
     assert "temporal_roles" not in items[0]
 
 
-def test_github_context_projects_native_records_without_fix_inference(
+def test_github_context_projects_native_records_without_fix_inference(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -149,7 +149,8 @@ def test_github_context_projects_native_records_without_fix_inference(
         "comments.001.json": [
             {
                 "id": 10,
-                "created_at": "2026-01-01T00:15:00Z",
+                "created_at": "2025-12-31T23:15:00Z",
+                "updated_at": "2026-01-01T00:25:00Z",
                 "user": {"login": "reviewer"},
             }
         ],
@@ -296,17 +297,29 @@ def test_github_context_projects_native_records_without_fix_inference(
         record
         for record in projection["records"]
         if record["kind"] == "ordinary-comment"
-    )["temporal_roles"] == ["in_range_work"]
+    )["temporal_roles"] == ["in_range_work", "earlier_background"]
     ordinary_comment = next(
         record
         for record in projection["records"]
         if record["kind"] == "ordinary-comment"
     )
     assert len(ordinary_comment["representations"]) == 2
+    review_index = next(
+        index
+        for index, record in enumerate(projection["records"])
+        if record["kind"] == "review"
+    )
+    comment_index = next(
+        index
+        for index, record in enumerate(projection["records"])
+        if record["kind"] == "ordinary-comment"
+    )
+    assert review_index < comment_index
     review = next(
         record for record in projection["records"] if record["kind"] == "review"
     )
     assert len(review["representations"]) == 2
+    assert review["actor"] == {"login": "reviewer"}
     lifecycle = next(
         record for record in projection["records"] if record["native_id"] == "40"
     )
@@ -322,6 +335,7 @@ def test_github_context_projects_native_records_without_fix_inference(
     pull_request = next(
         record for record in projection["records"] if record["kind"] == "pull-request"
     )
+    assert "actor" not in pull_request
     assert {
         representation["run_id"] for representation in pull_request["representations"]
     } == {

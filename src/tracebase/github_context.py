@@ -42,7 +42,7 @@ def _timestamp(value: Any) -> datetime | None:
 
 
 def _actor(value: dict[str, Any]) -> dict[str, str] | None:
-    source = value.get("user", value.get("actor"))
+    source = value.get("actor")
     login = source.get("login") if isinstance(source, dict) else None
     return {"login": login} if isinstance(login, str) else None
 
@@ -172,21 +172,31 @@ def _roles(record: dict[str, Any], start: datetime, end: datetime) -> tuple[str,
     return ("observed_state",)
 
 
-def _record_sort_key(record: dict[str, Any]) -> tuple[int, float, str, str]:
+def _record_sort_key(
+    record: dict[str, Any], start: datetime, end: datetime
+) -> tuple[int, float, str, str]:
     timestamps = [
         timestamp
         for representation in record["representations"]
         if isinstance(representation["value"], dict)
         for timestamp in _occurrence_times(representation["value"])
     ]
-    if timestamps:
+    in_range = [timestamp for timestamp in timestamps if start <= timestamp < end]
+    if in_range:
         return (
             0,
+            min(timestamp.timestamp() for timestamp in in_range),
+            record["kind"],
+            record["native_id"],
+        )
+    if timestamps:
+        return (
+            1,
             min(timestamp.timestamp() for timestamp in timestamps),
             record["kind"],
             record["native_id"],
         )
-    return (1, 0.0, record["kind"], record["native_id"])
+    return (2, 0.0, record["kind"], record["native_id"])
 
 
 def project_github(  # noqa: PLR0915
@@ -347,7 +357,7 @@ def project_github(  # noqa: PLR0915
     ordered = tuple(
         sorted(
             records.values(),
-            key=_record_sort_key,
+            key=lambda record: _record_sort_key(record, start, end),
         )
     )
     selected = [
