@@ -27,6 +27,9 @@ _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "github": {"issue", "pull-request"},
     "opencode": {"session"},
 }
+_GITHUB_ITEM_URL = re.compile(
+    r"https://github\.com/[^/\s]+/[^/\s]+/(?:issues|pull)/\d+"
+)
 
 
 class ContextError(ArchiveError):
@@ -279,6 +282,28 @@ def _render_manifest(
         if path.is_file()
     )
     github = [item.github for item in result.items if item.github is not None]
+    known_urls = {
+        value
+        for projection in github
+        for record in projection.records
+        for representation in record["representations"]
+        for value in (
+            [representation["value"].get("html_url")]
+            if isinstance(representation["value"], dict)
+            else []
+        )
+        if isinstance(value, str)
+    }
+    unresolved = sorted(
+        {
+            url
+            for projection in github
+            for record in projection.records
+            for representation in record["representations"]
+            for url in _GITHUB_ITEM_URL.findall(json.dumps(representation["value"]))
+            if url not in known_urls
+        }
+    )
     _write_json(
         staging / "context.json",
         {
@@ -288,7 +313,7 @@ def _render_manifest(
             "relations": [
                 relation for projection in github for relation in projection.relations
             ],
-            "unresolved_references": [],
+            "unresolved_references": [{"url": url} for url in unresolved],
             "gaps": [gap for projection in github for gap in projection.gaps],
             "output_inventory": [*inventory, "context.json"],
         },

@@ -280,6 +280,14 @@ def project_github(  # noqa: PLR0915
     selected = [
         record for record in ordered if "in_range_work" in _roles(record, start, end)
     ]
+    for record in ordered:
+        roles = _roles(record, start, end)
+        record["temporal_roles"] = roles
+        record["inclusion_reasons"] = (
+            ("in_range_source_record",)
+            if "in_range_work" in roles
+            else ("bounded_item_context",)
+        )
     return GitHubProjection(
         bool(selected),
         ("in_range_source_record",) if selected else (),
