@@ -28,7 +28,7 @@ _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "opencode": {"session"},
 }
 _GITHUB_ITEM_URL = re.compile(
-    r"https://github\.com/[^/\s]+/[^/\s]+/(?:issues|pull)/\d+"
+    r"https://github\.com/[^/\s]+/[^/\s]+/(?:issues|pull)/\d+(?=$|[?#\s),.;:!])"
 )
 
 
@@ -91,8 +91,8 @@ class ContextExtractionResult:
     request: ContextRequest
     runs: tuple[PublishedRun, ...]
     items: tuple[ContextItem, ...]
-    relations: tuple[dict[str, str], ...]
-    unresolved_references: tuple[dict[str, str], ...]
+    relations: tuple[dict[str, Any], ...]
+    unresolved_references: tuple[dict[str, Any], ...]
 
 
 def load_archive(root: str | Path) -> tuple[PublishedRun, ...]:
@@ -144,21 +144,18 @@ def extract_context(
             else None
         )
         all_items.append(ContextItem(ordered, _item_path(key), projection))
-    github_targets = {
-        value
-        for item in all_items
-        if item.github is not None
-        for record in item.github.records
-        for representation in record["representations"]
-        for value in [
-            representation["value"].get("html_url")
-            if isinstance(representation["value"], dict)
-            else None
-        ]
-        if isinstance(value, str)
-    }
-    relations: list[dict[str, str]] = []
-    unresolved: list[dict[str, str]] = []
+    github_targets: dict[str, set[str]] = {}
+    for item in all_items:
+        if item.github is None:
+            continue
+        for record in item.github.records:
+            for representation in record["representations"]:
+                value = representation["value"]
+                url = value.get("html_url") if isinstance(value, dict) else None
+                if isinstance(url, str):
+                    github_targets.setdefault(url, set()).add(record["native_id"])
+    relations: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
     for item in all_items:
         if item.github is None or not item.github.selected:
             continue
@@ -166,17 +163,29 @@ def extract_context(
             for representation in record["representations"]:
                 value = representation["value"]
                 body = value.get("body") if isinstance(value, dict) else None
-                for url in (
-                    _GITHUB_ITEM_URL.findall(body) if isinstance(body, str) else ()
-                ):
+                matches = (
+                    _GITHUB_ITEM_URL.finditer(body) if isinstance(body, str) else ()
+                )
+                for match in matches:
+                    url = match.group()
                     reference = {
                         "kind": "explicit-github-reference",
                         "from_path": item.path,
                         "from_native_id": record["native_id"],
+                        "occurrence_id": (
+                            f"{representation['run_id']}:"
+                            f"{representation['evidence_path']}:"
+                            f"{record['native_id']}:{match.start()}"
+                        ),
                         "url": url,
                     }
                     if url in github_targets:
-                        relations.append(reference)
+                        relations.append(
+                            {
+                                **reference,
+                                "target_native_ids": sorted(github_targets[url]),
+                            }
+                        )
                     else:
                         unresolved.append(reference)
     items = tuple(

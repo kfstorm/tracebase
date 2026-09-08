@@ -134,7 +134,11 @@ def test_github_context_projects_native_records_without_fix_inference(
             "node_id": source_id,
             "created_at": "2025-12-31T23:00:00Z",
             "updated_at": "2026-01-01T00:30:00Z",
-            "body": "See https://github.com/example/repo/issues/99",
+            "body": (
+                "See https://github.com/example/repo/issues/99 and "
+                "https://github.com/example/repo/issues/99, not "
+                "https://github.com/example/repo/issues/99x"
+            ),
             "html_url": "https://github.com/example/repo/pull/1",
             "user": {"login": "author"},
         },
@@ -351,9 +355,18 @@ def test_github_context_projects_native_records_without_fix_inference(
         in (output / item["view_path"]).read_text()
     )
     assert manifest["unresolved_references"] == []
-    assert (
-        manifest["relations"][-1]["url"] == "https://github.com/example/repo/issues/99"
+    references = [
+        relation
+        for relation in manifest["relations"]
+        if relation["kind"] == "explicit-github-reference"
+    ]
+    assert len(references) == 2
+    assert all(
+        relation["url"] == "https://github.com/example/repo/issues/99"
+        and relation["target_native_ids"] == ["ISSUE_99"]
+        for relation in references
     )
+    assert references[0]["occurrence_id"] != references[1]["occurrence_id"]
     assert "fixed" not in (output / item["view_path"]).read_text().lower()
 
 
