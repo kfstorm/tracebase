@@ -210,6 +210,36 @@ def test_github_context_projects_native_records_without_fix_inference(
         content = value if isinstance(value, str) else json.dumps(value)
         run.write_evidence(snapshot, name, content.encode())
     run.publish({})
+    later = _run(
+        archive,
+        "github-run-later",
+        "2026-01-02T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        source_kind="github",
+        scope_id="tracked-actor",
+    )
+    later_snapshot = later.write_snapshot(
+        Snapshot(
+            "github",
+            "pull-request",
+            source_id,
+            later.collection_range.as_manifest(),
+            ({"path": "issue.json"}, {"path": "pull-request.json"}),
+        )
+    )
+    later.write_evidence(
+        later_snapshot,
+        "issue.json",
+        json.dumps(
+            {
+                "node_id": source_id,
+                "created_at": "2025-12-31T23:00:00Z",
+                "updated_at": "2026-01-01T00:45:00Z",
+            }
+        ).encode(),
+    )
+    later.write_evidence(later_snapshot, "pull-request.json", b'{"node_id": "PR_1"}')
+    later.publish({})
 
     output = tmp_path / "output"
     generate_context(
@@ -238,6 +268,21 @@ def test_github_context_projects_native_records_without_fix_inference(
         for record in projection["records"]
         if record["kind"] == "ordinary-comment"
     )["temporal_roles"] == ["in_range_work"]
+    ordinary_comment = next(
+        record
+        for record in projection["records"]
+        if record["kind"] == "ordinary-comment"
+    )
+    assert len(ordinary_comment["representations"]) == 2
+    pull_request = next(
+        record for record in projection["records"] if record["kind"] == "pull-request"
+    )
+    assert {
+        representation["run_id"] for representation in pull_request["representations"]
+    } == {
+        "github-run",
+        "github-run-later",
+    }
     assert "Gaps and Uncertainty" in (output / "index.md").read_text()
     assert manifest["unresolved_references"] == [
         {
