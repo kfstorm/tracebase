@@ -4,12 +4,16 @@ This context defines the evidence and observation language for a historical, rep
 
 ## Language
 
-**Artifact**:
-A GitHub Issue or Pull Request that passed Eligibility and is identified by its stable provider identifier. An Artifact is not its related-object graph.
-_Avoid_: Record, work item
+**Source Item**:
+A source-specific top-level unit that is independently discovered and represented by a Snapshot. A GitHub Item is an Issue or Pull Request that passed Eligibility; an OpenCode Item is a session. An Item does not include its related-object graph, and the shared term does not erase source-specific semantics.
+_Avoid_: Artifact, universal entity
+
+**Explicit Reference**:
+An occurrence of a recognizable target identifier in a source object's native content. It directly retains the containing source object and may resolve to an archived target; an unresolved target remains a reference. It does not assert project ownership, repository work, implementation, or causality. A complete GitHub Issue or Pull Request URL is the first supported reference form, not the boundary of the concept.
+_Avoid_: Project association, work attribution, Mention
 
 **Eligibility**:
-The direct-participation gate for a GitHub Artifact: the tracked actor is its author, wrote an ordinary comment, or submitted a review. Mentions, assignments, review requests, and line-level review comments are discovery context, not independent eligibility.
+The direct-participation gate for a GitHub Item: the tracked actor is its author, wrote an ordinary comment, or submitted a review. Mentions, assignments, review requests, and line-level review comments are discovery context, not independent eligibility.
 _Avoid_: Discovery result, involvement
 
 **Source-native Evidence**:
@@ -17,7 +21,7 @@ Unmodified bytes provided by a source and preserved in the private v0 archive. I
 _Avoid_: Sanitized original, memory
 
 **Hydration**:
-The collection of source-native endpoint responses for one discovered Artifact. Hydration preserves the observed responses without asserting they formed an atomic provider snapshot.
+The collection of source-native endpoint responses for one discovered GitHub Item. Hydration preserves the observed responses without asserting they formed an atomic provider snapshot.
 _Avoid_: Sync, mirror, enrichment
 
 **Coverage**:
@@ -29,7 +33,7 @@ A stable source-specific scope used to distinguish Collection Ranges. For GitHub
 _Avoid_: Machine identity, project path
 
 **Snapshot**:
-An append-only, complete set of evidence from one Observation Window of one Artifact or OpenCode session. A Snapshot does not represent a global system state.
+An append-only, complete set of evidence from one Observation Window of one Source Item. A Snapshot does not represent a global system state.
 _Avoid_: Current state, sync point
 
 **Collection Run**:
@@ -43,3 +47,11 @@ _Avoid_: Run date, observation time
 **Observation Window**:
 The start and end of the collector's observation of one source object. It is distinct from timestamps reported by the source object.
 _Avoid_: Snapshot time, source update time
+
+**Context Extraction Result**:
+A disposable, in-memory result derived offline from the current archive for a mandatory, explicit half-open work time range. It distinguishes in-range source records from prior background, later developments, and observed state, retaining source-specific meaning, inclusion reasons, direct references to the loaded source objects, and uncertainty. It is not serialized independently: the same process uses it to assemble consumer input from those objects. Its work time range is distinct from Collection Range; the result is neither Source-native Evidence, a Snapshot, nor a synchronized view of the source.
+_Avoid_: Projection, synchronized view
+
+**Context Output**:
+A disposable, self-contained directory assembled from one Context Extraction Result for consumer exploration. It is reproducible from the Raw Archive and request, owned by the caller, and not a durable derived store or a synchronized view of the source.
+_Avoid_: Cache, index, intermediate archive
