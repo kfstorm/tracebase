@@ -91,6 +91,8 @@ class ContextExtractionResult:
     request: ContextRequest
     runs: tuple[PublishedRun, ...]
     items: tuple[ContextItem, ...]
+    relations: tuple[dict[str, str], ...]
+    unresolved_references: tuple[dict[str, str], ...]
 
 
 def load_archive(root: str | Path) -> tuple[PublishedRun, ...]:
@@ -133,7 +135,7 @@ def extract_context(
         for snapshot in run.snapshots:
             _validate_context_source(snapshot)
             grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
-    items: list[ContextItem] = []
+    all_items: list[ContextItem] = []
     for key, snapshots in sorted(grouped.items()):
         ordered = tuple(sorted(snapshots, key=lambda value: value.run["run_id"]))
         projection = (
@@ -141,9 +143,50 @@ def extract_context(
             if key[0] == "github"
             else None
         )
-        if projection is None or projection.selected:
-            items.append(ContextItem(ordered, _item_path(key), projection))
-    return ContextExtractionResult(request, runs, tuple(items))
+        all_items.append(ContextItem(ordered, _item_path(key), projection))
+    github_urls = {
+        value
+        for item in all_items
+        if item.github is not None
+        for record in item.github.records
+        for representation in record["representations"]
+        for value in (
+            [representation["value"].get("html_url")]
+            if isinstance(representation["value"], dict)
+            else []
+        )
+        if isinstance(value, str)
+    }
+    relations: list[dict[str, str]] = []
+    unresolved: list[dict[str, str]] = []
+    for item in all_items:
+        if item.github is None or not item.github.selected:
+            continue
+        for record in item.github.records:
+            for representation in record["representations"]:
+                for url in _GITHUB_ITEM_URL.findall(
+                    json.dumps(representation["value"])
+                ):
+                    reference = {
+                        "kind": "explicit-github-reference",
+                        "from_path": item.path,
+                        "from_native_id": record["native_id"],
+                        "url": url,
+                    }
+                    if url in github_urls:
+                        relations.append(reference)
+                    else:
+                        unresolved.append(reference)
+    items = tuple(
+        item for item in all_items if item.github is None or item.github.selected
+    )
+    return ContextExtractionResult(
+        request,
+        runs,
+        items,
+        tuple(sorted(relations, key=str)),
+        tuple(sorted(unresolved, key=str)),
+    )
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -178,11 +221,16 @@ def _render_source_view(item_root: Path, item: ContextItem) -> str:
                 "gaps": projection.gaps,
             },
         )
-        lines = ["# GitHub Item", "", "## Records", ""]
-        lines.extend(
-            f"- `{record['kind']}` `{record['native_id']}`"
-            for record in projection.records
-        )
+        lines = ["# GitHub Item", "", "## Source-native Records", ""]
+        for record in projection.records:
+            links = ", ".join(
+                f"[{representation['evidence_path']}]({representation['output_path']})"
+                for representation in record["representations"]
+            )
+            lines.append(
+                f"- `{record['kind']}` `{record['native_id']}` "
+                f"({', '.join(record['temporal_roles'])}; {links})"
+            )
         lines.extend(["", "## Observation State", ""])
         lines.append(
             "Review thread state is observed current state, not proof of a fix."
@@ -225,6 +273,14 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
             destination = observation_root.joinpath(*PurePosixPath(name).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
+        if item.github is not None:
+            for record in item.github.records:
+                for representation in record["representations"]:
+                    if representation["run_id"] == run_id:
+                        representation["output_path"] = (
+                            f"observations/{observation_name}/"
+                            f"{representation['evidence_path']}"
+                        )
         provenance.append(
             {
                 "run_id": run_id,
@@ -266,10 +322,25 @@ def _render_index(
     if items:
         lines.extend(
             f"- `{item['path']}/` [{item['source_kind']} view]({item['view_path']})"
+            + (
+                f": {', '.join(item['inclusion_reasons'])}; "
+                f"{', '.join(item['temporal_roles'])}"
+                if "inclusion_reasons" in item
+                else ""
+            )
             for item in items
         )
     else:
         lines.append("No source items are available.")
+    if result.relations or result.unresolved_references:
+        lines.extend(["", "## GitHub References", ""])
+        lines.extend(
+            f"- Resolved: `{relation['url']}`" for relation in result.relations
+        )
+        lines.extend(
+            f"- Unresolved: `{reference['url']}`"
+            for reference in result.unresolved_references
+        )
     (staging / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -282,28 +353,6 @@ def _render_manifest(
         if path.is_file()
     )
     github = [item.github for item in result.items if item.github is not None]
-    known_urls = {
-        value
-        for projection in github
-        for record in projection.records
-        for representation in record["representations"]
-        for value in (
-            [representation["value"].get("html_url")]
-            if isinstance(representation["value"], dict)
-            else []
-        )
-        if isinstance(value, str)
-    }
-    unresolved = sorted(
-        {
-            url
-            for projection in github
-            for record in projection.records
-            for representation in record["representations"]
-            for url in _GITHUB_ITEM_URL.findall(json.dumps(representation["value"]))
-            if url not in known_urls
-        }
-    )
     _write_json(
         staging / "context.json",
         {
@@ -311,9 +360,14 @@ def _render_manifest(
             "request": {"from": result.request.from_text, "to": result.request.to_text},
             "source_items": items,
             "relations": [
-                relation for projection in github for relation in projection.relations
+                *[
+                    relation
+                    for projection in github
+                    for relation in projection.relations
+                ],
+                *result.relations,
             ],
-            "unresolved_references": [{"url": url} for url in unresolved],
+            "unresolved_references": result.unresolved_references,
             "gaps": [gap for projection in github for gap in projection.gaps],
             "output_inventory": [*inventory, "context.json"],
         },
