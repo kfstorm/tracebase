@@ -117,6 +117,108 @@ def test_context_groups_all_archive_observations_without_payload_interpretation(
     assert "temporal_roles" not in items[0]
 
 
+def test_github_context_projects_native_records_without_fix_inference(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(
+        archive,
+        "github-run",
+        source_kind="github",
+        scope_id="tracked-actor",
+    )
+    source_id = "PR_1"
+    evidence = {
+        "issue.json": {
+            "node_id": source_id,
+            "created_at": "2025-12-31T23:00:00Z",
+            "updated_at": "2026-01-01T00:30:00Z",
+            "user": {"login": "author"},
+        },
+        "pull-request.json": {"node_id": source_id},
+        "comments.001.json": [
+            {
+                "id": 10,
+                "created_at": "2026-01-01T00:15:00Z",
+                "user": {"login": "reviewer"},
+            }
+        ],
+        "timeline.001.json": [{"id": 10, "event": "commented"}],
+        "reviews.001.json": [
+            {
+                "id": 20,
+                "submitted_at": "2026-01-01T00:20:00Z",
+                "user": {"login": "reviewer"},
+            }
+        ],
+        "review-comments.001.json": [
+            {
+                "node_id": "comment-node",
+                "pull_request_review_id": 20,
+                "created_at": "2026-01-01T00:21:00Z",
+                "user": {"login": "reviewer"},
+            }
+        ],
+        "review-threads.001.json": {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "thread-node",
+                                    "isResolved": True,
+                                    "isOutdated": True,
+                                    "comments": {"nodes": [{"id": "comment-node"}]},
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "pull-request.diff": "diff --git a/a b/a\n",
+    }
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "github",
+            "pull-request",
+            source_id,
+            run.collection_range.as_manifest(),
+            tuple({"path": name} for name in evidence),
+        )
+    )
+    for name, value in evidence.items():
+        content = value if isinstance(value, str) else json.dumps(value)
+        run.write_evidence(snapshot, name, content.encode())
+    run.publish({})
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    manifest = json.loads((output / "context.json").read_text())
+    item = manifest["source_items"][0]
+    projection = json.loads((output / item["github_path"]).read_text())
+    assert item["inclusion_reasons"] == ["in_range_source_record"]
+    thread = next(
+        record for record in projection["records"] if record["kind"] == "review-thread"
+    )
+    assert thread["representations"][0]["value"]["isResolved"]
+    assert {relation["kind"] for relation in projection["relations"]} == {
+        "review-inline-comment",
+        "thread-inline-comment",
+        "timeline-mirror",
+    }
+    assert projection["gaps"] == [
+        {"detail": "does_not_establish_fix_or_commit", "kind": "aggregate_diff"}
+    ]
+    assert "fixed" not in (output / item["view_path"]).read_text().lower()
+
+
 def test_scope_aware_identity_and_source_paths_are_deterministic(
     tmp_path: Path,
 ) -> None:

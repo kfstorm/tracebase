@@ -18,6 +18,7 @@ from .archive import (
     encode_path_id,
     load_published_archive,
 )
+from .github_context import GitHubProjection, project_github
 
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
@@ -75,6 +76,7 @@ class ContextRequest:
 class ContextItem:
     snapshots: tuple[PublishedSnapshot, ...]
     path: str
+    github: GitHubProjection | None = None
 
     @property
     def source(self) -> PublishedSnapshot:
@@ -128,14 +130,17 @@ def extract_context(
         for snapshot in run.snapshots:
             _validate_context_source(snapshot)
             grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
-    items = tuple(
-        ContextItem(
-            tuple(sorted(snapshots, key=lambda value: value.run["run_id"])),
-            _item_path(key),
+    items: list[ContextItem] = []
+    for key, snapshots in sorted(grouped.items()):
+        ordered = tuple(sorted(snapshots, key=lambda value: value.run["run_id"]))
+        projection = (
+            project_github(ordered, request.start, request.end)
+            if key[0] == "github"
+            else None
         )
-        for key, snapshots in sorted(grouped.items())
-    )
-    return ContextExtractionResult(request, runs, items)
+        if projection is None or projection.selected:
+            items.append(ContextItem(ordered, _item_path(key), projection))
+    return ContextExtractionResult(request, runs, tuple(items))
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -157,6 +162,30 @@ def _cleanup_staging(staging: Path) -> None:
 def _render_source_view(item_root: Path, item: ContextItem) -> str:
     """Render the shared source-view shell; source projections extend this seam."""
     source = item.source
+    if item.github is not None:
+        projection = item.github
+        _write_json(
+            item_root / "github.json",
+            {
+                "schema_version": 1,
+                "inclusion_reasons": projection.inclusion_reasons,
+                "temporal_roles": projection.temporal_roles,
+                "records": projection.records,
+                "relations": projection.relations,
+                "gaps": projection.gaps,
+            },
+        )
+        lines = ["# GitHub Item", "", "## Records", ""]
+        lines.extend(
+            f"- `{record['kind']}` `{record['native_id']}`"
+            for record in projection.records
+        )
+        lines.extend(["", "## Observation State", ""])
+        lines.append(
+            "Review thread state is observed current state, not proof of a fix."
+        )
+        (item_root / "github.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return f"{item.path}/github.md"
     view_path = f"{item.path}/{source.manifest['source_kind']}.md"
     lines = [
         "# Source Item",
@@ -204,7 +233,7 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
         )
     source = item.source
     view_path = _render_source_view(item_root, item)
-    return {
+    result = {
         "source_kind": source.manifest["source_kind"],
         "source_scope_id": source.run["source"]["scope_id"],
         "object_kind": source.manifest["object_kind"],
@@ -213,6 +242,11 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
         "view_path": view_path,
         "provenance": provenance,
     }
+    if item.github is not None:
+        result["inclusion_reasons"] = item.github.inclusion_reasons
+        result["temporal_roles"] = item.github.temporal_roles
+        result["github_path"] = f"{item.path}/github.json"
+    return result
 
 
 def _render_index(
@@ -244,15 +278,18 @@ def _render_manifest(
         for path in staging.rglob("*")
         if path.is_file()
     )
+    github = [item.github for item in result.items if item.github is not None]
     _write_json(
         staging / "context.json",
         {
             "schema_version": 1,
             "request": {"from": result.request.from_text, "to": result.request.to_text},
             "source_items": items,
-            "relations": [],
+            "relations": [
+                relation for projection in github for relation in projection.relations
+            ],
             "unresolved_references": [],
-            "gaps": [],
+            "gaps": [gap for projection in github for gap in projection.gaps],
             "output_inventory": [*inventory, "context.json"],
         },
     )
