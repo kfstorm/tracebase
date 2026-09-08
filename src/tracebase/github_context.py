@@ -12,7 +12,7 @@ from .archive import ArchiveError, PublishedSnapshot
 
 @dataclass(frozen=True, slots=True)
 class GitHubProjection:
-    """Source-native GitHub records and native-ID relations for one Item."""
+    """Source-native GitHub records and within-Item native structure."""
 
     selected: bool
     inclusion_reasons: tuple[str, ...]
@@ -241,25 +241,6 @@ def project_github(  # noqa: PLR0915
                     _add_record(
                         records, _record(kind, str(identifier), value, path, snapshot)
                     )
-                    source = value.get("source")
-                    source_issue = (
-                        source.get("issue") if isinstance(source, dict) else None
-                    )
-                    cross_reference_source_id = (
-                        source_issue.get("node_id")
-                        if isinstance(source_issue, dict)
-                        else None
-                    )
-                    if value.get("event") == "cross-referenced" and isinstance(
-                        cross_reference_source_id, str
-                    ):
-                        relations.add(
-                            (
-                                "cross-referenced",
-                                cross_reference_source_id,
-                                snapshots[0].manifest["source_id"],
-                            )
-                        )
         if object_kind != "pull-request":
             continue
         pull = _json(snapshot, "pull-request.json")

@@ -27,11 +27,6 @@ _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "github": {"issue", "pull-request"},
     "opencode": {"session"},
 }
-_GITHUB_ITEM_URL = re.compile(
-    r"(?<![A-Za-z0-9])https://github\.com/"
-    r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+/"
-    r"(?:issues|pull)/\d+(?=$|[?#\s\])}>\"',.;:!])"
-)
 
 
 class ContextError(ArchiveError):
@@ -93,8 +88,6 @@ class ContextExtractionResult:
     request: ContextRequest
     runs: tuple[PublishedRun, ...]
     items: tuple[ContextItem, ...]
-    relations: tuple[dict[str, Any], ...]
-    unresolved_references: tuple[dict[str, Any], ...]
 
 
 def load_archive(root: str | Path) -> tuple[PublishedRun, ...]:
@@ -146,50 +139,6 @@ def extract_context(
             else None
         )
         all_items.append(ContextItem(ordered, _item_path(key), projection))
-    github_targets: dict[str, set[str]] = {}
-    for item in all_items:
-        if item.github is None:
-            continue
-        for record in item.github.records:
-            for representation in record["representations"]:
-                value = representation["value"]
-                url = value.get("html_url") if isinstance(value, dict) else None
-                if isinstance(url, str):
-                    github_targets.setdefault(url, set()).add(record["native_id"])
-    relations: list[dict[str, Any]] = []
-    unresolved: list[dict[str, Any]] = []
-    for item in all_items:
-        if item.github is None or not item.github.selected:
-            continue
-        for record in item.github.records:
-            for representation in record["representations"]:
-                value = representation["value"]
-                body = value.get("body") if isinstance(value, dict) else None
-                matches = (
-                    _GITHUB_ITEM_URL.finditer(body) if isinstance(body, str) else ()
-                )
-                for match in matches:
-                    url = match.group()
-                    reference = {
-                        "kind": "explicit-github-reference",
-                        "from_path": item.path,
-                        "from_native_id": record["native_id"],
-                        "occurrence_id": (
-                            f"{representation['run_id']}:"
-                            f"{representation['evidence_path']}:"
-                            f"{record['native_id']}:{match.start()}"
-                        ),
-                        "url": url,
-                    }
-                    if url in github_targets:
-                        relations.append(
-                            {
-                                **reference,
-                                "target_native_ids": sorted(github_targets[url]),
-                            }
-                        )
-                    else:
-                        unresolved.append(reference)
     items = tuple(
         item for item in all_items if item.github is None or item.github.selected
     )
@@ -197,8 +146,6 @@ def extract_context(
         request,
         runs,
         items,
-        tuple(sorted(relations, key=str)),
-        tuple(sorted(unresolved, key=str)),
     )
 
 
@@ -346,15 +293,6 @@ def _render_index(
         )
     else:
         lines.append("No source items are available.")
-    if result.relations or result.unresolved_references:
-        lines.extend(["", "## GitHub References", ""])
-        lines.extend(
-            f"- Resolved: `{relation['url']}`" for relation in result.relations
-        )
-        lines.extend(
-            f"- Unresolved: `{reference['url']}`"
-            for reference in result.unresolved_references
-        )
     gaps = [
         gap
         for item in result.items
@@ -382,15 +320,8 @@ def _render_manifest(
             "schema_version": 1,
             "request": {"from": result.request.from_text, "to": result.request.to_text},
             "source_items": items,
-            "relations": [
-                *[
-                    relation
-                    for projection in github
-                    for relation in projection.relations
-                ],
-                *result.relations,
-            ],
-            "unresolved_references": result.unresolved_references,
+            "relations": [],
+            "unresolved_references": [],
             "gaps": [gap for projection in github for gap in projection.gaps],
             "output_inventory": [*inventory, "context.json"],
         },

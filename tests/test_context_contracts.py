@@ -268,26 +268,6 @@ def test_github_context_projects_native_records_without_fix_inference(
         ).encode(),
     )
     later.write_evidence(later_snapshot, "pull-request.json", b'{"node_id": "PR_1"}')
-    target_snapshot = later.write_snapshot(
-        Snapshot(
-            "github",
-            "issue",
-            "ISSUE_99",
-            later.collection_range.as_manifest(),
-            ({"path": "issue.json"},),
-        )
-    )
-    later.write_evidence(
-        target_snapshot,
-        "issue.json",
-        json.dumps(
-            {
-                "node_id": "ISSUE_99",
-                "created_at": "2025-01-01T00:00:00Z",
-                "html_url": "https://github.com/example/repo/issues/99",
-            }
-        ).encode(),
-    )
     later.publish({})
 
     output = tmp_path / "output"
@@ -306,7 +286,6 @@ def test_github_context_projects_native_records_without_fix_inference(
     assert thread["representations"][0]["value"]["isResolved"]
     assert {relation["kind"] for relation in projection["relations"]} == {
         "inline-reply",
-        "cross-referenced",
         "review-inline-comment",
         "thread-inline-comment",
     }
@@ -363,19 +342,23 @@ def test_github_context_projects_native_records_without_fix_inference(
         "Aggregate diffs do not establish a fix"
         in (output / item["view_path"]).read_text()
     )
+    assert manifest["relations"] == []
     assert manifest["unresolved_references"] == []
-    references = [
-        relation
-        for relation in manifest["relations"]
-        if relation["kind"] == "explicit-github-reference"
-    ]
-    assert len(references) == 3
-    assert all(
-        relation["url"] == "https://github.com/example/repo/issues/99"
-        and relation["target_native_ids"] == ["ISSUE_99"]
-        for relation in references
+    issue = next(
+        record for record in projection["records"] if record["kind"] == "pull-request"
     )
-    assert references[0]["occurrence_id"] != references[1]["occurrence_id"]
+    assert (
+        "https://github.com/example/repo/issues/99"
+        in issue["representations"][0]["value"]["body"]
+    )
+    cross_reference = next(
+        record for record in projection["records"] if record["native_id"] == "50"
+    )
+    assert cross_reference["representations"][0]["value"] == {
+        "id": 50,
+        "event": "cross-referenced",
+        "source": {"issue": {"node_id": "SOURCE_PR"}},
+    }
     assert "fixed" not in (output / item["view_path"]).read_text().lower()
 
 
