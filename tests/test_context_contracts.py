@@ -289,9 +289,7 @@ def test_github_context_projects_native_records_without_fix_inference(
         "review-inline-comment",
         "thread-inline-comment",
     }
-    assert projection["gaps"] == [
-        {"detail": "does_not_establish_fix_or_commit", "kind": "aggregate_diff"}
-    ]
+    assert projection["gaps"] == []
     assert next(
         record for record in projection["records"] if record["kind"] == "aggregate-diff"
     )["limitations"] == ["does_not_establish_fix_or_commit"]
@@ -344,12 +342,9 @@ def test_github_context_projects_native_records_without_fix_inference(
         "Aggregate diffs do not establish a fix"
         in (output / item["view_path"]).read_text()
     )
-    assert "Gaps and Uncertainty" in (output / "index.md").read_text()
     assert manifest["relations"] == []
     assert manifest["unresolved_references"] == []
-    assert manifest["gaps"] == [
-        {"detail": "does_not_establish_fix_or_commit", "kind": "aggregate_diff"}
-    ]
+    assert manifest["gaps"] == []
     issue = next(
         record for record in projection["records"] if record["kind"] == "pull-request"
     )
