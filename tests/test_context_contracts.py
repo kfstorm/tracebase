@@ -137,7 +137,9 @@ def test_github_context_projects_native_records_without_fix_inference(
             "body": (
                 "See https://github.com/example/repo/issues/99 and "
                 "https://github.com/example/repo/issues/99, not "
-                "https://github.com/example/repo/issues/99x; then "
+                "https://github.com/example/repo/issues/99x, "
+                "xhttps://github.com/example/repo/issues/99, or "
+                "https://github.com/example-/repo/issues/99; then "
                 "<https://github.com/example/repo/issues/99>"
             ),
             "html_url": "https://github.com/example/repo/pull/1",
