@@ -145,7 +145,7 @@ def extract_context(
         )
         all_items.append(ContextItem(ordered, _item_path(key), projection))
     github_targets = {
-        value: item.path
+        value
         for item in all_items
         if item.github is not None
         for record in item.github.records
@@ -174,7 +174,7 @@ def extract_context(
                         "url": url,
                     }
                     if url in github_targets:
-                        relations.append({**reference, "to_path": github_targets[url]})
+                        relations.append(reference)
                     else:
                         unresolved.append(reference)
     items = tuple(

@@ -305,7 +305,9 @@ def test_github_context_projects_native_records_without_fix_inference(
     }
     assert "Gaps and Uncertainty" in (output / "index.md").read_text()
     assert manifest["unresolved_references"] == []
-    assert manifest["relations"][-1]["to_path"].endswith("SVNTVUVfOTk")
+    assert (
+        manifest["relations"][-1]["url"] == "https://github.com/example/repo/issues/99"
+    )
     assert "fixed" not in (output / item["view_path"]).read_text().lower()
 
 
