@@ -43,6 +43,15 @@ class OpenCodeProjection:
         return parent if isinstance(parent, str) else None
 
     @property
+    def parent_value(self) -> Any:
+        info = self.session.get("info")
+        return (
+            info.get("parentID")
+            if isinstance(info, dict)
+            else self.session.get("parentID")
+        )
+
+    @property
     def explicit_task_child_ids(self) -> tuple[str, ...]:
         result: list[str] = []
         for part in self.task_children:
@@ -117,6 +126,8 @@ def _interval_roles(
     interval: tuple[datetime, datetime | None], start: datetime, end: datetime
 ) -> tuple[str, ...]:
     began, finished = interval
+    if finished == began:
+        return _point_roles(began, start, end)
     in_range = (
         start <= began < end if finished is None else began < end and start < finished
     )
@@ -129,6 +140,22 @@ def _interval_roles(
         )
         if present
     )
+
+
+def _interval_qualifies(
+    interval: tuple[datetime, datetime | None], start: datetime, end: datetime
+) -> bool:
+    began, finished = interval
+    if finished == began or finished is None:
+        return start <= began < end
+    return began < end and start < finished
+
+
+def _refresh_tool_roles(tool: dict[str, Any], start: datetime, end: datetime) -> None:
+    roles: set[str] = set()
+    for interval in tool["intervals"]:
+        roles.update(_interval_roles(interval, start, end))
+    tool["temporal_roles"] = tuple(sorted(roles))
 
 
 def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None:
@@ -149,7 +176,7 @@ def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None
     if not isinstance(end, (int, float, str)) or isinstance(end, bool):
         raise ArchiveError("OpenCode tool payload is invalid")
     ended = _timestamp(end)
-    if ended <= started:
+    if ended < started:
         raise ArchiveError("OpenCode tool payload is invalid")
     return started, ended
 
@@ -216,6 +243,7 @@ def project_opencode(  # noqa: PLR0915
                                 "start": tool_start.isoformat(),
                                 "temporal_roles": _interval_roles(interval, start, end),
                                 "representations": [],
+                                "intervals": [],
                             },
                         )
                         tool["representations"].append(
@@ -227,11 +255,14 @@ def project_opencode(  # noqa: PLR0915
                                 "value": part,
                             }
                         )
+                        tool["intervals"].append(interval)
                         if tool_end is not None:
                             tool["end"] = tool_end.isoformat()
                 if part.get("type") == "task" or part.get("tool") == "task":
                     task_interval = _tool_times(part)
-                    if task_interval is not None and start <= task_interval[0] < end:
+                    if task_interval is not None and _interval_qualifies(
+                        task_interval, start, end
+                    ):
                         children.append(part)
             if tools:
                 record["tools"] = list(tools.values())
@@ -249,7 +280,13 @@ def project_opencode(  # noqa: PLR0915
                         prior_tool["representations"].extend(tool["representations"])
                         if "end" in tool:
                             prior_tool["end"] = tool["end"]
+                        prior_tool["intervals"].extend(tool["intervals"])
+                        _refresh_tool_roles(prior_tool, start, end)
     messages = list(messages_by_id.values())
+    for message in messages:
+        for tool in message.get("tools", ()):
+            _refresh_tool_roles(tool, start, end)
+            tool.pop("intervals", None)
     children = list(
         {
             json.dumps(child, sort_keys=True, separators=(",", ":")): child

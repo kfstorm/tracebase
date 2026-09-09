@@ -160,17 +160,53 @@ def extract_context(
         key for key, projection in opencode_projections.items() if projection.selected
     }
     supporting_keys: set[tuple[str, str, str, str]] = set()
+    ancestry_gaps: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
     for key in selected_keys:
-        projection = opencode_projections[key]
+        current_key = key
+        projection = opencode_projections[current_key]
+        parent_value = projection.parent_value
         parent_id = projection.parent_id
         seen: set[str] = set()
+        if parent_value is not None and not isinstance(parent_value, str):
+            ancestry_gaps.setdefault(current_key, []).append(
+                {
+                    "kind": "malformed-session-parent",
+                    "session_id": projection.session_id,
+                }
+            )
         while isinstance(parent_id, str) and parent_id not in seen:
             seen.add(parent_id)
             parent_key = session_keys.get((key[1], parent_id))
             if parent_key is None:
+                ancestry_gaps.setdefault(current_key, []).append(
+                    {
+                        "kind": "missing-session-parent",
+                        "session_id": projection.session_id,
+                        "parent_id": parent_id,
+                    }
+                )
                 break
             supporting_keys.add(parent_key)
-            parent_id = opencode_projections[parent_key].parent_id
+            current_key = parent_key
+            projection = opencode_projections[current_key]
+            parent_value = projection.parent_value
+            if parent_value is not None and not isinstance(parent_value, str):
+                ancestry_gaps.setdefault(current_key, []).append(
+                    {
+                        "kind": "malformed-session-parent",
+                        "session_id": projection.session_id,
+                    }
+                )
+                break
+            parent_id = projection.parent_id
+        if isinstance(parent_id, str) and parent_id in seen:
+            ancestry_gaps.setdefault(current_key, []).append(
+                {
+                    "kind": "cyclic-session-parent",
+                    "session_id": projection.session_id,
+                    "parent_id": parent_id,
+                }
+            )
         for child_id in projection.explicit_task_child_ids:
             child_key = session_keys.get((key[1], child_id))
             if child_key is not None:
@@ -178,14 +214,26 @@ def extract_context(
     all_items = [
         replace(
             item,
-            opencode=replace(
-                item.opencode,
-                inclusion_reasons=("supporting-task-context",),
-            )
-            if item.opencode is not None
-            and _logical_key(item.source) in supporting_keys
-            and not item.opencode.selected
-            else item.opencode,
+            opencode=(
+                replace(
+                    item.opencode,
+                    inclusion_reasons=("supporting-task-context",),
+                    gaps=item.opencode.gaps
+                    + tuple(ancestry_gaps.get(_logical_key(item.source), ())),
+                )
+                if item.opencode is not None
+                and _logical_key(item.source) in supporting_keys
+                and not item.opencode.selected
+                else (
+                    replace(
+                        item.opencode,
+                        gaps=item.opencode.gaps
+                        + tuple(ancestry_gaps.get(_logical_key(item.source), ())),
+                    )
+                    if item.opencode is not None
+                    else None
+                )
+            ),
         )
         for item in all_items
     ]
