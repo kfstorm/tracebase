@@ -96,7 +96,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     # Intentionally let collection/orchestration exceptions propagate.
     # Progress output provides context while the original traceback remains
-    # visible for debugging; source content and credentials stay excluded.
+    # visible for debugging; Context Output itself is not a redaction boundary.
     try:
         arguments = _parser().parse_args(argv)
     except ArchiveError as error:

@@ -55,3 +55,5 @@ _Avoid_: Projection, synchronized view
 **Context Output**:
 A disposable, self-contained directory assembled from one Context Extraction Result for consumer exploration. It is reproducible from the Raw Archive and request, owned by the caller, and not a durable derived store or a synchronized view of the source.
 _Avoid_: Cache, index, intermediate archive
+
+Context Output v1 does not perform sensitive-data redaction and should be treated with the same confidentiality as the Raw Archive.

@@ -349,11 +349,20 @@ def project_opencode(  # noqa: PLR0915
     """Project messages as points and tool executions as intervals."""
     if not snapshots:
         raise ArchiveError("OpenCode session has no snapshot")
+    source_id = snapshots[0].manifest["source_id"]
     session: dict[str, Any] = {"value": _json(snapshots[-1]), "representations": []}
     messages_by_id: dict[str, dict[str, Any]] = {}
     gaps: list[dict[str, str]] = []
     for snapshot in snapshots:
         payload = _json(snapshot)
+        info = payload.get("info")
+        info = info if isinstance(info, dict) else {}
+        payload_id = payload.get("id")
+        info_id = info.get("id")
+        if not any(value == source_id for value in (payload_id, info_id)) or any(
+            value is not None and value != source_id for value in (payload_id, info_id)
+        ):
+            raise ArchiveError("OpenCode session payload identity was invalid")
         session["representations"].append(
             {
                 "run_id": snapshot.run["run_id"],
@@ -435,6 +444,8 @@ def project_opencode(  # noqa: PLR0915
                     part_record["start"] = part_interval[0].isoformat()
                     if part_interval[1] is not None:
                         part_record["end"] = part_interval[1].isoformat()
+                    else:
+                        part_record["completion"] = "unknown"
             if parts_by_id:
                 record["parts"] = list(parts_by_id.values())
             prior = messages_by_id.get(message_id)
@@ -459,6 +470,10 @@ def project_opencode(  # noqa: PLR0915
                             prior_part["start"] = part["start"]
                         if "end" in part:
                             prior_part["end"] = part["end"]
+                            prior_part.pop("completion", None)
+                        elif "completion" in part:
+                            prior_part.pop("end", None)
+                            prior_part["completion"] = part["completion"]
                         _refresh_part_roles(prior_part, start, end)
     messages = list(messages_by_id.values())
     messages.sort(key=lambda message: (message["_created_time"], message["id"]))
@@ -472,6 +487,14 @@ def project_opencode(  # noqa: PLR0915
         )
         for part in message.get("parts", ()):
             _refresh_part_roles(part, start, end)
+            if part.get("completion") == "unknown":
+                gaps.append(
+                    {
+                        "kind": "unknown-completion",
+                        "message_id": message["id"],
+                        "part_id": part["id"],
+                    }
+                )
             part.pop("intervals", None)
             part.pop("_start_time", None)
         message.pop("_created_time", None)
