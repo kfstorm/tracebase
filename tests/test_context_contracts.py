@@ -1136,6 +1136,49 @@ def test_context_output_redacts_credentials_and_private_urls(
     assert b"/home/example/project" in output_bytes
 
 
+def test_root_gaps_use_the_same_sanitized_output_boundary(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        _session_payload(
+            "session-1",
+            messages=[
+                _message(
+                    "message-1",
+                    "2026-01-01T00:30:00Z",
+                    [
+                        {
+                            "type": "tool",
+                            "id": "task-1",
+                            "tool": "task",
+                            "state": {
+                                "time": {"start": "2026-01-01T00:10:00Z"},
+                                "metadata": {
+                                    "parentSessionId": "session-1",
+                                    "sessionId": "https://private.example/gap?token=gap-secret",
+                                },
+                            },
+                        }
+                    ],
+                )
+            ],
+        ),
+    )
+    run.publish({})
+
+    output = tmp_path / "output"
+    _context_manifest(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    output_bytes = _output_bytes(output)
+    assert b"https://private.example/gap?token=gap-secret" not in output_bytes
+    assert b"gap-secret" not in output_bytes
+
+
 def test_github_context_projects_native_records_without_fix_inference(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
@@ -1245,7 +1288,7 @@ def test_github_context_projects_native_records_without_fix_inference(  # noqa: 
                 }
             }
         },
-        "pull-request.diff": "diff --git a/a b/a\n",
+        "pull-request.diff": ('diff --git a/a b/a\npassword: "diff-secret-sentinel"\n'),
     }
     snapshot = run.write_snapshot(
         Snapshot(
@@ -1379,6 +1422,7 @@ def test_github_context_projects_native_records_without_fix_inference(  # noqa: 
     )
     assert manifest["relations"] == []
     assert manifest["unresolved_references"] == []
+    assert b"diff-secret-sentinel" not in _output_bytes(output)
     issue = next(
         record for record in projection["records"] if record["kind"] == "pull-request"
     )

@@ -42,8 +42,8 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_TEXT = re.compile(
-    r"(?:bearer\s+|basic\s+|(?:access[_-]?token|api[_-]?key|password|secret|token)\s*[=:]\s*)"
-    r"[^\s,;\"']+",
+    r"(?:bearer\s+|basic\s+|[\"']?(?:access[_-]?token|api[_-]?key|password|secret|token)"
+    r"[\"']?\s*[=:]\s*)(?:[\"'][^\"']*[\"']|[^\s,;]+)",
     re.IGNORECASE,
 )
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
@@ -524,7 +524,9 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
         "path": item.path,
         "view_path": view_path,
         "provenance": provenance,
-        "gaps": list(item.opencode.gaps) if item.opencode is not None else [],
+        "gaps": _sanitize_public_value(
+            list(item.opencode.gaps) if item.opencode is not None else []
+        ),
     }
     if item.github is not None:
         result["inclusion_reasons"] = item.github.inclusion_reasons
@@ -539,13 +541,15 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
 
 def _root_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     gaps = [
-        {
-            "source_kind": item["source_kind"],
-            "source_scope_id": item["source_scope_id"],
-            "object_kind": item["object_kind"],
-            "source_id": item["source_id"],
-            **gap,
-        }
+        _sanitize_public_value(
+            {
+                "source_kind": item["source_kind"],
+                "source_scope_id": item["source_scope_id"],
+                "object_kind": item["object_kind"],
+                "source_id": item["source_id"],
+                **gap,
+            }
+        )
         for item in items
         for gap in item.get("gaps", ())
     ]
