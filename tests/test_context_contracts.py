@@ -1057,6 +1057,33 @@ def test_session_ancestry_gaps_are_explicit(tmp_path: Path, case: str) -> None:
         "cyclic": "cyclic-session-parent",
     }[case]
     assert expected in gap_kinds
+    assert expected in {gap["kind"] for gap in manifest["gaps"]}
+    assert expected in (tmp_path / "output" / "index.md").read_text()
+
+
+def test_uuid_collection_ids_do_not_become_output_identity_or_paths(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run_id = "01a07c6a-ae88-7656-8f31-035370e7fe0d"
+    run = _run(archive, run_id)
+    _snapshot(run)
+    run.publish({})
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    output_bytes = b"".join(
+        path.read_bytes() for path in output.rglob("*") if path.is_file()
+    )
+    assert run_id.encode() not in output_bytes
+    assert any(
+        "observations/observation-001" in path.as_posix() for path in output.rglob("*")
+    )
 
 
 def test_github_context_projects_native_records_without_fix_inference(  # noqa: PLR0915

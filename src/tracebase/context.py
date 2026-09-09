@@ -28,6 +28,9 @@ from .opencode_context import (
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
 )
+_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
 _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "github": {"issue", "pull-request"},
     "opencode": {"session"},
@@ -213,7 +216,35 @@ def _cleanup_staging(staging: Path) -> None:
 
 
 def _observation_name(index: int, run_id: str) -> str:
-    return f"{index:03d}-{run_id}"
+    del run_id
+    return f"observation-{index:03d}"
+
+
+def _public_run_id(run_id: str, index: int) -> str:
+    if _UUID.fullmatch(run_id):
+        return _observation_name(index, run_id)
+    return run_id
+
+
+def _publicize_run_ids(value: Any, snapshots: tuple[PublishedSnapshot, ...]) -> Any:
+    public_ids = {
+        snapshot.run["run_id"]: _public_run_id(snapshot.run["run_id"], index)
+        for index, snapshot in enumerate(snapshots, start=1)
+    }
+    if isinstance(value, dict):
+        return {
+            key: (
+                public_ids.get(item, item)
+                if key == "run_id" and isinstance(item, str)
+                else _publicize_run_ids(item, snapshots)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_publicize_run_ids(item, snapshots) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_publicize_run_ids(item, snapshots) for item in value)
+    return value
 
 
 def _github_records_for_output(item: ContextItem) -> tuple[dict[str, Any], ...]:
@@ -225,6 +256,10 @@ def _github_records_for_output(item: ContextItem) -> tuple[dict[str, Any], ...]:
         )
         for index, snapshot in enumerate(item.snapshots, start=1)
     }
+    public_run_ids = {
+        snapshot.run["run_id"]: _public_run_id(snapshot.run["run_id"], index)
+        for index, snapshot in enumerate(item.snapshots, start=1)
+    }
     records: list[dict[str, Any]] = []
     for record in item.github.records:
         representations = []
@@ -233,7 +268,13 @@ def _github_records_for_output(item: ContextItem) -> tuple[dict[str, Any], ...]:
                 f"{observation_paths[representation['run_id']]}/"
                 f"{representation['evidence_path']}"
             )
-            representations.append({**representation, "output_path": output_path})
+            representations.append(
+                {
+                    **representation,
+                    "run_id": public_run_ids[representation["run_id"]],
+                    "output_path": output_path,
+                }
+            )
         records.append({**record, "representations": representations})
     return tuple(records)
 
@@ -278,14 +319,17 @@ def _render_source_view(
         opencode_projection = item.opencode
         _write_json(
             item_root / "opencode.json",
-            {
-                "schema_version": 1,
-                "session": opencode_projection.session,
-                "messages": opencode_projection.messages,
-                "inclusion_reasons": opencode_projection.inclusion_reasons,
-                "temporal_roles": opencode_projection.temporal_roles,
-                "gaps": opencode_projection.gaps,
-            },
+            _publicize_run_ids(
+                {
+                    "schema_version": 1,
+                    "session": opencode_projection.session,
+                    "messages": opencode_projection.messages,
+                    "inclusion_reasons": opencode_projection.inclusion_reasons,
+                    "temporal_roles": opencode_projection.temporal_roles,
+                    "gaps": opencode_projection.gaps,
+                },
+                item.snapshots,
+            ),
         )
         lines = ["# OpenCode Session", "", "## Messages", ""]
         for message in opencode_projection.messages:
@@ -336,7 +380,7 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
             destination.write_bytes(content)
         provenance.append(
             {
-                "run_id": run_id,
+                "run_id": _public_run_id(run_id, observation_index),
                 "source": snapshot.run["source"],
                 "collection_range": snapshot.run["collection_range"],
                 "snapshot": snapshot.manifest,
@@ -354,6 +398,7 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
         "path": item.path,
         "view_path": view_path,
         "provenance": provenance,
+        "gaps": list(item.opencode.gaps) if item.opencode is not None else [],
     }
     if item.github is not None:
         result["inclusion_reasons"] = item.github.inclusion_reasons
@@ -364,6 +409,24 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
         result["temporal_roles"] = item.opencode.temporal_roles
         result["opencode_path"] = f"{item.path}/opencode.json"
     return result
+
+
+def _root_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gaps = [
+        {
+            "source_kind": item["source_kind"],
+            "source_scope_id": item["source_scope_id"],
+            "object_kind": item["object_kind"],
+            "source_id": item["source_id"],
+            **gap,
+        }
+        for item in items
+        for gap in item.get("gaps", ())
+    ]
+    return sorted(
+        gaps,
+        key=lambda gap: json.dumps(gap, ensure_ascii=False, sort_keys=True),
+    )
 
 
 def _render_index(
@@ -390,6 +453,16 @@ def _render_index(
         )
     else:
         lines.append("No source items are available.")
+    gaps = _root_gaps(items)
+    lines.extend(["", "## Gaps", ""])
+    if gaps:
+        lines.extend(
+            f"- `{gap['kind']}` for `{gap['source_kind']}/{gap['source_id']}`: "
+            f"{json.dumps(gap, ensure_ascii=False, sort_keys=True)}"
+            for gap in gaps
+        )
+    else:
+        lines.append("No gaps are available.")
     (staging / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -409,7 +482,7 @@ def _render_manifest(
             "source_items": items,
             "relations": [],
             "unresolved_references": [],
-            "gaps": [],
+            "gaps": _root_gaps(items),
             "output_inventory": [*inventory, "context.json"],
         },
     )
@@ -418,20 +491,24 @@ def _render_manifest(
 def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
     """Render completely, then publish the caller-owned output with one rename."""
     target = Path(output).absolute()
-    if target.exists() or target.is_symlink():
-        raise ContextError("context output already exists")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
+    staging: Path | None = None
     try:
+        if target.exists() or target.is_symlink():
+            raise ContextError("context output already exists")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
         items = [_render_item(staging, item) for item in result.items]
         _render_index(staging, result, items)
         _render_manifest(staging, result, items)
         staging.rename(target)
         return target
-    except OSError, TypeError, ValueError:
+    except ContextError:
+        raise
+    except Exception:
         raise ContextError("context output publication failed") from None
     finally:
-        _cleanup_staging(staging)
+        if staging is not None:
+            _cleanup_staging(staging)
 
 
 def generate_context(
