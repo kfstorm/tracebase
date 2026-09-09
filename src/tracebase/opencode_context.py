@@ -53,7 +53,7 @@ class OpenCodeProjection:
         references: list[dict[str, str]] = []
         for message in self.messages:
             for part in message.get("parts", ()):
-                if part.get("type") != "task" and part.get("tool") != "task":
+                if not _part_is_task(part):
                     continue
                 if "in_range_work" not in part.get("temporal_roles", ()):
                     continue
@@ -296,9 +296,19 @@ def _refresh_part_roles(part: dict[str, Any], start: datetime, end: datetime) ->
 
 
 def _part_is_work(part: dict[str, Any]) -> bool:
-    return (
-        part["type"] not in {"task", "compaction"}
-        and part["value"].get("tool") != "task"
+    part_type = part.get("type")
+    return not isinstance(part_type, str) or part_type != "compaction"
+
+
+def _part_is_task(part: dict[str, Any]) -> bool:
+    part_type = part.get("type")
+    if not isinstance(part_type, str):
+        return False
+    value = part.get("value")
+    value = value if isinstance(value, dict) else part
+    tool = value.get("tool")
+    return part_type == "task" or (
+        part_type == "tool" and isinstance(tool, str) and tool == "task"
     )
 
 
@@ -388,8 +398,7 @@ def project_opencode(  # noqa: PLR0915
                 part_id = _part_id(part)
                 part_interval = (
                     _tool_times(part)
-                    if part.get("type") in {"tool", "task"}
-                    or part.get("tool") == "task"
+                    if part.get("type") == "tool" or _part_is_task(part)
                     else _part_times(part)
                 )
                 part_record = parts_by_id.setdefault(

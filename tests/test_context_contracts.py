@@ -509,13 +509,18 @@ def test_missing_task_child_is_reported_as_gap(tmp_path: Path) -> None:
             messages=[
                 _message(
                     "message-1",
-                    "2026-01-01T00:30:00Z",
+                    "2025-12-31T23:59:00Z",
                     [
                         {
-                            "type": "task",
+                            "type": "tool",
                             "id": "task-1",
+                            "tool": "task",
                             "state": {
-                                "time": {"start": "2026-01-01T00:30:00Z"},
+                                "status": "running",
+                                "time": {
+                                    "start": "2026-01-01T00:10:00Z",
+                                    "end": "2026-01-01T00:20:00Z",
+                                },
                                 "metadata": {
                                     "sessionId": "child-session",
                                     "parentSessionId": "parent-session",
@@ -536,11 +541,81 @@ def test_missing_task_child_is_reported_as_gap(tmp_path: Path) -> None:
     )
     item = _opencode_item(manifest, "parent-session")
     projection = json.loads((tmp_path / "output" / item["opencode_path"]).read_text())
+    assert item["inclusion_reasons"] == ["in_range_source_record"]
     assert {
         (gap["kind"], gap["session_id"], gap["child_id"])
         for gap in projection["gaps"]
         if gap["kind"] == "missing-task-child"
     } == {("missing-task-child", "parent-session", "child-session")}
+
+
+def test_in_range_task_selects_parent_and_includes_archived_child(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    task = _run(archive, "parent-run")
+    _opencode_snapshot(
+        task,
+        _session_payload(
+            "parent-session",
+            messages=[
+                _message(
+                    "parent-message",
+                    "2025-12-31T23:59:00Z",
+                    [
+                        {
+                            "type": "tool",
+                            "id": "task-1",
+                            "tool": "task",
+                            "state": {
+                                "status": "running",
+                                "time": {
+                                    "start": "2026-01-01T00:10:00Z",
+                                    "end": "2026-01-01T00:20:00Z",
+                                },
+                                "metadata": {
+                                    "parentSessionId": "parent-session",
+                                    "sessionId": "child-session",
+                                },
+                            },
+                        }
+                    ],
+                )
+            ],
+        ),
+    )
+    task.publish({})
+    child = _run(
+        archive,
+        "child-run",
+        "2026-01-02T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+    )
+    _opencode_snapshot(
+        child,
+        _session_payload(
+            "child-session",
+            messages=[_message("child-message", "2025-12-31T23:59:00Z")],
+        ),
+    )
+    child.publish({})
+
+    manifest = _context_manifest(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+    )
+    assert {item["source_id"] for item in manifest["source_items"]} == {
+        "parent-session",
+        "child-session",
+    }
+    assert _opencode_item(manifest, "parent-session")["inclusion_reasons"] == [
+        "in_range_source_record"
+    ]
+    assert _opencode_item(manifest, "child-session")["inclusion_reasons"] == [
+        "supporting-task-context"
+    ]
 
 
 def test_selected_session_uses_its_own_task_children(tmp_path: Path) -> None:
@@ -573,10 +648,22 @@ def test_selected_session_uses_its_own_task_children(tmp_path: Path) -> None:
                         else "2025-12-31T23:00:00Z",
                         [
                             {
-                                "type": "task",
+                                "type": "tool",
                                 "id": f"{session_id}-task",
+                                "tool": "task",
                                 "state": {
-                                    "time": {"start": "2026-01-01T00:30:00Z"},
+                                    "time": {
+                                        "start": (
+                                            "2026-01-01T00:30:00Z"
+                                            if session_id == "selected"
+                                            else "2025-12-31T23:30:00Z"
+                                        ),
+                                        "end": (
+                                            "2026-01-01T00:45:00Z"
+                                            if session_id == "selected"
+                                            else "2025-12-31T23:45:00Z"
+                                        ),
+                                    },
                                     "metadata": {
                                         "sessionId": child_id,
                                         "parentSessionId": session_id,
