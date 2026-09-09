@@ -1142,7 +1142,9 @@ def test_context_output_redacts_credentials_and_private_urls(
                             "id": "text-1",
                             "text": (
                                 "Bearer secret-sentinel https://localhost:8443/private "
-                                "https://private.example/internal"
+                                "https://private.example/internal "
+                                "https://docs.python.org/3/ "
+                                "ssh://user:ssh-secret@example.com/repo"
                             ),
                         }
                     ],
@@ -1163,6 +1165,8 @@ def test_context_output_redacts_credentials_and_private_urls(
     assert b"secret-sentinel" not in output_bytes
     assert b"https://localhost:8443/private" not in output_bytes
     assert b"https://private.example/internal" not in output_bytes
+    assert b"https://docs.python.org/3/" in output_bytes
+    assert b"ssh://user:ssh-secret@example.com/repo" not in output_bytes
     assert b"/home/example/project" in output_bytes
 
 

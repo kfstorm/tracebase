@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import ipaddress
 import json
 import os
 import re
@@ -14,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from .archive import (
     ArchiveError,
@@ -46,7 +47,7 @@ _SENSITIVE_TEXT = re.compile(
     r"[\"']?\s*[=:]\s*)(?:[\"'][^\"']*[\"']|[^\s,;]+)",
     re.IGNORECASE,
 )
-_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
 _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "github": {"issue", "pull-request"},
     "opencode": {"session"},
@@ -282,6 +283,11 @@ def _replace_uuid_run_ids(value: Any, snapshots: tuple[PublishedSnapshot, ...]) 
 
 
 def _sanitize_text(value: str) -> str:
+    sensitive_query = re.compile(
+        r"(?:access[_-]?token|api[_-]?key|auth|password|secret|token)",
+        re.IGNORECASE,
+    )
+
     def replace_url(match: re.Match[str]) -> str:
         url = match.group(0)
         try:
@@ -291,12 +297,29 @@ def _sanitize_text(value: str) -> str:
             password = parsed.password
         except ValueError:
             return "[REDACTED_URL]"
+        try:
+            address = ipaddress.ip_address(hostname) if hostname else None
+        except ValueError:
+            address = None
+        private_host = (
+            hostname is None
+            or hostname == "localhost"
+            or hostname.endswith(
+                (".local", ".internal", ".example", ".invalid", ".test")
+            )
+            or hostname.startswith("private.")
+            or (address is not None and (address.is_private or address.is_loopback))
+        )
+        query_has_secret = any(
+            sensitive_query.search(key) is not None
+            for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
+        )
         if (
-            hostname in {"github.com", "api.github.com"}
+            parsed.scheme != "file"
+            and not private_host
             and username is None
             and password is None
-            and not parsed.query
-            and not parsed.fragment
+            and not query_has_secret
         ):
             return url
         return "[REDACTED_URL]"
