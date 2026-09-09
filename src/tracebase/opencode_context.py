@@ -170,6 +170,9 @@ def _interval_qualifies(
 
 
 def _refresh_tool_roles(tool: dict[str, Any], start: datetime, end: datetime) -> None:
+    if not tool["intervals"]:
+        tool["temporal_roles"] = ("observed_state",)
+        return
     roles: set[str] = set()
     for interval in tool["intervals"]:
         roles.update(_interval_roles(interval, start, end))
@@ -186,6 +189,8 @@ def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None
     end = time_data.get(
         "end", state.get("ended", state.get("end", state.get("completed")))
     )
+    if start is None and state.get("status") == "pending":
+        return None
     if not isinstance(start, (int, float, str)) or isinstance(start, bool):
         raise ArchiveError("OpenCode tool payload is invalid")
     started = _timestamp(start)
@@ -253,35 +258,39 @@ def project_opencode(  # noqa: PLR0915
                     raise ArchiveError("OpenCode message payload is invalid")
                 if part.get("type") == "tool":
                     interval = _tool_times(part)
+                    tool_id = part.get("id", part.get("callID"))
+                    if not isinstance(tool_id, str) or not tool_id:
+                        tool_id = json.dumps(
+                            part, sort_keys=True, separators=(",", ":")
+                        )
+                    tool = tools.setdefault(
+                        tool_id,
+                        {
+                            "id": tool_id,
+                            "value": part,
+                            "temporal_roles": (
+                                _interval_roles(interval, start, end)
+                                if interval is not None
+                                else ("observed_state",)
+                            ),
+                            "representations": [],
+                            "intervals": [],
+                        },
+                    )
+                    tool["representations"].append(
+                        {
+                            "run_id": snapshot.run["run_id"],
+                            "observation_window": snapshot.manifest[
+                                "observation_window"
+                            ],
+                            "value": part,
+                        }
+                    )
                     if interval is not None:
-                        tool_start, tool_end = interval
-                        tool_id = part.get("id", part.get("callID"))
-                        if not isinstance(tool_id, str) or not tool_id:
-                            tool_id = json.dumps(
-                                part, sort_keys=True, separators=(",", ":")
-                            )
-                        tool = tools.setdefault(
-                            tool_id,
-                            {
-                                "id": tool_id,
-                                "value": part,
-                                "start": tool_start.isoformat(),
-                                "_start_time": tool_start,
-                                "temporal_roles": _interval_roles(interval, start, end),
-                                "representations": [],
-                                "intervals": [],
-                            },
-                        )
-                        tool["representations"].append(
-                            {
-                                "run_id": snapshot.run["run_id"],
-                                "observation_window": snapshot.manifest[
-                                    "observation_window"
-                                ],
-                                "value": part,
-                            }
-                        )
                         tool["intervals"].append(interval)
+                        tool_start, tool_end = interval
+                        tool["_start_time"] = tool_start
+                        tool["start"] = tool_start.isoformat()
                         if tool_end is not None:
                             tool["end"] = tool_end.isoformat()
                 if part.get("type") == "task" or part.get("tool") == "task":
@@ -315,7 +324,11 @@ def project_opencode(  # noqa: PLR0915
     messages.sort(key=lambda message: (message["_created_time"], message["id"]))
     for message in messages:
         message.get("tools", []).sort(
-            key=lambda tool: (tool["_start_time"], tool["id"])
+            key=lambda tool: (
+                "_start_time" not in tool,
+                tool.get("_start_time"),
+                tool["id"],
+            )
         )
         for tool in message.get("tools", ()):
             _refresh_tool_roles(tool, start, end)

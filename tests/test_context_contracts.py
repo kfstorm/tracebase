@@ -184,6 +184,48 @@ def test_context_groups_all_archive_observations_without_payload_interpretation(
     assert items == []
 
 
+def test_pending_tool_without_start_is_observed_state(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        _session_payload(
+            "session-1",
+            messages=[
+                _message(
+                    "message-1",
+                    "2026-01-01T00:30:00Z",
+                    [
+                        {
+                            "type": "tool",
+                            "id": "tool-1",
+                            "state": {"status": "pending", "input": {}},
+                        }
+                    ],
+                )
+            ],
+        ),
+    )
+    run.publish({})
+    manifest = _context_manifest(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+    )
+    assert manifest["gaps"] == []
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "second-output",
+        "session-1",
+    )
+    tool = projection["messages"][0]["tools"][0]
+    assert tool["temporal_roles"] == ["observed_state"]
+    assert "start" not in tool
+    assert "end" not in tool
+
+
 def test_opencode_required_payload_errors_are_not_rendered_as_gaps(
     tmp_path: Path,
 ) -> None:
