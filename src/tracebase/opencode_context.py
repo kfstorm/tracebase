@@ -264,7 +264,13 @@ def _part_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None
     started = time_data.get("start")
     finished = time_data.get("end")
     if started is None:
-        return None
+        created = time_data.get("created")
+        if created is None:
+            return None
+        if not isinstance(created, (int, float, str)) or isinstance(created, bool):
+            raise ArchiveError("OpenCode part payload is invalid")
+        created_time = _timestamp(created)
+        return created_time, created_time
     if not isinstance(started, (int, float, str)) or isinstance(started, bool):
         raise ArchiveError("OpenCode part payload is invalid")
     start_time = _timestamp(started)

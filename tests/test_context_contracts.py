@@ -498,6 +498,109 @@ def test_parts_are_ordered_by_semantic_time_then_id(tmp_path: Path) -> None:
     ]
 
 
+def test_native_created_point_selects_session_and_orders_parts(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _publish_single_message(
+        archive,
+        _message(
+            "message-1",
+            "2025-12-31T23:59:00Z",
+            [
+                {
+                    "type": "future-part-type",
+                    "id": "unknown-1",
+                    "someNativeField": "value",
+                },
+                {
+                    "type": "retry",
+                    "id": "retry-1",
+                    "time": {"created": "2026-01-01T00:10:00Z"},
+                },
+            ],
+        ),
+    )
+
+    manifest = _context_manifest(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+    )
+    item = _opencode_item(manifest, "session-1")
+    projection = json.loads((tmp_path / "output" / item["opencode_path"]).read_text())
+    assert item["inclusion_reasons"] == ["in_range_source_record"]
+    assert [part["id"] for part in projection["messages"][0]["parts"]] == [
+        "retry-1",
+        "unknown-1",
+    ]
+    retry = _projected_part(projection, "retry")
+    assert retry["temporal_roles"] == ["in_range_work"]
+    assert retry["value"]["time"] == {"created": "2026-01-01T00:10:00Z"}
+
+
+def test_native_created_point_at_range_end_is_excluded(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _publish_single_message(
+        archive,
+        _message(
+            "message-1",
+            "2025-12-31T23:59:00Z",
+            [
+                {
+                    "type": "text",
+                    "id": "text-1",
+                    "time": {
+                        "start": "2026-01-01T00:30:00Z",
+                        "end": "2026-01-01T00:31:00Z",
+                    },
+                },
+                {
+                    "type": "retry",
+                    "id": "retry-1",
+                    "time": {"created": "2026-01-01T01:00:00Z"},
+                },
+            ],
+        ),
+    )
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    retry = _projected_part(projection, "retry")
+    assert retry["temporal_roles"] == ["later_progression"]
+
+
+def test_unknown_part_is_preserved_as_observed_state(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    unknown = {
+        "type": "future-part-type",
+        "id": "unknown-1",
+        "someNativeField": "value",
+    }
+    _publish_single_message(
+        archive,
+        _message("message-1", "2026-01-01T00:10:00Z", [unknown]),
+    )
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    part = _projected_part(projection, "future-part-type")
+    assert part["type"] == "future-part-type"
+    assert part["value"] == unknown
+    assert part["temporal_roles"] == ["observed_state"]
+
+
 def test_missing_task_child_is_reported_as_gap(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
