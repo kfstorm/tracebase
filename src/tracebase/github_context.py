@@ -91,6 +91,7 @@ def _record(
     value: dict[str, Any],
     evidence_path: str,
     snapshot: PublishedSnapshot,
+    observation: int,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "kind": kind,
@@ -99,6 +100,7 @@ def _record(
             {
                 "evidence_path": evidence_path,
                 "run_id": snapshot.run["run_id"],
+                "observation": observation,
                 "observation_window": snapshot.manifest["observation_window"],
                 "value": value,
             }
@@ -201,14 +203,15 @@ def project_github(  # noqa: PLR0915
     relations: set[tuple[str, str, str]] = set()
     source_id = snapshots[0].manifest["source_id"]
     object_kind = snapshots[0].manifest["object_kind"]
-    for snapshot in snapshots:
+    for observation, snapshot in enumerate(snapshots, start=1):
         inline_nodes_by_rest_id: dict[int, str] = {}
         inline_replies: list[tuple[int, str]] = []
         issue = _json(snapshot, "issue.json")
         if not isinstance(issue, dict) or issue.get("node_id") != source_id:
             raise ArchiveError("GitHub Item evidence identity was invalid")
         _add_record(
-            records, _record(object_kind, source_id, issue, "issue.json", snapshot)
+            records,
+            _record(object_kind, source_id, issue, "issue.json", snapshot, observation),
         )
         for path in sorted(
             name for name in snapshot.evidence if name.startswith("comments.")
@@ -218,7 +221,12 @@ def project_github(  # noqa: PLR0915
                     _add_record(
                         records,
                         _record(
-                            "ordinary-comment", str(value["id"]), value, path, snapshot
+                            "ordinary-comment",
+                            str(value["id"]),
+                            value,
+                            path,
+                            snapshot,
+                            observation,
                         ),
                     )
         for path in sorted(
@@ -237,7 +245,10 @@ def project_github(  # noqa: PLR0915
                     ):
                         kind, identifier = "review", value["id"]
                     _add_record(
-                        records, _record(kind, str(identifier), value, path, snapshot)
+                        records,
+                        _record(
+                            kind, str(identifier), value, path, snapshot, observation
+                        ),
                     )
         if object_kind != "pull-request":
             continue
@@ -252,6 +263,7 @@ def project_github(  # noqa: PLR0915
                 pull,
                 "pull-request.json",
                 snapshot,
+                observation,
             ),
         )
         for path in sorted(
@@ -261,7 +273,14 @@ def project_github(  # noqa: PLR0915
                 if isinstance(value.get("id"), int):
                     _add_record(
                         records,
-                        _record("review", str(value["id"]), value, path, snapshot),
+                        _record(
+                            "review",
+                            str(value["id"]),
+                            value,
+                            path,
+                            snapshot,
+                            observation,
+                        ),
                     )
         for path in sorted(
             name for name in snapshot.evidence if name.startswith("review-comments.")
@@ -271,7 +290,10 @@ def project_github(  # noqa: PLR0915
                 if not isinstance(node_id, str):
                     raise ArchiveError("GitHub review-comment evidence was invalid")
                 _add_record(
-                    records, _record("inline-comment", node_id, value, path, snapshot)
+                    records,
+                    _record(
+                        "inline-comment", node_id, value, path, snapshot, observation
+                    ),
                 )
                 if isinstance(value.get("id"), int):
                     inline_nodes_by_rest_id[value["id"]] = node_id
@@ -292,7 +314,14 @@ def project_github(  # noqa: PLR0915
                     raise ArchiveError("GitHub review-thread evidence was invalid")
                 _add_record(
                     records,
-                    _record("review-thread", thread_id, thread, path, snapshot),
+                    _record(
+                        "review-thread",
+                        thread_id,
+                        thread,
+                        path,
+                        snapshot,
+                        observation,
+                    ),
                 )
                 for comment in nodes:
                     if not isinstance(comment, dict) or not isinstance(
@@ -338,6 +367,7 @@ def project_github(  # noqa: PLR0915
                         {
                             "evidence_path": "pull-request.diff",
                             "run_id": snapshot.run["run_id"],
+                            "observation": observation,
                             "observation_window": snapshot.manifest[
                                 "observation_window"
                             ],

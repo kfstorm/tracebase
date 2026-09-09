@@ -97,10 +97,14 @@ def _publish_github(
     evidence: dict[str, object | str],
     *,
     run_id: str = "github-run",
+    from_text: str = "2026-01-01T00:00:00Z",
+    to_text: str = "2026-01-02T00:00:00Z",
 ) -> None:
     run = _run(
         archive,
         run_id,
+        from_text,
+        to_text,
         source_kind="github",
         scope_id="tracked-actor",
     )
@@ -484,7 +488,7 @@ def test_github_renderer_whitelists_discussion_structure_and_diff_once(
                 "number": 1,
                 "title": "Harden output",
                 "body": "Keep this body. https://docs.python.org/3/",
-                "state": "open",
+                "state": "closed",
                 "user": {"login": "author"},
                 "created_at": "2025-12-31T23:00:00Z",
                 "updated_at": "2026-01-01T00:30:00Z",
@@ -576,6 +580,7 @@ def test_github_renderer_whitelists_discussion_structure_and_diff_once(
         "Inline body",
         "src/context.py",
         "isResolved",
+        "Merged: `false`",
         "diff --git",
     ):
         assert marker in text
@@ -585,6 +590,115 @@ def test_github_renderer_whitelists_discussion_structure_and_diff_once(
     assert "private.example" not in text
     assert "diff-secret" not in text
     assert "review-inline-comment" in text
+
+
+def test_github_body_history_keeps_distinct_values_and_real_observations(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    source_id = "PR_history"
+    base_issue = {
+        "node_id": source_id,
+        "number": 1,
+        "title": "Historical body",
+        "state": "open",
+        "user": {"login": "author"},
+    }
+    _publish_github(
+        archive,
+        source_id,
+        {
+            "issue.json": {
+                **base_issue,
+                "body": "old requirement",
+                "updated_at": "2026-01-01T00:30:00Z",
+            },
+            "pull-request.json": {"node_id": source_id, "merged": False},
+            "comments.001.json": [],
+        },
+        run_id="github-first",
+    )
+    _publish_github(
+        archive,
+        source_id,
+        {
+            "issue.json": {
+                **base_issue,
+                "body": "new requirement",
+                "updated_at": "2026-01-02T00:30:00Z",
+            },
+            "pull-request.json": {"node_id": source_id, "merged": False},
+            "comments.001.json": [
+                {
+                    "id": 99,
+                    "body": "appeared in the second snapshot",
+                    "user": {"login": "commenter"},
+                    "created_at": "2026-01-01T00:40:00Z",
+                }
+            ],
+        },
+        run_id="github-second",
+        from_text="2026-01-02T00:00:00Z",
+        to_text="2026-01-03T00:00:00Z",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, _request(), output)
+    text = _github_view(output, source_id).read_text()
+
+    assert "old requirement" in text
+    assert "new requirement" in text
+    assert "Observation 1" in text
+    assert "Observation 2" in text
+    assert (
+        "- Observation 1 [2026-01-01T00:00:00Z, 2026-01-02T00:00:00Z):\n"
+        "  ```text\n  old requirement\n  ```"
+    ) in text
+    assert (
+        "- Observation 2 [2026-01-02T00:00:00Z, 2026-01-03T00:00:00Z):\n"
+        "  ```text\n  new requirement\n  ```"
+    ) in text
+    assert "appeared in the second snapshot" in text
+    assert "Observed in: observation 2" in text
+
+
+def test_pull_request_payload_lifecycle_is_whitelisted(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    source_id = "PR_merged"
+    _publish_github(
+        archive,
+        source_id,
+        {
+            "issue.json": {
+                "node_id": source_id,
+                "number": 2,
+                "title": "Merged change",
+                "state": "closed",
+                "user": {"login": "author"},
+                "updated_at": "2026-01-01T00:30:00Z",
+            },
+            "pull-request.json": {
+                "node_id": source_id,
+                "merged": True,
+                "merged_at": "2026-01-01T00:45:00Z",
+                "draft": False,
+                "mergeable": "MERGEABLE",
+                "api_url": "https://private.example/pull/2",
+            },
+        },
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, _request(), output)
+    text = _github_view(output, source_id).read_text()
+
+    assert "State: `closed`" in text
+    assert "Merged: `true`" in text
+    assert "Merged at: 2026-01-01T00:45:00Z" in text
+    assert "mergeable" not in text
+    assert "private.example" not in text
 
 
 def test_output_is_deterministic_and_excludes_collection_run_ids(
