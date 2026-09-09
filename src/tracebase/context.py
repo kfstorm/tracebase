@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -247,22 +248,37 @@ def _public_run_ids(snapshots: tuple[PublishedSnapshot, ...]) -> dict[str, str]:
     }
 
 
+def _transform_output_value(value: Any, transform: Callable[[Any], Any]) -> Any:
+    if isinstance(value, dict):
+        transformed = {
+            key: _transform_output_value(item, transform) for key, item in value.items()
+        }
+        return transform(transformed)
+    if isinstance(value, list):
+        return transform([_transform_output_value(item, transform) for item in value])
+    if isinstance(value, tuple):
+        return transform(
+            tuple(_transform_output_value(item, transform) for item in value)
+        )
+    return transform(value)
+
+
 def _replace_uuid_run_ids(value: Any, snapshots: tuple[PublishedSnapshot, ...]) -> Any:
     public_ids = _public_run_ids(snapshots)
-    if isinstance(value, dict):
+
+    def replace_run_id(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
         return {
             key: (
-                public_ids.get(item, item)
-                if key == "run_id" and isinstance(item, str)
-                else _replace_uuid_run_ids(item, snapshots)
+                public_ids.get(value, value)
+                if key == "run_id" and isinstance(value, str)
+                else value
             )
-            for key, item in value.items()
+            for key, value in item.items()
         }
-    if isinstance(value, list):
-        return [_replace_uuid_run_ids(item, snapshots) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_replace_uuid_run_ids(item, snapshots) for item in value)
-    return value
+
+    return _transform_output_value(value, replace_run_id)
 
 
 def _sanitize_text(value: str) -> str:
@@ -290,19 +306,18 @@ def _sanitize_text(value: str) -> str:
 
 
 def _sanitize_public_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _sanitize_public_value(item)
-            for key, item in value.items()
-            if not _SENSITIVE_KEY.search(key)
-        }
-    if isinstance(value, list):
-        return [_sanitize_public_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_sanitize_public_value(item) for item in value)
-    if isinstance(value, str):
-        return _sanitize_text(value)
-    return value
+    def sanitize(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                key: value
+                for key, value in item.items()
+                if not _SENSITIVE_KEY.search(key)
+            }
+        if isinstance(item, str):
+            return _sanitize_text(item)
+        return item
+
+    return _transform_output_value(value, sanitize)
 
 
 def _sanitize_evidence(content: bytes) -> bytes:
@@ -604,10 +619,9 @@ def _rename_without_replacement(source: Path, target: Path) -> None:
     try:
         renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
     except AttributeError, OSError:
-        if target.exists() or target.is_symlink():
-            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST)) from None
-        source.rename(target)
-        return
+        raise OSError(
+            errno.ENOTSUP, "atomic no-replace publication is unavailable"
+        ) from None
     renameat2.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -627,10 +641,9 @@ def _rename_without_replacement(source: Path, target: Path) -> None:
         return
     error = ctypes.get_errno()
     if error == errno.ENOSYS:
-        if target.exists() or target.is_symlink():
-            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST))
-        source.rename(target)
-        return
+        raise OSError(
+            errno.ENOTSUP, "atomic no-replace publication is unavailable"
+        ) from None
     if error == errno.EEXIST:
         raise FileExistsError(error, os.strerror(error))
     raise OSError(error, os.strerror(error))
