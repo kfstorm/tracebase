@@ -119,7 +119,8 @@ def _supporting_message(message: dict[str, Any], parts: list[dict[str, Any]]) ->
     ):
         return True
     return any(
-        part.get("synthetic") is True
+        part.get("type") == "compaction"
+        or part.get("synthetic") is True
         or (
             isinstance(part.get("metadata"), dict)
             and part["metadata"].get("compaction_continue") is True

@@ -448,14 +448,18 @@ def test_selected_session_uses_its_own_task_children(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "message",
     [
-        _message("summary", "2026-01-01T00:30:00Z", info={"summary": True}),
+        _message(
+            "compaction",
+            "2026-01-01T00:30:00Z",
+            [{"type": "compaction", "tail_start_id": "message-before-compaction"}],
+        ),
         _message(
             "continuation",
             "2026-01-01T00:30:00Z",
             [{"type": "text", "synthetic": True}],
         ),
     ],
-    ids=["compaction-summary", "synthetic-continuation"],
+    ids=["native-compaction", "synthetic-continuation"],
 )
 def test_supporting_messages_do_not_select_a_session(
     tmp_path: Path, message: dict[str, object]
@@ -472,6 +476,48 @@ def test_supporting_messages_do_not_select_a_session(
         tmp_path / "output",
     )
     assert manifest["source_items"] == []
+
+
+def test_native_compaction_is_preserved_as_supporting_context(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        _session_payload(
+            "session-1",
+            messages=[
+                _message(
+                    "compaction",
+                    "2026-01-01T00:30:00Z",
+                    [
+                        {
+                            "type": "compaction",
+                            "tail_start_id": "message-before-compaction",
+                        }
+                    ],
+                ),
+                _message("work", "2026-01-01T00:45:00Z"),
+            ],
+        ),
+    )
+    run.publish({})
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    compaction = next(
+        message for message in projection["messages"] if message["id"] == "compaction"
+    )
+    assert compaction["temporal_roles"] == ["observed_state"]
+    assert compaction["value"]["parts"] == [
+        {"type": "compaction", "tail_start_id": "message-before-compaction"}
+    ]
 
 
 def test_message_payload_order_is_normalized_by_created_time(tmp_path: Path) -> None:
