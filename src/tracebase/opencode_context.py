@@ -101,21 +101,37 @@ def _created(value: dict[str, Any]) -> datetime:
     raise ArchiveError("OpenCode message payload is invalid")
 
 
-def _roles(times: list[datetime], start: datetime, end: datetime) -> tuple[str, ...]:
-    if not times:
-        return ("observed_state",)
+def _point_roles(value: datetime, start: datetime, end: datetime) -> tuple[str, ...]:
     return tuple(
         role
         for role, present in (
-            ("in_range_work", any(start <= value < end for value in times)),
-            ("earlier_background", any(value < start for value in times)),
-            ("later_progression", any(value >= end for value in times)),
+            ("in_range_work", start <= value < end),
+            ("earlier_background", value < start),
+            ("later_progression", value >= end),
         )
         if present
     )
 
 
-def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime] | None:
+def _interval_roles(
+    interval: tuple[datetime, datetime | None], start: datetime, end: datetime
+) -> tuple[str, ...]:
+    began, finished = interval
+    in_range = (
+        start <= began < end if finished is None else began < end and start < finished
+    )
+    return tuple(
+        role
+        for role, present in (
+            ("in_range_work", in_range),
+            ("earlier_background", finished is not None and finished <= start),
+            ("later_progression", began >= end),
+        )
+        if present
+    )
+
+
+def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None:
     state = part.get("state")
     if not isinstance(state, dict):
         return None
@@ -129,23 +145,23 @@ def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime] | None:
         raise ArchiveError("OpenCode tool payload is invalid")
     started = _timestamp(start)
     if end is None:
-        return (started, started)
+        return (started, None)
     if not isinstance(end, (int, float, str)) or isinstance(end, bool):
         raise ArchiveError("OpenCode tool payload is invalid")
     ended = _timestamp(end)
-    if ended < started:
+    if ended <= started:
         raise ArchiveError("OpenCode tool payload is invalid")
     return started, ended
 
 
-def project_opencode(
+def project_opencode(  # noqa: PLR0915
     snapshots: tuple[PublishedSnapshot, ...], start: datetime, end: datetime
 ) -> OpenCodeProjection:
     """Project messages as points and tool executions as intervals."""
     if not snapshots:
         raise ArchiveError("OpenCode session has no snapshot")
     session = _json(snapshots[-1])
-    messages: list[dict[str, Any]] = []
+    messages_by_id: dict[str, dict[str, Any]] = {}
     children: list[dict[str, Any]] = []
     gaps: list[dict[str, str]] = []
     for snapshot in snapshots:
@@ -167,12 +183,19 @@ def project_opencode(
                 "created": message_time.isoformat(),
                 "role": message.get("role", info.get("role")),
                 "value": message,
-                "temporal_roles": _roles([message_time], start, end),
+                "temporal_roles": _point_roles(message_time, start, end),
+                "representations": [
+                    {
+                        "run_id": snapshot.run["run_id"],
+                        "observation_window": snapshot.manifest["observation_window"],
+                        "value": message,
+                    }
+                ],
             }
             parts = message.get("parts", ())
             if not isinstance(parts, list):
                 raise ArchiveError("OpenCode message payload is invalid")
-            tools: list[dict[str, Any]] = []
+            tools: dict[str, dict[str, Any]] = {}
             for part in parts:
                 if not isinstance(part, dict):
                     raise ArchiveError("OpenCode message payload is invalid")
@@ -180,22 +203,67 @@ def project_opencode(
                     interval = _tool_times(part)
                     if interval is not None:
                         tool_start, tool_end = interval
-                        tools.append(
+                        tool_id = part.get("id", part.get("callID"))
+                        if not isinstance(tool_id, str) or not tool_id:
+                            tool_id = json.dumps(
+                                part, sort_keys=True, separators=(",", ":")
+                            )
+                        tool = tools.setdefault(
+                            tool_id,
                             {
+                                "id": tool_id,
                                 "value": part,
                                 "start": tool_start.isoformat(),
-                                "end": tool_end.isoformat(),
-                                "temporal_roles": _roles(
-                                    [tool_start, tool_end], start, end
-                                ),
+                                "temporal_roles": _interval_roles(interval, start, end),
+                                "representations": [],
+                            },
+                        )
+                        tool["representations"].append(
+                            {
+                                "run_id": snapshot.run["run_id"],
+                                "observation_window": snapshot.manifest[
+                                    "observation_window"
+                                ],
+                                "value": part,
                             }
                         )
+                        if tool_end is not None:
+                            tool["end"] = tool_end.isoformat()
                 if part.get("type") == "task" or part.get("tool") == "task":
-                    children.append(part)
+                    task_interval = _tool_times(part)
+                    if task_interval is not None and start <= task_interval[0] < end:
+                        children.append(part)
             if tools:
-                record["tools"] = tools
-            messages.append(record)
-    if not any("in_range_work" in record["temporal_roles"] for record in messages):
+                record["tools"] = list(tools.values())
+            prior = messages_by_id.get(message_id)
+            if prior is None:
+                messages_by_id[message_id] = record
+            else:
+                prior["representations"].extend(record["representations"])
+                prior_tools = {tool["id"]: tool for tool in prior.get("tools", ())}
+                for tool in record.get("tools", ()):
+                    prior_tool = prior_tools.get(tool["id"])
+                    if prior_tool is None:
+                        prior.setdefault("tools", []).append(tool)
+                    else:
+                        prior_tool["representations"].extend(tool["representations"])
+                        if "end" in tool:
+                            prior_tool["end"] = tool["end"]
+    messages = list(messages_by_id.values())
+    children = list(
+        {
+            json.dumps(child, sort_keys=True, separators=(",", ":")): child
+            for child in children
+        }.values()
+    )
+    if not any(
+        "in_range_work" in record["temporal_roles"]
+        or any(
+            "in_range_work" in tool["temporal_roles"]
+            for tool in record.get("tools", ())
+        )
+        for record in messages
+    ):
         gaps.append({"kind": "no_in_range_messages", "reason": "bounded_range"})
     all_roles = tuple(
         sorted(
@@ -208,7 +276,14 @@ def project_opencode(
             }
         )
     )
-    selected = any("in_range_work" in message["temporal_roles"] for message in messages)
+    selected = any(
+        "in_range_work" in message["temporal_roles"]
+        or any(
+            "in_range_work" in tool["temporal_roles"]
+            for tool in message.get("tools", ())
+        )
+        for message in messages
+    )
     return OpenCodeProjection(
         selected,
         ("in_range_source_record",) if selected else (),

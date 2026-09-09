@@ -298,7 +298,23 @@ def _render_source_view(
                 "gaps": opencode_projection.gaps,
             },
         )
-        return f"{item.path}/opencode.json"
+        lines = ["# OpenCode Session", "", "## Messages", ""]
+        for message in opencode_projection.messages:
+            roles = ", ".join(message["temporal_roles"]) or "observed_state"
+            lines.append(f"- `{message['id']}` ({roles})")
+            for tool in message.get("tools", ()):
+                roles = ", ".join(tool["temporal_roles"]) or "observed_state"
+                lines.append(f"  - tool `{tool['id']}` ({roles})")
+        if opencode_projection.task_children:
+            lines.extend(["", "## Task Children", ""])
+            lines.extend(
+                f"- `{child.get('id', child.get('sessionID', 'unknown'))}`"
+                for child in opencode_projection.task_children
+            )
+        (item_root / "opencode.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+        return f"{item.path}/opencode.md"
     view_path = f"{item.path}/{source.manifest['source_kind']}.md"
     lines = [
         "# Source Item",
@@ -410,6 +426,7 @@ def _render_manifest(
             "source_items": items,
             "relations": [],
             "unresolved_references": [],
+            "gaps": [],
             "output_inventory": [*inventory, "context.json"],
         },
     )

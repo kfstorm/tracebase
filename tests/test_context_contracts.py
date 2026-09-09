@@ -96,6 +96,7 @@ def test_empty_archive_is_a_complete_deterministic_output(tmp_path: Path) -> Non
     assert manifest["source_items"] == []
     assert manifest["relations"] == []
     assert manifest["unresolved_references"] == []
+    assert manifest["gaps"] == []
 
 
 def test_context_groups_all_archive_observations_without_payload_interpretation(
@@ -142,6 +143,102 @@ def test_opencode_required_payload_errors_are_not_rendered_as_gaps(
             ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
             tmp_path / "output",
         )
+
+
+def test_opencode_projection_uses_interval_overlap_and_preserves_observations(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    first = _run(archive, "a", "2025-12-31T00:00:00Z", "2026-01-01T00:00:00Z")
+    first_payload = {
+        "id": "session-1",
+        "messages": [
+            {
+                "id": "message-1",
+                "created": "2025-12-31T23:00:00Z",
+                "parts": [
+                    {
+                        "type": "tool",
+                        "id": "tool-1",
+                        "state": {
+                            "time": {
+                                "start": "2025-12-31T23:59:00Z",
+                                "end": "2026-01-01T00:01:00Z",
+                            }
+                        },
+                    },
+                    {
+                        "type": "task",
+                        "state": {"time": {"start": "2025-12-31T23:00:00Z"}},
+                    },
+                ],
+            }
+        ],
+    }
+    snapshot = first.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "session-1",
+            first.collection_range.as_manifest(),
+            ({"path": "session.json"},),
+        )
+    )
+    first.write_evidence(snapshot, "session.json", json.dumps(first_payload).encode())
+    first.publish({})
+
+    second = _run(archive, "b", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")
+    second_payload = {
+        "id": "session-1",
+        "messages": [
+            {
+                "id": "message-1",
+                "created": "2025-12-31T23:00:00Z",
+                "parts": [
+                    {
+                        "type": "tool",
+                        "id": "tool-1",
+                        "state": {"time": {"start": "2026-01-01T00:30:00Z"}},
+                    },
+                    {
+                        "type": "task",
+                        "id": "child-in-range",
+                        "state": {"time": {"start": "2026-01-01T00:30:00Z"}},
+                    },
+                ],
+            }
+        ],
+    }
+    snapshot = second.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "session-1",
+            second.collection_range.as_manifest(),
+            ({"path": "session.json"},),
+        )
+    )
+    second.write_evidence(snapshot, "session.json", json.dumps(second_payload).encode())
+    second.publish({})
+
+    output = tmp_path / "output"
+    request = ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")
+    generate_context(archive.root, request, output)
+    manifest = json.loads((output / "context.json").read_text())
+    item = manifest["source_items"][0]
+    assert item["view_path"].endswith("/opencode.md")
+    assert item["opencode_path"].endswith("/opencode.json")
+    projection = json.loads((output / item["opencode_path"]).read_text())
+    assert len(projection["messages"]) == 1
+    message = projection["messages"][0]
+    assert len(message["representations"]) == 2
+    assert len(message["tools"]) == 1
+    assert len(message["tools"][0]["representations"]) == 2
+    assert message["tools"][0]["temporal_roles"] == ["in_range_work"]
+    assert [child.get("id") for child in projection["task_children"]] == [
+        "child-in-range"
+    ]
 
 
 def test_github_context_projects_native_records_without_fix_inference(  # noqa: PLR0915
