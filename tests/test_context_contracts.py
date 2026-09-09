@@ -81,6 +81,10 @@ def _context_manifest(
     return json.loads((output / "context.json").read_text())
 
 
+def _output_bytes(output: Path) -> bytes:
+    return b"".join(path.read_bytes() for path in output.rglob("*") if path.is_file())
+
+
 def _opencode_item(manifest: dict[str, object], session_id: str) -> dict[str, object]:
     for item in manifest["source_items"]:
         if item["source_id"] == session_id:
@@ -1077,13 +1081,57 @@ def test_uuid_collection_ids_do_not_become_output_identity_or_paths(
         ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
         output,
     )
-    output_bytes = b"".join(
-        path.read_bytes() for path in output.rglob("*") if path.is_file()
-    )
-    assert run_id.encode() not in output_bytes
+    assert run_id.encode() not in _output_bytes(output)
     assert any(
         "observations/observation-001" in path.as_posix() for path in output.rglob("*")
     )
+
+
+def test_context_output_redacts_credentials_and_private_urls(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        {
+            "id": "session-1",
+            "info": {
+                "id": "session-1",
+                "directory": "/home/example/project",
+                "api_key": "credential-sentinel",
+            },
+            "messages": [
+                _message(
+                    "message-1",
+                    "2026-01-01T00:30:00Z",
+                    [
+                        {
+                            "type": "text",
+                            "id": "text-1",
+                            "text": (
+                                "Bearer secret-sentinel https://localhost:8443/private"
+                            ),
+                        }
+                    ],
+                )
+            ],
+        },
+    )
+    run.publish({})
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        output,
+    )
+    output_bytes = _output_bytes(output)
+    assert b"credential-sentinel" not in output_bytes
+    assert b"secret-sentinel" not in output_bytes
+    assert b"https://localhost:8443/private" not in output_bytes
+    assert b"/home/example/project" in output_bytes
 
 
 def test_github_context_projects_native_records_without_fix_inference(  # noqa: PLR0915
