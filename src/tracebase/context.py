@@ -6,7 +6,7 @@ import json
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -19,6 +19,11 @@ from .archive import (
     load_published_archive,
 )
 from .github_context import GitHubProjection, project_github
+from .opencode_context import (
+    OpenCodeProjection,
+    project_opencode,
+    resolve_opencode_context,
+)
 
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
@@ -77,6 +82,7 @@ class ContextItem:
     snapshots: tuple[PublishedSnapshot, ...]
     path: str
     github: GitHubProjection | None = None
+    opencode: OpenCodeProjection | None = None
 
     @property
     def source(self) -> PublishedSnapshot:
@@ -131,16 +137,57 @@ def extract_context(
             _validate_context_source(snapshot)
             grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
     all_items: list[ContextItem] = []
+    opencode_projections: dict[tuple[str, str, str, str], OpenCodeProjection] = {}
     for key, snapshots in sorted(grouped.items()):
         ordered = tuple(sorted(snapshots, key=lambda value: value.run["run_id"]))
-        projection = (
-            project_github(ordered, request.start, request.end)
-            if key[0] == "github"
-            else None
+        try:
+            github = (
+                project_github(ordered, request.start, request.end)
+                if key[0] == "github"
+                else None
+            )
+            opencode = (
+                project_opencode(ordered, request.start, request.end)
+                if key[0] == "opencode"
+                else None
+            )
+        except ArchiveError as error:
+            raise ContextError(str(error)) from None
+        if opencode is not None:
+            opencode_projections[key] = opencode
+        all_items.append(ContextItem(ordered, _item_path(key), github, opencode))
+    projections_by_scope: dict[
+        str, list[tuple[tuple[str, str, str, str], OpenCodeProjection]]
+    ] = {}
+    for key, projection in opencode_projections.items():
+        projections_by_scope.setdefault(key[1], []).append((key, projection))
+    for scoped in projections_by_scope.values():
+        resolved = resolve_opencode_context(
+            tuple(projection for _, projection in scoped)
         )
-        all_items.append(ContextItem(ordered, _item_path(key), projection))
+        for (key, _), projection in zip(scoped, resolved, strict=True):
+            opencode_projections[key] = projection
+    supporting_keys = {
+        key
+        for key, projection in opencode_projections.items()
+        if projection.inclusion_reasons == ("supporting-task-context",)
+    }
+    all_items = [
+        replace(
+            item,
+            opencode=opencode_projections.get(_logical_key(item.source)),
+        )
+        for item in all_items
+    ]
     items = tuple(
-        item for item in all_items if item.github is None or item.github.selected
+        item
+        for item in all_items
+        if (item.github is None or item.github.selected)
+        and (
+            item.opencode is None
+            or item.opencode.selected
+            or _logical_key(item.source) in supporting_keys
+        )
     )
     return ContextExtractionResult(
         request,
@@ -227,6 +274,30 @@ def _render_source_view(
         lines.append("Aggregate diffs do not establish a fix or fixing commit.")
         (item_root / "github.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return f"{item.path}/github.md"
+    if item.opencode is not None:
+        opencode_projection = item.opencode
+        _write_json(
+            item_root / "opencode.json",
+            {
+                "schema_version": 1,
+                "session": opencode_projection.session,
+                "messages": opencode_projection.messages,
+                "inclusion_reasons": opencode_projection.inclusion_reasons,
+                "temporal_roles": opencode_projection.temporal_roles,
+                "gaps": opencode_projection.gaps,
+            },
+        )
+        lines = ["# OpenCode Session", "", "## Messages", ""]
+        for message in opencode_projection.messages:
+            roles = ", ".join(message["temporal_roles"]) or "observed_state"
+            lines.append(f"- `{message['id']}` ({roles})")
+            for part in message.get("parts", ()):
+                roles = ", ".join(part["temporal_roles"]) or "observed_state"
+                lines.append(f"  - {part['type']} `{part['id']}` ({roles})")
+        (item_root / "opencode.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+        return f"{item.path}/opencode.md"
     view_path = f"{item.path}/{source.manifest['source_kind']}.md"
     lines = [
         "# Source Item",
@@ -288,6 +359,10 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
         result["inclusion_reasons"] = item.github.inclusion_reasons
         result["temporal_roles"] = item.github.temporal_roles
         result["github_path"] = f"{item.path}/github.json"
+    if item.opencode is not None:
+        result["inclusion_reasons"] = item.opencode.inclusion_reasons
+        result["temporal_roles"] = item.opencode.temporal_roles
+        result["opencode_path"] = f"{item.path}/opencode.json"
     return result
 
 
