@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,7 +19,6 @@ class OpenCodeProjection:
     temporal_roles: tuple[str, ...]
     session: dict[str, Any]
     messages: tuple[dict[str, Any], ...]
-    task_children: tuple[dict[str, Any], ...]
     gaps: tuple[dict[str, str], ...]
 
     @property
@@ -52,22 +51,119 @@ class OpenCodeProjection:
     @property
     def task_child_references(self) -> tuple[dict[str, str], ...]:
         references: list[dict[str, str]] = []
-        for part in self.task_children:
-            value = part.get("value")
-            value = value if isinstance(value, dict) else {}
-            state = value.get("state")
-            metadata = state.get("metadata") if isinstance(state, dict) else None
-            if not isinstance(metadata, dict):
-                continue
-            parent_id = metadata.get("parentSessionId")
-            if parent_id != self.session_id:
-                continue
-            child_id = metadata.get("sessionId")
-            if isinstance(child_id, str) and child_id:
-                references.append({"child_id": child_id})
-            else:
-                references.append({"malformed": "true"})
+        for message in self.messages:
+            for part in message.get("parts", ()):
+                if part.get("type") != "task" and part.get("tool") != "task":
+                    continue
+                if "in_range_work" not in part.get("temporal_roles", ()):
+                    continue
+                value = part.get("value")
+                value = value if isinstance(value, dict) else {}
+                state = value.get("state")
+                metadata = state.get("metadata") if isinstance(state, dict) else None
+                if not isinstance(metadata, dict):
+                    continue
+                parent_id = metadata.get("parentSessionId")
+                if parent_id != self.session_id:
+                    continue
+                child_id = metadata.get("sessionId")
+                if isinstance(child_id, str) and child_id:
+                    references.append({"child_id": child_id})
+                else:
+                    references.append({"malformed": "true"})
         return tuple(references)
+
+
+def resolve_opencode_context(
+    projections: tuple[OpenCodeProjection, ...],
+) -> tuple[OpenCodeProjection, ...]:
+    """Expand selected OpenCode sessions through their native session graph."""
+    by_session_id = {projection.session_id: projection for projection in projections}
+    selected_ids = {
+        projection.session_id for projection in projections if projection.selected
+    }
+    supporting_ids: set[str] = set()
+    graph_gaps: dict[str, list[dict[str, str]]] = {}
+
+    for selected_id in selected_ids:
+        current_id = selected_id
+        current_projection = by_session_id[selected_id]
+        parent_value = current_projection.parent_value
+        parent_id = current_projection.parent_id
+        seen: set[str] = set()
+        if parent_value is not None and not isinstance(parent_value, str):
+            graph_gaps.setdefault(current_id, []).append(
+                {
+                    "kind": "malformed-session-parent",
+                    "session_id": current_projection.session_id,
+                }
+            )
+        while isinstance(parent_id, str) and parent_id not in seen:
+            seen.add(parent_id)
+            parent = by_session_id.get(parent_id)
+            if parent is None:
+                graph_gaps.setdefault(current_id, []).append(
+                    {
+                        "kind": "missing-session-parent",
+                        "session_id": current_projection.session_id,
+                        "parent_id": parent_id,
+                    }
+                )
+                break
+            supporting_ids.add(parent_id)
+            current_id = parent_id
+            current_projection = parent
+            parent_value = current_projection.parent_value
+            if parent_value is not None and not isinstance(parent_value, str):
+                graph_gaps.setdefault(current_id, []).append(
+                    {
+                        "kind": "malformed-session-parent",
+                        "session_id": current_projection.session_id,
+                    }
+                )
+                break
+            parent_id = current_projection.parent_id
+        if isinstance(parent_id, str) and parent_id in seen:
+            graph_gaps.setdefault(current_id, []).append(
+                {
+                    "kind": "cyclic-session-parent",
+                    "session_id": current_projection.session_id,
+                    "parent_id": parent_id,
+                }
+            )
+
+        for reference in by_session_id[selected_id].task_child_references:
+            if "malformed" in reference:
+                graph_gaps.setdefault(selected_id, []).append(
+                    {"kind": "malformed-task-child", "session_id": selected_id}
+                )
+                continue
+            child_id = reference["child_id"]
+            if child_id in by_session_id:
+                supporting_ids.add(child_id)
+            else:
+                graph_gaps.setdefault(selected_id, []).append(
+                    {
+                        "kind": "missing-task-child",
+                        "session_id": selected_id,
+                        "child_id": child_id,
+                    }
+                )
+
+    resolved: list[OpenCodeProjection] = []
+    for original in projections:
+        gaps = original.gaps + tuple(graph_gaps.get(original.session_id, ()))
+        resolved_projection = original
+        if original.session_id in supporting_ids and not original.selected:
+            resolved_projection = replace(
+                original,
+                inclusion_reasons=("supporting-task-context",),
+                gaps=gaps,
+            )
+        elif gaps:
+            resolved_projection = replace(original, gaps=gaps)
+        resolved.append(resolved_projection)
+    return tuple(resolved)
 
 
 def _timestamp(value: Any) -> datetime:
@@ -161,15 +257,6 @@ def _interval_roles(
     )
 
 
-def _interval_qualifies(
-    interval: tuple[datetime, datetime | None], start: datetime, end: datetime
-) -> bool:
-    began, finished = interval
-    if finished == began or finished is None:
-        return start <= began < end
-    return began < end and start < finished
-
-
 def _part_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None:
     time_data = part.get("time")
     if not isinstance(time_data, dict):
@@ -215,16 +302,6 @@ def _part_is_work(part: dict[str, Any]) -> bool:
     )
 
 
-def _refresh_tool_roles(tool: dict[str, Any], start: datetime, end: datetime) -> None:
-    if not tool["intervals"]:
-        tool["temporal_roles"] = ("observed_state",)
-        return
-    roles: set[str] = set()
-    for interval in tool["intervals"]:
-        roles.update(_interval_roles(interval, start, end))
-    tool["temporal_roles"] = tuple(sorted(roles))
-
-
 def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None:
     state = part.get("state")
     if not isinstance(state, dict):
@@ -258,7 +335,6 @@ def project_opencode(  # noqa: PLR0915
         raise ArchiveError("OpenCode session has no snapshot")
     session: dict[str, Any] = {"value": _json(snapshots[-1]), "representations": []}
     messages_by_id: dict[str, dict[str, Any]] = {}
-    children_by_id: dict[str, dict[str, Any]] = {}
     gaps: list[dict[str, str]] = []
     for snapshot in snapshots:
         payload = _json(snapshot)
@@ -306,7 +382,6 @@ def project_opencode(  # noqa: PLR0915
             if supporting_message:
                 record["temporal_roles"] = ("observed_state",)
             parts_by_id: dict[str, dict[str, Any]] = {}
-            tools: dict[str, dict[str, Any]] = {}
             for part in parts:
                 if not isinstance(part, dict):
                     raise ArchiveError("OpenCode message payload is invalid")
@@ -314,6 +389,7 @@ def project_opencode(  # noqa: PLR0915
                 part_interval = (
                     _tool_times(part)
                     if part.get("type") in {"tool", "task"}
+                    or part.get("tool") == "task"
                     else _part_times(part)
                 )
                 part_record = parts_by_id.setdefault(
@@ -340,53 +416,12 @@ def project_opencode(  # noqa: PLR0915
                 )
                 if part_interval is not None:
                     part_record["intervals"].append(part_interval)
-                if part.get("type") == "tool":
-                    interval = _tool_times(part)
-                    tool_id = part.get("id", part.get("callID"))
-                    if not isinstance(tool_id, str) or not tool_id:
-                        tool_id = json.dumps(
-                            part, sort_keys=True, separators=(",", ":")
-                        )
-                    tool = tools.setdefault(
-                        tool_id,
-                        {
-                            "id": tool_id,
-                            "value": part,
-                            "temporal_roles": (
-                                _interval_roles(interval, start, end)
-                                if interval is not None
-                                else ("observed_state",)
-                            ),
-                            "representations": [],
-                            "intervals": [],
-                        },
-                    )
-                    tool["representations"].append(
-                        {
-                            "run_id": snapshot.run["run_id"],
-                            "observation_window": snapshot.manifest[
-                                "observation_window"
-                            ],
-                            "value": part,
-                        }
-                    )
-                    if interval is not None:
-                        tool["intervals"].append(interval)
-                        tool_start, tool_end = interval
-                        tool["_start_time"] = tool_start
-                        tool["start"] = tool_start.isoformat()
-                        if tool_end is not None:
-                            tool["end"] = tool_end.isoformat()
-                if part.get("type") == "task" or part.get("tool") == "task":
-                    task_interval = _tool_times(part)
-                    if task_interval is not None and _interval_qualifies(
-                        task_interval, start, end
-                    ):
-                        children_by_id[part_id] = part_record
+                    part_record["_start_time"] = part_interval[0]
+                    part_record["start"] = part_interval[0].isoformat()
+                    if part_interval[1] is not None:
+                        part_record["end"] = part_interval[1].isoformat()
             if parts_by_id:
                 record["parts"] = list(parts_by_id.values())
-            if tools:
-                record["tools"] = list(tools.values())
             prior = messages_by_id.get(message_id)
             if prior is None:
                 messages_by_id[message_id] = record
@@ -404,55 +439,33 @@ def project_opencode(  # noqa: PLR0915
                         prior_part["value"] = part["value"]
                         prior_part["representations"].extend(part["representations"])
                         prior_part["intervals"].extend(part["intervals"])
+                        if "_start_time" in part:
+                            prior_part["_start_time"] = part["_start_time"]
+                            prior_part["start"] = part["start"]
+                        if "end" in part:
+                            prior_part["end"] = part["end"]
                         _refresh_part_roles(prior_part, start, end)
-                prior_tools = {tool["id"]: tool for tool in prior.get("tools", ())}
-                for tool in record.get("tools", ()):
-                    prior_tool = prior_tools.get(tool["id"])
-                    if prior_tool is None:
-                        prior.setdefault("tools", []).append(tool)
-                    else:
-                        prior_tool["representations"].extend(tool["representations"])
-                        if "_start_time" in tool:
-                            prior_tool["_start_time"] = tool["_start_time"]
-                            prior_tool["start"] = tool["start"]
-                        if "end" in tool:
-                            prior_tool["end"] = tool["end"]
-                        prior_tool["intervals"].extend(tool["intervals"])
-                        _refresh_tool_roles(prior_tool, start, end)
     messages = list(messages_by_id.values())
     messages.sort(key=lambda message: (message["_created_time"], message["id"]))
     for message in messages:
-        message.get("tools", []).sort(
+        message.get("parts", []).sort(
             key=lambda tool: (
                 "_start_time" not in tool,
                 tool.get("_start_time"),
                 tool["id"],
             )
         )
-        for tool in message.get("tools", ()):
-            _refresh_tool_roles(tool, start, end)
-            tool.pop("intervals", None)
-            tool.pop("_start_time", None)
         for part in message.get("parts", ()):
             _refresh_part_roles(part, start, end)
             part.pop("intervals", None)
+            part.pop("_start_time", None)
         message.pop("_created_time", None)
-    children_by_id = {}
-    for message in messages:
-        for part in message.get("parts", ()):
-            if (
-                part["type"] in {"task"} or part["value"].get("tool") == "task"
-            ) and "in_range_work" in part["temporal_roles"]:
-                children_by_id[part["id"]] = part
-    children = list(children_by_id.values())
     if not any(
         (not record["_supporting"] and "in_range_work" in record["temporal_roles"])
         or any(
-            "in_range_work" in tool["temporal_roles"]
-            for tool in record.get("tools", ())
-        )
-        or any(
-            _part_is_work(part) and "in_range_work" in part["temporal_roles"]
+            not record["_supporting"]
+            and _part_is_work(part)
+            and "in_range_work" in part["temporal_roles"]
             for part in record.get("parts", ())
         )
         for record in messages
@@ -464,14 +477,8 @@ def project_opencode(  # noqa: PLR0915
             | {
                 role
                 for message in messages
-                for tool in message.get("tools", ())
-                for role in tool["temporal_roles"]
-            }
-            | {
-                role
-                for message in messages
                 for part in message.get("parts", ())
-                if _part_is_work(part)
+                if not message["_supporting"] and _part_is_work(part)
                 for role in part["temporal_roles"]
             }
         )
@@ -479,11 +486,9 @@ def project_opencode(  # noqa: PLR0915
     selected = any(
         (not message["_supporting"] and "in_range_work" in message["temporal_roles"])
         or any(
-            "in_range_work" in tool["temporal_roles"]
-            for tool in message.get("tools", ())
-        )
-        or any(
-            _part_is_work(part) and "in_range_work" in part["temporal_roles"]
+            not message["_supporting"]
+            and _part_is_work(part)
+            and "in_range_work" in part["temporal_roles"]
             for part in message.get("parts", ())
         )
         for message in messages
@@ -496,6 +501,5 @@ def project_opencode(  # noqa: PLR0915
         all_roles,
         session,
         tuple(messages),
-        tuple(children),
         tuple(gaps),
     )

@@ -19,7 +19,11 @@ from .archive import (
     load_published_archive,
 )
 from .github_context import GitHubProjection, project_github
-from .opencode_context import OpenCodeProjection, project_opencode
+from .opencode_context import (
+    OpenCodeProjection,
+    project_opencode,
+    resolve_opencode_context,
+)
 
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
@@ -123,7 +127,7 @@ def _validate_context_source(snapshot: PublishedSnapshot) -> None:
         raise ContextError("unsupported context source")
 
 
-def extract_context(  # noqa: PLR0915
+def extract_context(
     request: ContextRequest, runs: tuple[PublishedRun, ...]
 ) -> ContextExtractionResult:
     """Group all supported Archive objects without source-record interpretation."""
@@ -152,106 +156,26 @@ def extract_context(  # noqa: PLR0915
         if opencode is not None:
             opencode_projections[key] = opencode
         all_items.append(ContextItem(ordered, _item_path(key), github, opencode))
-    session_keys = {
-        (key[1], projection.session_id): key
+    projections_by_scope: dict[
+        str, list[tuple[tuple[str, str, str, str], OpenCodeProjection]]
+    ] = {}
+    for key, projection in opencode_projections.items():
+        projections_by_scope.setdefault(key[1], []).append((key, projection))
+    for scoped in projections_by_scope.values():
+        resolved = resolve_opencode_context(
+            tuple(projection for _, projection in scoped)
+        )
+        for (key, _), projection in zip(scoped, resolved, strict=True):
+            opencode_projections[key] = projection
+    supporting_keys = {
+        key
         for key, projection in opencode_projections.items()
+        if projection.inclusion_reasons == ("supporting-task-context",)
     }
-    selected_keys = {
-        key for key, projection in opencode_projections.items() if projection.selected
-    }
-    supporting_keys: set[tuple[str, str, str, str]] = set()
-    ancestry_gaps: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
-    for key in selected_keys:
-        selected_projection = opencode_projections[key]
-        current_key = key
-        projection = selected_projection
-        parent_value = projection.parent_value
-        parent_id = projection.parent_id
-        seen: set[str] = set()
-        if parent_value is not None and not isinstance(parent_value, str):
-            ancestry_gaps.setdefault(current_key, []).append(
-                {
-                    "kind": "malformed-session-parent",
-                    "session_id": projection.session_id,
-                }
-            )
-        while isinstance(parent_id, str) and parent_id not in seen:
-            seen.add(parent_id)
-            parent_key = session_keys.get((key[1], parent_id))
-            if parent_key is None:
-                ancestry_gaps.setdefault(current_key, []).append(
-                    {
-                        "kind": "missing-session-parent",
-                        "session_id": projection.session_id,
-                        "parent_id": parent_id,
-                    }
-                )
-                break
-            supporting_keys.add(parent_key)
-            current_key = parent_key
-            projection = opencode_projections[current_key]
-            parent_value = projection.parent_value
-            if parent_value is not None and not isinstance(parent_value, str):
-                ancestry_gaps.setdefault(current_key, []).append(
-                    {
-                        "kind": "malformed-session-parent",
-                        "session_id": projection.session_id,
-                    }
-                )
-                break
-            parent_id = projection.parent_id
-        if isinstance(parent_id, str) and parent_id in seen:
-            ancestry_gaps.setdefault(current_key, []).append(
-                {
-                    "kind": "cyclic-session-parent",
-                    "session_id": projection.session_id,
-                    "parent_id": parent_id,
-                }
-            )
-        for reference in selected_projection.task_child_references:
-            if "malformed" in reference:
-                ancestry_gaps.setdefault(key, []).append(
-                    {
-                        "kind": "malformed-task-child",
-                        "session_id": selected_projection.session_id,
-                    }
-                )
-                continue
-            child_id = reference["child_id"]
-            child_key = session_keys.get((key[1], child_id))
-            if child_key is None:
-                ancestry_gaps.setdefault(key, []).append(
-                    {
-                        "kind": "missing-task-child",
-                        "session_id": selected_projection.session_id,
-                        "child_id": child_id,
-                    }
-                )
-            else:
-                supporting_keys.add(child_key)
     all_items = [
         replace(
             item,
-            opencode=(
-                replace(
-                    item.opencode,
-                    inclusion_reasons=("supporting-task-context",),
-                    gaps=item.opencode.gaps
-                    + tuple(ancestry_gaps.get(_logical_key(item.source), ())),
-                )
-                if item.opencode is not None
-                and _logical_key(item.source) in supporting_keys
-                and not item.opencode.selected
-                else (
-                    replace(
-                        item.opencode,
-                        gaps=item.opencode.gaps
-                        + tuple(ancestry_gaps.get(_logical_key(item.source), ())),
-                    )
-                    if item.opencode is not None
-                    else None
-                )
-            ),
+            opencode=opencode_projections.get(_logical_key(item.source)),
         )
         for item in all_items
     ]
@@ -358,7 +282,6 @@ def _render_source_view(
                 "schema_version": 1,
                 "session": opencode_projection.session,
                 "messages": opencode_projection.messages,
-                "task_children": opencode_projection.task_children,
                 "inclusion_reasons": opencode_projection.inclusion_reasons,
                 "temporal_roles": opencode_projection.temporal_roles,
                 "gaps": opencode_projection.gaps,
@@ -368,15 +291,9 @@ def _render_source_view(
         for message in opencode_projection.messages:
             roles = ", ".join(message["temporal_roles"]) or "observed_state"
             lines.append(f"- `{message['id']}` ({roles})")
-            for tool in message.get("tools", ()):
-                roles = ", ".join(tool["temporal_roles"]) or "observed_state"
-                lines.append(f"  - tool `{tool['id']}` ({roles})")
-        if opencode_projection.task_children:
-            lines.extend(["", "## Task Children", ""])
-            lines.extend(
-                f"- `{child.get('id', child.get('sessionID', 'unknown'))}`"
-                for child in opencode_projection.task_children
-            )
+            for part in message.get("parts", ()):
+                roles = ", ".join(part["temporal_roles"]) or "observed_state"
+                lines.append(f"  - {part['type']} `{part['id']}` ({roles})")
         (item_root / "opencode.md").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
         )

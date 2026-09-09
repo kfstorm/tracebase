@@ -149,6 +149,21 @@ def _publish_tool_observations(
         run.publish({})
 
 
+def _publish_single_message(archive: Archive, message: dict[str, object]) -> None:
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        _session_payload("session-1", messages=[message]),
+    )
+    run.publish({})
+
+
+def _projected_part(projection: dict[str, object], part_type: str) -> dict[str, object]:
+    return next(
+        part for part in projection["messages"][0]["parts"] if part["type"] == part_type
+    )
+
+
 def _archive_with_snapshot(root: Path) -> None:
     archive = Archive(root)
     run = _run(archive)
@@ -213,27 +228,20 @@ def test_context_groups_all_archive_observations_without_payload_interpretation(
 def test_pending_tool_without_start_is_observed_state(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
-    run = _run(archive)
-    _opencode_snapshot(
-        run,
-        _session_payload(
-            "session-1",
-            messages=[
-                _message(
-                    "message-1",
-                    "2026-01-01T00:30:00Z",
-                    [
-                        {
-                            "type": "tool",
-                            "id": "tool-1",
-                            "state": {"status": "pending", "input": {}},
-                        }
-                    ],
-                )
+    _publish_single_message(
+        archive,
+        _message(
+            "message-1",
+            "2026-01-01T00:30:00Z",
+            [
+                {
+                    "type": "tool",
+                    "id": "tool-1",
+                    "state": {"status": "pending", "input": {}},
+                }
             ],
         ),
     )
-    run.publish({})
     manifest = _context_manifest(
         archive,
         ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
@@ -246,7 +254,7 @@ def test_pending_tool_without_start_is_observed_state(tmp_path: Path) -> None:
         tmp_path / "second-output",
         "session-1",
     )
-    tool = projection["messages"][0]["tools"][0]
+    tool = _projected_part(projection, "tool")
     assert tool["temporal_roles"] == ["observed_state"]
     assert "start" not in tool
     assert "end" not in tool
@@ -369,21 +377,20 @@ def test_opencode_projection_uses_interval_overlap_and_preserves_observations(
     assert item["view_path"].endswith("/opencode.md")
     assert item["opencode_path"].endswith("/opencode.json")
     projection = json.loads((output / item["opencode_path"]).read_text())
+    assert "task_children" not in projection
     assert len(projection["messages"]) == 1
     message = projection["messages"][0]
+    assert "tools" not in message
     assert len(message["representations"]) == 2
-    assert len(message["tools"]) == 1
-    assert len(message["tools"][0]["representations"]) == 2
-    assert message["tools"][0]["temporal_roles"] == ["in_range_work"]
-    assert [child.get("id") for child in projection["task_children"]] == [
-        "child-in-range"
-    ]
+    tool = next(part for part in message["parts"] if part["type"] == "tool")
+    assert len(tool["representations"]) == 2
+    assert tool["temporal_roles"] == ["in_range_work"]
     assert len(projection["session"]["representations"]) == 2
     assert [
         representation["run_id"]
         for representation in projection["session"]["representations"]
     ] == ["a", "b"]
-    task = projection["task_children"][0]
+    task = next(part for part in message["parts"] if part["type"] == "task")
     assert task["id"] == "child-in-range"
     assert len(task["representations"]) == 2
     assert task["representations"][0]["value"]["state"]["status"] == "running"
@@ -448,6 +455,47 @@ def test_timed_non_tool_part_selects_session(
     )
     assert projection["messages"][0]["temporal_roles"] == ["earlier_background"]
     assert projection["messages"][0]["parts"][0]["temporal_roles"] == ["in_range_work"]
+
+
+def test_parts_are_ordered_by_semantic_time_then_id(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _publish_single_message(
+        archive,
+        _message(
+            "message-1",
+            "2026-01-01T00:30:00Z",
+            [
+                {
+                    "type": "text",
+                    "id": "text-2",
+                    "time": {
+                        "start": "2026-01-01T00:20:00Z",
+                        "end": "2026-01-01T00:21:00Z",
+                    },
+                },
+                {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "time": {
+                        "start": "2026-01-01T00:10:00Z",
+                        "end": "2026-01-01T00:15:00Z",
+                    },
+                },
+            ],
+        ),
+    )
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    assert [part["id"] for part in projection["messages"][0]["parts"]] == [
+        "reasoning-1",
+        "text-2",
+    ]
 
 
 def test_missing_task_child_is_reported_as_gap(tmp_path: Path) -> None:
@@ -578,7 +626,17 @@ def test_selected_session_uses_its_own_task_children(tmp_path: Path) -> None:
         _message(
             "continuation",
             "2026-01-01T00:30:00Z",
-            [{"type": "text", "synthetic": True}],
+            [
+                {
+                    "type": "text",
+                    "synthetic": True,
+                    "metadata": {"compaction_continue": True},
+                    "time": {
+                        "start": "2026-01-01T00:30:00Z",
+                        "end": "2026-01-01T00:30:01Z",
+                    },
+                }
+            ],
         ),
     ],
     ids=["native-compaction", "synthetic-continuation"],
@@ -733,7 +791,7 @@ def test_overlapping_unknown_and_completed_tool_intervals_merge(tmp_path: Path) 
         tmp_path / "output",
         "session-1",
     )
-    tool = projection["messages"][0]["tools"][0]
+    tool = _projected_part(projection, "tool")
     assert tool["temporal_roles"] == ["in_range_work"]
     assert len(tool["representations"]) == 2
 
@@ -758,7 +816,9 @@ def test_pending_tool_promotes_later_known_start(tmp_path: Path) -> None:
         tmp_path / "output",
         "session-1",
     )
-    tool = projection["messages"][0]["tools"][0]
+    tool = next(
+        part for part in projection["messages"][0]["parts"] if part["type"] == "tool"
+    )
     assert len(tool["representations"]) == 2
     assert tool["start"] == "2026-01-01T00:30:00+00:00"
     assert tool["temporal_roles"] == ["in_range_work"]
