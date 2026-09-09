@@ -43,8 +43,10 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_TEXT = re.compile(
-    r"(?:bearer\s+|basic\s+|[\"']?(?:access[_-]?token|api[_-]?key|password|secret|token)"
-    r"[\"']?\s*[=:]\s*)(?:[\"'][^\"']*[\"']|[^\s,;]+)",
+    r"(?:bearer\s+|basic\s+|[\"']?(?:access[_-]?token|api[_-]?key|"
+    r"auth(?:entication|orization)?|cookie|credential|password|private[_-]?key|"
+    r"secret|token)[\"']?\s*[=:]\s*(?:(?:bearer|basic)\s+)?)"
+    r"(?:[\"'][^\"']*[\"']|[^\s,;]+)",
     re.IGNORECASE,
 )
 _URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
@@ -284,7 +286,8 @@ def _replace_uuid_run_ids(value: Any, snapshots: tuple[PublishedSnapshot, ...]) 
 
 def _sanitize_text(value: str) -> str:
     sensitive_query = re.compile(
-        r"(?:access[_-]?token|api[_-]?key|auth|password|secret|token)",
+        r"(?:access[_-]?token|api[_-]?key|auth|cookie|credential|password|"
+        r"private[_-]?key|secret|token)",
         re.IGNORECASE,
     )
 

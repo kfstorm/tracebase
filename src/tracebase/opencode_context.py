@@ -483,6 +483,7 @@ def project_opencode(  # noqa: PLR0915
                             prior_part["end"] = part["end"]
                             prior_part.pop("completion", None)
                         elif "completion" in part:
+                            prior_part.pop("end", None)
                             prior_part["completion"] = part["completion"]
                         _refresh_part_roles(prior_part, start, end)
     messages = list(messages_by_id.values())

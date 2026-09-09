@@ -1020,6 +1020,38 @@ def test_overlapping_unknown_and_completed_tool_intervals_merge(tmp_path: Path) 
     assert len(tool["representations"]) == 2
 
 
+def test_later_unknown_completion_does_not_retain_an_old_end(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _publish_tool_observations(
+        archive,
+        [
+            (
+                "first",
+                {
+                    "time": {
+                        "start": "2026-01-01T00:30:00Z",
+                        "end": "2026-01-01T00:45:00Z",
+                    }
+                },
+            ),
+            ("second", {"time": {"start": "2026-01-01T00:30:00Z"}}),
+        ],
+    )
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    tool = _projected_part(projection, "tool")
+    assert tool["completion"] == "unknown"
+    assert "end" not in tool
+
+
 def test_pending_tool_promotes_later_known_start(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
@@ -1322,7 +1354,10 @@ def test_github_context_projects_native_records_without_fix_inference(  # noqa: 
                 }
             }
         },
-        "pull-request.diff": ('diff --git a/a b/a\npassword: "diff-secret-sentinel"\n'),
+        "pull-request.diff": (
+            'diff --git a/a b/a\npassword: "diff-secret-sentinel"\n'
+            "authorization=auth-secret cookie: cookie-secret private_key=key-secret\n"
+        ),
     }
     snapshot = run.write_snapshot(
         Snapshot(
@@ -1457,6 +1492,9 @@ def test_github_context_projects_native_records_without_fix_inference(  # noqa: 
     assert manifest["relations"] == []
     assert manifest["unresolved_references"] == []
     assert b"diff-secret-sentinel" not in _output_bytes(output)
+    assert b"auth-secret" not in _output_bytes(output)
+    assert b"cookie-secret" not in _output_bytes(output)
+    assert b"key-secret" not in _output_bytes(output)
     issue = next(
         record for record in projection["records"] if record["kind"] == "pull-request"
     )
