@@ -316,6 +316,9 @@ def project_opencode(  # noqa: PLR0915
                         prior.setdefault("tools", []).append(tool)
                     else:
                         prior_tool["representations"].extend(tool["representations"])
+                        if "_start_time" in tool:
+                            prior_tool["_start_time"] = tool["_start_time"]
+                            prior_tool["start"] = tool["start"]
                         if "end" in tool:
                             prior_tool["end"] = tool["end"]
                         prior_tool["intervals"].extend(tool["intervals"])

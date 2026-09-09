@@ -123,6 +123,32 @@ def _message(
     }
 
 
+def _publish_tool_observations(
+    archive: Archive, observations: list[tuple[str, dict[str, object]]]
+) -> None:
+    for index, (run_id, state) in enumerate(observations):
+        run = _run(
+            archive,
+            run_id,
+            f"2026-01-{index + 1:02d}T00:00:00Z",
+            f"2026-01-{index + 2:02d}T00:00:00Z",
+        )
+        _opencode_snapshot(
+            run,
+            _session_payload(
+                "session-1",
+                messages=[
+                    _message(
+                        "message-1",
+                        "2025-12-31T23:00:00Z",
+                        [{"type": "tool", "id": "tool-1", "state": state}],
+                    )
+                ],
+            ),
+        )
+        run.publish({})
+
+
 def _archive_with_snapshot(root: Path) -> None:
     archive = Archive(root)
     run = _run(archive)
@@ -517,39 +543,21 @@ def test_zero_duration_tool_uses_half_open_range(
 def test_overlapping_unknown_and_completed_tool_intervals_merge(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
-    for run_id, tool_time in [
-        ("first", {"start": "2025-12-31T23:30:00Z"}),
-        (
-            "second",
-            {"start": "2026-01-01T00:30:00Z", "end": "2026-01-01T00:45:00Z"},
-        ),
-    ]:
-        run = _run(
-            archive,
-            run_id,
-            "2026-01-01T00:00:00Z" if run_id == "first" else "2026-01-02T00:00:00Z",
-            "2026-01-02T00:00:00Z" if run_id == "first" else "2026-01-03T00:00:00Z",
-        )
-        _opencode_snapshot(
-            run,
-            _session_payload(
-                "session-1",
-                messages=[
-                    _message(
-                        "message-1",
-                        "2025-12-31T23:00:00Z",
-                        [
-                            {
-                                "type": "tool",
-                                "id": "tool-1",
-                                "state": {"time": tool_time},
-                            }
-                        ],
-                    )
-                ],
+    _publish_tool_observations(
+        archive,
+        [
+            ("first", {"time": {"start": "2025-12-31T23:30:00Z"}}),
+            (
+                "second",
+                {
+                    "time": {
+                        "start": "2026-01-01T00:30:00Z",
+                        "end": "2026-01-01T00:45:00Z",
+                    }
+                },
             ),
-        )
-        run.publish({})
+        ],
+    )
 
     projection = _opencode_projection(
         archive,
@@ -560,6 +568,32 @@ def test_overlapping_unknown_and_completed_tool_intervals_merge(tmp_path: Path) 
     tool = projection["messages"][0]["tools"][0]
     assert tool["temporal_roles"] == ["in_range_work"]
     assert len(tool["representations"]) == 2
+
+
+def test_pending_tool_promotes_later_known_start(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _publish_tool_observations(
+        archive,
+        [
+            ("pending", {"status": "pending", "input": {}}),
+            (
+                "running",
+                {"status": "running", "time": {"start": "2026-01-01T00:30:00Z"}},
+            ),
+        ],
+    )
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    tool = projection["messages"][0]["tools"][0]
+    assert len(tool["representations"]) == 2
+    assert tool["start"] == "2026-01-01T00:30:00+00:00"
+    assert tool["temporal_roles"] == ["in_range_work"]
 
 
 @pytest.mark.parametrize("case", ["missing", "malformed", "cyclic"])
