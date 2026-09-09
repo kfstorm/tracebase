@@ -110,6 +110,24 @@ def _created(value: dict[str, Any]) -> datetime:
     raise ArchiveError("OpenCode message payload is invalid")
 
 
+def _supporting_message(message: dict[str, Any], parts: list[dict[str, Any]]) -> bool:
+    info = message.get("info")
+    if isinstance(info, dict) and (
+        info.get("mode") == "compaction"
+        or info.get("summary") is True
+        or info.get("agent") == "compaction"
+    ):
+        return True
+    return any(
+        part.get("synthetic") is True
+        or (
+            isinstance(part.get("metadata"), dict)
+            and part["metadata"].get("compaction_continue") is True
+        )
+        for part in parts
+    )
+
+
 def _point_roles(value: datetime, start: datetime, end: datetime) -> tuple[str, ...]:
     return tuple(
         role
@@ -222,6 +240,13 @@ def project_opencode(  # noqa: PLR0915
             parts = message.get("parts", ())
             if not isinstance(parts, list):
                 raise ArchiveError("OpenCode message payload is invalid")
+            if not all(isinstance(part, dict) for part in parts):
+                raise ArchiveError("OpenCode message payload is invalid")
+            supporting_message = _supporting_message(message, parts)
+            record["_created_time"] = message_time
+            record["_supporting"] = supporting_message
+            if supporting_message:
+                record["temporal_roles"] = ("observed_state",)
             tools: dict[str, dict[str, Any]] = {}
             for part in parts:
                 if not isinstance(part, dict):
@@ -241,6 +266,7 @@ def project_opencode(  # noqa: PLR0915
                                 "id": tool_id,
                                 "value": part,
                                 "start": tool_start.isoformat(),
+                                "_start_time": tool_start,
                                 "temporal_roles": _interval_roles(interval, start, end),
                                 "representations": [],
                                 "intervals": [],
@@ -271,6 +297,9 @@ def project_opencode(  # noqa: PLR0915
                 messages_by_id[message_id] = record
             else:
                 prior["representations"].extend(record["representations"])
+                prior["_supporting"] = prior["_supporting"] or record["_supporting"]
+                if prior["_supporting"]:
+                    prior["temporal_roles"] = ("observed_state",)
                 prior_tools = {tool["id"]: tool for tool in prior.get("tools", ())}
                 for tool in record.get("tools", ()):
                     prior_tool = prior_tools.get(tool["id"])
@@ -283,10 +312,16 @@ def project_opencode(  # noqa: PLR0915
                         prior_tool["intervals"].extend(tool["intervals"])
                         _refresh_tool_roles(prior_tool, start, end)
     messages = list(messages_by_id.values())
+    messages.sort(key=lambda message: (message["_created_time"], message["id"]))
     for message in messages:
+        message.get("tools", []).sort(
+            key=lambda tool: (tool["_start_time"], tool["id"])
+        )
         for tool in message.get("tools", ()):
             _refresh_tool_roles(tool, start, end)
             tool.pop("intervals", None)
+            tool.pop("_start_time", None)
+        message.pop("_created_time", None)
     children = list(
         {
             json.dumps(child, sort_keys=True, separators=(",", ":")): child
@@ -294,7 +329,7 @@ def project_opencode(  # noqa: PLR0915
         }.values()
     )
     if not any(
-        "in_range_work" in record["temporal_roles"]
+        (not record["_supporting"] and "in_range_work" in record["temporal_roles"])
         or any(
             "in_range_work" in tool["temporal_roles"]
             for tool in record.get("tools", ())
@@ -314,13 +349,15 @@ def project_opencode(  # noqa: PLR0915
         )
     )
     selected = any(
-        "in_range_work" in message["temporal_roles"]
+        (not message["_supporting"] and "in_range_work" in message["temporal_roles"])
         or any(
             "in_range_work" in tool["temporal_roles"]
             for tool in message.get("tools", ())
         )
         for message in messages
     )
+    for message in messages:
+        message.pop("_supporting", None)
     return OpenCodeProjection(
         selected,
         ("in_range_source_record",) if selected else (),

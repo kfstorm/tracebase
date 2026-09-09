@@ -162,8 +162,9 @@ def extract_context(
     supporting_keys: set[tuple[str, str, str, str]] = set()
     ancestry_gaps: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
     for key in selected_keys:
+        selected_projection = opencode_projections[key]
         current_key = key
-        projection = opencode_projections[current_key]
+        projection = selected_projection
         parent_value = projection.parent_value
         parent_id = projection.parent_id
         seen: set[str] = set()
@@ -207,7 +208,7 @@ def extract_context(
                     "parent_id": parent_id,
                 }
             )
-        for child_id in projection.explicit_task_child_ids:
+        for child_id in selected_projection.explicit_task_child_ids:
             child_key = session_keys.get((key[1], child_id))
             if child_key is not None:
                 supporting_keys.add(child_key)

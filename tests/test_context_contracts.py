@@ -59,6 +59,70 @@ def _snapshot(
     run.write_evidence(snapshot, evidence_path, content)
 
 
+def _opencode_snapshot(
+    run: CollectionRun, payload: dict[str, object], source_id: str | None = None
+) -> None:
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            source_id or str(payload["id"]),
+            run.collection_range.as_manifest(),
+            ({"path": "session.json"},),
+        )
+    )
+    run.write_evidence(snapshot, "session.json", json.dumps(payload).encode())
+
+
+def _context_manifest(
+    archive: Archive, request: ContextRequest, output: Path
+) -> dict[str, object]:
+    generate_context(archive.root, request, output)
+    return json.loads((output / "context.json").read_text())
+
+
+def _opencode_item(manifest: dict[str, object], session_id: str) -> dict[str, object]:
+    for item in manifest["source_items"]:
+        if item["source_id"] == session_id:
+            return item
+    raise AssertionError(f"missing OpenCode session {session_id}")
+
+
+def _opencode_projection(
+    archive: Archive, request: ContextRequest, output: Path, session_id: str
+) -> dict[str, object]:
+    manifest = _context_manifest(archive, request, output)
+    item = _opencode_item(manifest, session_id)
+    return json.loads((output / item["opencode_path"]).read_text())
+
+
+def _session_payload(
+    session_id: str,
+    *,
+    parent_id: object = None,
+    messages: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"id": session_id, "messages": messages or []}
+    if parent_id is not None:
+        payload["parentID"] = parent_id
+    return payload
+
+
+def _message(
+    message_id: str,
+    created: str,
+    parts: list[dict[str, object]] | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    return {
+        "id": message_id,
+        "created": created,
+        "role": "user",
+        "parts": parts or [],
+        **extra,
+    }
+
+
 def _archive_with_snapshot(root: Path) -> None:
     archive = Archive(root)
     run = _run(archive)
@@ -239,6 +303,266 @@ def test_opencode_projection_uses_interval_overlap_and_preserves_observations(
     assert [child.get("id") for child in projection["task_children"]] == [
         "child-in-range"
     ]
+
+
+def test_selected_session_uses_its_own_task_children(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    request = ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")
+
+    for index, (session_id, parent_id, child_id) in enumerate(
+        [
+            ("ancestor", None, "ancestor-child"),
+            ("selected", "ancestor", "selected-child"),
+        ]
+    ):
+        run = _run(
+            archive,
+            f"session-{index}",
+            f"2026-01-{index + 1:02d}T00:00:00Z",
+            f"2026-01-{index + 2:02d}T00:00:00Z",
+        )
+        _opencode_snapshot(
+            run,
+            _session_payload(
+                session_id,
+                parent_id=parent_id,
+                messages=[
+                    _message(
+                        f"{session_id}-message",
+                        "2026-01-01T00:30:00Z"
+                        if session_id == "selected"
+                        else "2025-12-31T23:00:00Z",
+                        [
+                            {
+                                "type": "task",
+                                "id": f"{session_id}-task",
+                                "state": {
+                                    "time": {"start": "2026-01-01T00:30:00Z"},
+                                    "metadata": {
+                                        "sessionId": child_id,
+                                        "parentSessionId": session_id,
+                                    },
+                                },
+                            }
+                        ],
+                    )
+                ],
+            ),
+        )
+        run.publish({})
+        child = _run(
+            archive,
+            f"{session_id}-child",
+            f"2026-01-{index + 3:02d}T00:00:00Z",
+            f"2026-01-{index + 4:02d}T00:00:00Z",
+        )
+        _opencode_snapshot(
+            child,
+            _session_payload(
+                child_id,
+                messages=[_message(f"{child_id}-message", "2025-12-31T23:00:00Z")],
+            ),
+        )
+        child.publish({})
+
+    manifest = _context_manifest(archive, request, tmp_path / "output")
+    assert {item["source_id"] for item in manifest["source_items"]} == {
+        "ancestor",
+        "selected",
+        "selected-child",
+    }
+    assert _opencode_item(manifest, "selected-child")["inclusion_reasons"] == [
+        "supporting-task-context"
+    ]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _message("summary", "2026-01-01T00:30:00Z", info={"summary": True}),
+        _message(
+            "continuation",
+            "2026-01-01T00:30:00Z",
+            [{"type": "text", "synthetic": True}],
+        ),
+    ],
+    ids=["compaction-summary", "synthetic-continuation"],
+)
+def test_supporting_messages_do_not_select_a_session(
+    tmp_path: Path, message: dict[str, object]
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(run, _session_payload("session-1", messages=[message]))
+    run.publish({})
+
+    manifest = _context_manifest(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+    )
+    assert manifest["source_items"] == []
+
+
+def test_message_payload_order_is_normalized_by_created_time(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        _session_payload(
+            "session-1",
+            messages=[
+                _message("later", "2026-01-01T00:40:00Z"),
+                _message("earlier", "2026-01-01T00:20:00Z"),
+            ],
+        ),
+    )
+    run.publish({})
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    assert [message["id"] for message in projection["messages"]] == [
+        "earlier",
+        "later",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("started", "selected"),
+    [("2026-01-01T00:30:00Z", True), ("2026-01-01T01:00:00Z", False)],
+    ids=["in-range", "at-range-end"],
+)
+def test_zero_duration_tool_uses_half_open_range(
+    tmp_path: Path, started: str, selected: bool
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        _session_payload(
+            "session-1",
+            messages=[
+                _message(
+                    "message-1",
+                    "2025-12-31T23:00:00Z",
+                    [
+                        {
+                            "type": "tool",
+                            "id": "tool-1",
+                            "state": {"time": {"start": started, "end": started}},
+                        }
+                    ],
+                )
+            ],
+        ),
+    )
+    run.publish({})
+    manifest = _context_manifest(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+    )
+    assert bool(manifest["source_items"]) is selected
+
+
+def test_overlapping_unknown_and_completed_tool_intervals_merge(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    for run_id, tool_time in [
+        ("first", {"start": "2025-12-31T23:30:00Z"}),
+        (
+            "second",
+            {"start": "2026-01-01T00:30:00Z", "end": "2026-01-01T00:45:00Z"},
+        ),
+    ]:
+        run = _run(
+            archive,
+            run_id,
+            "2026-01-01T00:00:00Z" if run_id == "first" else "2026-01-02T00:00:00Z",
+            "2026-01-02T00:00:00Z" if run_id == "first" else "2026-01-03T00:00:00Z",
+        )
+        _opencode_snapshot(
+            run,
+            _session_payload(
+                "session-1",
+                messages=[
+                    _message(
+                        "message-1",
+                        "2025-12-31T23:00:00Z",
+                        [
+                            {
+                                "type": "tool",
+                                "id": "tool-1",
+                                "state": {"time": tool_time},
+                            }
+                        ],
+                    )
+                ],
+            ),
+        )
+        run.publish({})
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    tool = projection["messages"][0]["tools"][0]
+    assert tool["temporal_roles"] == ["in_range_work"]
+    assert len(tool["representations"]) == 2
+
+
+@pytest.mark.parametrize("case", ["missing", "malformed", "cyclic"])
+def test_session_ancestry_gaps_are_explicit(tmp_path: Path, case: str) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    if case == "missing":
+        sessions = [("selected", "does-not-exist")]
+    elif case == "malformed":
+        sessions = [("selected", 42)]
+    else:
+        sessions = [("selected", "parent"), ("parent", "selected")]
+    for index, (session_id, parent_id) in enumerate(sessions):
+        run = _run(
+            archive,
+            f"run-{index}",
+            f"2026-01-{index + 1:02d}T00:00:00Z",
+            f"2026-01-{index + 2:02d}T00:00:00Z",
+        )
+        _opencode_snapshot(
+            run,
+            _session_payload(
+                session_id,
+                parent_id=parent_id,
+                messages=[_message(f"{session_id}-message", "2026-01-01T00:30:00Z")],
+            ),
+        )
+        run.publish({})
+
+    manifest = _context_manifest(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+    )
+    selected = _opencode_item(manifest, "selected")
+    projection = json.loads(
+        (tmp_path / "output" / selected["opencode_path"]).read_text()
+    )
+    gap_kinds = {gap["kind"] for gap in projection["gaps"]}
+    expected = {
+        "missing": "missing-session-parent",
+        "malformed": "malformed-session-parent",
+        "cyclic": "cyclic-session-parent",
+    }[case]
+    assert expected in gap_kinds
 
 
 def test_github_context_projects_native_records_without_fix_inference(  # noqa: PLR0915
