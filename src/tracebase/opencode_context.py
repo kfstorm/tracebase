@@ -9,8 +9,6 @@ from typing import Any
 
 from .archive import ArchiveError, PublishedSnapshot
 
-_KNOWN_PART_TYPES = {"compaction", "reasoning", "retry", "task", "text", "tool"}
-
 
 @dataclass(frozen=True, slots=True)
 class OpenCodeProjection:
@@ -413,29 +411,11 @@ def project_opencode(  # noqa: PLR0915
                 if not isinstance(part, dict):
                     raise ArchiveError("OpenCode message payload is invalid")
                 part_id = _part_id(part)
-                part_type = part.get("type")
-                if not isinstance(part_type, str) or part_type not in _KNOWN_PART_TYPES:
-                    gaps.append(
-                        {
-                            "kind": "unknown-part-type",
-                            "message_id": message_id,
-                            "part_id": part_id,
-                            "part_type": str(part_type),
-                        }
-                    )
                 part_interval = (
                     _tool_times(part)
                     if part.get("type") == "tool" or _part_is_task(part)
                     else _part_times(part)
                 )
-                if part_interval is not None and part_interval[1] is None:
-                    gaps.append(
-                        {
-                            "kind": "unknown-completion",
-                            "message_id": message_id,
-                            "part_id": part_id,
-                        }
-                    )
                 part_record = parts_by_id.setdefault(
                     part_id,
                     {
@@ -507,6 +487,14 @@ def project_opencode(  # noqa: PLR0915
         )
         for part in message.get("parts", ()):
             _refresh_part_roles(part, start, end)
+            if part.get("completion") == "unknown":
+                gaps.append(
+                    {
+                        "kind": "unknown-completion",
+                        "message_id": message["id"],
+                        "part_id": part["id"],
+                    }
+                )
             part.pop("intervals", None)
             part.pop("_start_time", None)
         message.pop("_created_time", None)

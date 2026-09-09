@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -34,22 +33,17 @@ from .opencode_context import (
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
 )
-_UUID = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
-)
-_SENSITIVE_KEY = re.compile(
-    r"(?:access[_-]?token|api[_-]?key|auth(?:entication|orization)?|cookie|"
-    r"credential|password|private[_-]?key|private[_-]?url|secret|token)",
-    re.IGNORECASE,
-)
-_SENSITIVE_FIELD = (
-    r"[A-Za-z0-9_-]*(?:access[_-]?token|api[_-]?key|auth(?:entication|orization)?|"
-    r"cookie|credential|password|private[_-]?key|secret|token)[A-Za-z0-9_-]*"
-)
 _SENSITIVE_TEXT = re.compile(
-    rf"(?:bearer\s+|basic\s+|[\"']?{_SENSITIVE_FIELD}[\"']?\s*[=:]\s*"
+    r"(?:bearer\s+|basic\s+|[\"']?(?:access[_-]?token|api[_-]?key|"
+    r"authorization|auth|cookie|credential|password|private[_-]?key|secret|"
+    r"token)[\"']?\s*[=:]\s*"
     r"(?:(?:bearer|basic)\s+)?)"
     r"(?:[\"'][^\"']*[\"']|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_SENSITIVE_INPUT_KEY = re.compile(
+    r"(?:access[_-]?token|api[_-]?key|authorization|auth|cookie|credential|"
+    r"password|private[_-]?key|secret|token)",
     re.IGNORECASE,
 )
 _URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
@@ -235,13 +229,6 @@ def extract_context(
     )
 
 
-def _write_json(path: Path, value: Any) -> None:
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
 def _cleanup_staging(staging: Path) -> None:
     if not staging.exists():
         return
@@ -249,56 +236,6 @@ def _cleanup_staging(staging: Path) -> None:
         shutil.rmtree(staging)
     except OSError:
         raise ContextError("context output cleanup failed") from None
-
-
-def _observation_name(index: int) -> str:
-    return f"observation-{index:03d}"
-
-
-def _public_run_id(run_id: str, index: int) -> str:
-    if _UUID.fullmatch(run_id):
-        return _observation_name(index)
-    return run_id
-
-
-def _public_run_ids(snapshots: tuple[PublishedSnapshot, ...]) -> dict[str, str]:
-    return {
-        snapshot.run["run_id"]: _public_run_id(snapshot.run["run_id"], index)
-        for index, snapshot in enumerate(snapshots, start=1)
-    }
-
-
-def _transform_output_value(value: Any, transform: Callable[[Any], Any]) -> Any:
-    if isinstance(value, dict):
-        transformed = {
-            key: _transform_output_value(item, transform) for key, item in value.items()
-        }
-        return transform(transformed)
-    if isinstance(value, list):
-        return transform([_transform_output_value(item, transform) for item in value])
-    if isinstance(value, tuple):
-        return transform(
-            tuple(_transform_output_value(item, transform) for item in value)
-        )
-    return transform(value)
-
-
-def _replace_uuid_run_ids(value: Any, snapshots: tuple[PublishedSnapshot, ...]) -> Any:
-    public_ids = _public_run_ids(snapshots)
-
-    def replace_run_id(item: Any) -> Any:
-        if not isinstance(item, dict):
-            return item
-        return {
-            key: (
-                public_ids.get(value, value)
-                if key == "run_id" and isinstance(value, str)
-                else value
-            )
-            for key, value in item.items()
-        }
-
-    return _transform_output_value(value, replace_run_id)
 
 
 def _sanitize_text(value: str) -> str:
@@ -348,319 +285,511 @@ def _sanitize_text(value: str) -> str:
     return _SENSITIVE_TEXT.sub("[REDACTED]", value)
 
 
-def _sanitize_public_value(value: Any) -> Any:
-    def sanitize(item: Any) -> Any:
-        if isinstance(item, dict):
-            return {
-                key: value
-                for key, value in item.items()
-                if not _SENSITIVE_KEY.search(key)
-            }
-        if isinstance(item, str):
-            return _sanitize_text(item)
-        return item
-
-    return _transform_output_value(value, sanitize)
+def _quote(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
 
-def _sanitize_evidence(content: bytes) -> bytes:
-    try:
-        value = json.loads(content)
-    except UnicodeDecodeError, json.JSONDecodeError:
-        return _sanitize_text(content.decode("utf-8", errors="replace")).encode("utf-8")
-    return (
-        json.dumps(
-            _sanitize_public_value(value),
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("utf-8")
+def _front_matter(fields: tuple[tuple[str, Any], ...]) -> list[str]:
+    lines = ["---"]
+    for key, value in fields:
+        if isinstance(value, (list, tuple)):
+            lines.append(f"{key}:")
+            lines.extend(f"  - {_quote(str(entry))}" for entry in value)
+        elif isinstance(value, bool):
+            lines.append(f"{key}: {'true' if value else 'false'}")
+        else:
+            lines.append(f"{key}: {_quote(str(value))}")
+    lines.extend(["---", ""])
+    return lines
 
 
-def _include_evidence_in_output(item: ContextItem, name: str) -> bool:
-    if item.opencode is not None:
-        return name == "session.json"
-    if item.github is not None:
-        return name in {
-            "issue.json",
-            "pull-request.json",
-            "pull-request.diff",
-        } or name.startswith(
-            (
-                "comments.",
-                "timeline.",
-                "reviews.",
-                "review-comments.",
-                "review-threads.",
-                "review-thread-comments.",
+def _redact_whitelisted_value(value: Any) -> Any:
+    """Redact strings inside a field already selected by a source renderer."""
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "[REDACTED]"
+                if _SENSITIVE_INPUT_KEY.search(str(key)) is not None
+                else _redact_whitelisted_value(entry)
             )
-        )
-    return False
+            for key, entry in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_whitelisted_value(entry) for entry in value]
+    if isinstance(value, tuple):
+        return [_redact_whitelisted_value(entry) for entry in value]
+    return value
 
 
-def _github_records_for_output(item: ContextItem) -> tuple[dict[str, Any], ...]:
-    if item.github is None:
-        return ()
-    observation_paths = {
-        snapshot.run["run_id"]: (f"observations/{_observation_name(index)}")
-        for index, snapshot in enumerate(item.snapshots, start=1)
+def _fenced(value: str, language: str) -> list[str]:
+    fence = "```"
+    while fence in value:
+        fence += "`"
+    return [f"{fence}{language}", value, fence]
+
+
+def _write_markdown(path: Path, lines: list[str]) -> None:
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _coverage_summary(coverage: Any) -> dict[str, Any]:
+    if not isinstance(coverage, dict):
+        return {}
+    allowed = (
+        "discovery_matrix_version",
+        "listed_session_count",
+        "pagination_complete",
+        "permission_boundary",
+        "selected_artifacts",
+        "selected_session_count",
+    )
+    return {
+        key: _redact_whitelisted_value(coverage[key])
+        for key in allowed
+        if key in coverage and isinstance(coverage[key], (str, int, bool))
     }
-    public_run_ids = _public_run_ids(item.snapshots)
-    records: list[dict[str, Any]] = []
-    for record in item.github.records:
-        representations = []
-        for representation in record["representations"]:
-            output_path = (
-                f"{observation_paths[representation['run_id']]}/"
-                f"{representation['evidence_path']}"
-            )
-            representations.append(
-                _sanitize_public_value(
-                    {
-                        **representation,
-                        "run_id": public_run_ids[representation["run_id"]],
-                        "output_path": output_path,
-                    }
-                )
-            )
-        records.append({**record, "representations": representations})
-    return tuple(records)
 
 
-def _render_source_view(
-    item_root: Path,
-    item: ContextItem,
-    github_records: tuple[dict[str, Any], ...] = (),
-) -> str:
-    """Render the shared source-view shell; source projections extend this seam."""
-    source = item.source
-    if item.github is not None:
-        projection = item.github
-        _write_json(
-            item_root / "github.json",
-            {
-                "schema_version": 1,
-                "value_policy": "sensitive-values-redacted",
-                "inclusion_reasons": projection.inclusion_reasons,
-                "temporal_roles": projection.temporal_roles,
-                "records": github_records,
-                "relations": projection.relations,
-            },
+def _render_provenance(lines: list[str], item: ContextItem) -> None:
+    lines.extend(["## Provenance", ""])
+    for index, snapshot in enumerate(item.snapshots, start=1):
+        collection = snapshot.run["collection_range"]
+        observation = snapshot.manifest["observation_window"]
+        lines.extend(
+            [
+                f"### Observation {index}",
+                "",
+                "- Collection Run Coverage: "
+                f"[{collection['from']}, {collection['to']})",
+                "- Snapshot Observation Window: "
+                f"[{observation['from']}, {observation['to']})",
+            ]
         )
-        lines = [
+        coverage = _coverage_summary(snapshot.run.get("coverage"))
+        if coverage:
+            lines.append(
+                f"- Coverage summary: `{json.dumps(coverage, sort_keys=True)}`"
+            )
+        lines.append("")
+
+
+def _session_context(item: ContextItem) -> dict[str, str]:
+    projection = item.opencode
+    if projection is None:
+        return {}
+    value = projection.session.get("value")
+    value = value if isinstance(value, dict) else {}
+    info = value.get("info")
+    info = info if isinstance(info, dict) else {}
+    context: dict[str, str] = {}
+    for output_key, keys in (
+        ("working_directory", ("directory",)),
+        (
+            "main_worktree_directory",
+            ("worktree", "worktreeDirectory", "mainWorktree"),
+        ),
+    ):
+        for source in (info, value):
+            for key in keys:
+                candidate = source.get(key)
+                if isinstance(candidate, str) and candidate:
+                    context[output_key] = candidate
+                    break
+            if output_key in context:
+                break
+    for snapshot in reversed(item.snapshots):
+        metadata = snapshot.manifest.get("metadata")
+        session = metadata.get("session") if isinstance(metadata, dict) else None
+        if not isinstance(session, dict):
+            continue
+        for key, output_key in (
+            ("directory", "working_directory"),
+            ("worktree", "main_worktree_directory"),
+        ):
+            candidate = session.get(key)
+            if isinstance(candidate, str) and candidate and output_key not in context:
+                context[output_key] = candidate
+    return context
+
+
+def _part_value(part: dict[str, Any]) -> dict[str, Any]:
+    value = part.get("value")
+    return value if isinstance(value, dict) else {}
+
+
+def _item_front_matter(
+    item: ContextItem,
+    result: ContextExtractionResult,
+    source_kind: str,
+    projection: Any,
+) -> list[str]:
+    source = item.source
+    return _front_matter(
+        (
+            ("schema_version", 1),
+            ("source_kind", source_kind),
+            ("source_scope_id", source.run["source"]["scope_id"]),
+            ("source_id", source.manifest["source_id"]),
+            ("object_kind", source.manifest["object_kind"]),
+            ("request_from", result.request.from_text),
+            ("request_to", result.request.to_text),
+            ("inclusion_reasons", projection.inclusion_reasons),
+            ("temporal_roles", projection.temporal_roles),
+        )
+    )
+
+
+def _render_opencode(  # noqa: PLR0915
+    item: ContextItem, result: ContextExtractionResult
+) -> list[str]:
+    assert item.opencode is not None
+    projection = item.opencode
+    context = _session_context(item)
+    lines = _item_front_matter(item, result, "opencode", projection)
+    lines.extend(["# OpenCode Session", ""])
+    if context:
+        lines.extend(["## Session Context", ""])
+        labels = {
+            "working_directory": "Working directory",
+            "main_worktree_directory": "Main worktree directory",
+        }
+        for key in ("working_directory", "main_worktree_directory"):
+            if key in context:
+                lines.append(f"- {labels[key]}: `{_sanitize_text(context[key])}`")
+        lines.append("")
+    _render_provenance(lines, item)
+    for message in projection.messages:
+        role_value = message.get("role")
+        role = str(role_value) if isinstance(role_value, str) else "unknown"
+        created = message.get("created", "unknown")
+        roles = ", ".join(message.get("temporal_roles", ())) or "observed_state"
+        lines.extend(
+            [
+                f"## {role.title()} - {created}",
+                "",
+                f"Message: `{message['id']}`",
+                f"Temporal roles: {roles}",
+                "",
+            ]
+        )
+        for part in message.get("parts", ()):
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            raw = _part_value(part)
+            part_id = part.get("id", "unknown")
+            part_roles = ", ".join(part.get("temporal_roles", ())) or "observed_state"
+            if part_type == "text":
+                text = raw.get("text", part.get("text"))
+                if isinstance(text, str):
+                    lines.extend(
+                        [
+                            f"### Text - `{part_id}`",
+                            "",
+                            f"Temporal roles: {part_roles}",
+                            "",
+                        ]
+                    )
+                    lines.extend(_fenced(_sanitize_text(text), "text"))
+                    lines.append("")
+            elif part_type in {"tool", "task"}:
+                state = raw.get("state")
+                state = state if isinstance(state, dict) else {}
+                tool_name = raw.get("tool", part_type)
+                tool_name = tool_name if isinstance(tool_name, str) else part_type
+                lines.extend(
+                    [
+                        f"### Tool - {tool_name} - `{part_id}`",
+                        "",
+                        f"Temporal roles: {part_roles}",
+                    ]
+                )
+                status = state.get("status")
+                if isinstance(status, str):
+                    lines.append(f"Status: {status}")
+                if isinstance(part.get("start"), str):
+                    lines.append(f"Start: {part['start']}")
+                if isinstance(part.get("end"), str):
+                    lines.append(f"End: {part['end']}")
+                elif part.get("completion") == "unknown":
+                    lines.append("End: unknown")
+                metadata = state.get("metadata")
+                if isinstance(metadata, dict):
+                    relationship = {
+                        key: metadata[key]
+                        for key in ("parentSessionId", "sessionId")
+                        if isinstance(metadata.get(key), str)
+                    }
+                    if relationship:
+                        redacted_relationship = json.dumps(
+                            _redact_whitelisted_value(relationship), sort_keys=True
+                        )
+                        lines.append(f"Task relationship: `{redacted_relationship}`")
+                tool_input = state.get("input", raw.get("input"))
+                if tool_input is not None:
+                    lines.extend(["", "#### Input", ""])
+                    rendered_input = json.dumps(
+                        _redact_whitelisted_value(tool_input),
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    lines.extend(_fenced(rendered_input, "json"))
+                lines.append("")
+            elif part_type == "compaction" or raw.get("synthetic") is True:
+                lines.extend(
+                    [
+                        f"### Supporting context - `{part_id}`",
+                        "",
+                        "Compaction or synthetic continuation; not independent "
+                        "repeated work.",
+                        "",
+                    ]
+                )
+                tail_start = raw.get("tail_start_id")
+                if isinstance(tail_start, str):
+                    lines.append(f"Tail start message: `{_sanitize_text(tail_start)}`")
+                    lines.append("")
+    if projection.gaps:
+        lines.extend(["## Gaps", ""])
+        lines.extend(
+            f"- `{gap['kind']}`: "
+            f"`{json.dumps(_redact_whitelisted_value(gap), sort_keys=True)}`"
+            for gap in projection.gaps
+        )
+        lines.append("")
+    return lines
+
+
+def _record_value(record: dict[str, Any]) -> dict[str, Any] | str | None:
+    representations = record.get("representations")
+    if not isinstance(representations, list) or not representations:
+        return None
+    value = representations[-1].get("value")
+    return value if isinstance(value, (dict, str)) else None
+
+
+def _github_actor(value: dict[str, Any]) -> str | None:
+    for key in ("user", "actor", "author"):
+        actor = value.get(key)
+        if isinstance(actor, dict):
+            login = actor.get("login")
+            if isinstance(login, str):
+                return login
+    return None
+
+
+def _github_times(value: dict[str, Any]) -> list[str]:
+    return [
+        value[key]
+        for key in (
+            "created_at",
+            "updated_at",
+            "submitted_at",
+            "merged_at",
+            "closed_at",
+        )
+        if isinstance(value.get(key), str)
+    ]
+
+
+def _github_observations(record: dict[str, Any]) -> str:
+    representations = record.get("representations")
+    if not isinstance(representations, list):
+        return ""
+    return ", ".join(
+        f"observation {index}" for index, _ in enumerate(representations, start=1)
+    )
+
+
+def _render_github_record(lines: list[str], record: dict[str, Any]) -> None:
+    kind = record.get("kind")
+    value = _record_value(record)
+    if kind == "aggregate-diff":
+        if isinstance(value, str):
+            lines.extend(
+                [
+                    "## Aggregate Diff",
+                    "",
+                    "This diff does not establish a fix or fixing commit.",
+                    "",
+                ]
+            )
+            lines.extend(_fenced(_sanitize_text(value), "diff"))
+            lines.append("")
+        return
+    if not isinstance(value, dict):
+        return
+    if kind not in {
+        "issue",
+        "pull-request",
+        "ordinary-comment",
+        "review",
+        "inline-comment",
+        "review-thread",
+        "timeline",
+    }:
+        return
+    if kind == "timeline" and value.get("event") not in {
+        "closed",
+        "reopened",
+        "merged",
+        "labeled",
+        "unlabeled",
+        "locked",
+        "unlocked",
+        "ready_for_review",
+        "converted_to_draft",
+    }:
+        return
+    heading = {
+        "issue": "Issue",
+        "pull-request": "Pull Request",
+        "ordinary-comment": "Comment",
+        "review": "Review",
+        "inline-comment": "Inline review comment",
+        "review-thread": "Review thread",
+        "timeline": "Lifecycle event",
+    }[kind]
+    lines.extend([f"## {heading} - `{record['native_id']}`", ""])
+    if kind in {"issue", "pull-request"}:
+        for label, key in (
+            ("Title", "title"),
+            ("State", "state"),
+            ("Number", "number"),
+        ):
+            if isinstance(value.get(key), (str, int)):
+                lines.append(f"- {label}: `{_sanitize_text(str(value[key]))}`")
+        if value.get("merged") is True:
+            lines.append("- Merged: `true`")
+    actor = _github_actor(value)
+    if actor is not None:
+        lines.append(f"- Actor: `{_sanitize_text(actor)}`")
+    lines.extend(f"- Timestamp: {timestamp}" for timestamp in _github_times(value))
+    if isinstance(value.get("body"), str):
+        lines.extend(["", "### Body", ""])
+        lines.extend(_fenced(_sanitize_text(value["body"]), "text"))
+    if kind == "review" and isinstance(value.get("state"), str):
+        lines.append(f"- Review state: `{value['state']}`")
+    if kind == "inline-comment":
+        location = {
+            key: value[key]
+            for key in ("path", "line", "side", "start_line", "start_side")
+            if isinstance(value.get(key), (str, int))
+        }
+        if location:
+            lines.append(f"- Location: `{json.dumps(location, sort_keys=True)}`")
+    if kind == "review-thread":
+        lines.extend(
+            f"- {key}: `{str(value[key]).lower()}`"
+            for key in ("isResolved", "isOutdated")
+            if isinstance(value.get(key), bool)
+        )
+    observations = _github_observations(record)
+    if observations:
+        lines.append(f"- Observed in: {observations}")
+    lines.append("")
+
+
+def _render_github(item: ContextItem, result: ContextExtractionResult) -> list[str]:
+    assert item.github is not None
+    projection = item.github
+    lines = _item_front_matter(item, result, "github", projection)
+    lines.extend(
+        [
             "# GitHub Item",
             "",
-            "## Source-native Records (sensitive values redacted)",
+            "Source-native thread state is current observed state, not proof of a fix.",
             "",
         ]
-        for record in github_records:
-            links = ", ".join(
-                f"[{representation['evidence_path']}]({representation['output_path']})"
-                for representation in record["representations"]
-            )
-            lines.append(
-                f"- `{record['kind']}` `{record['native_id']}` "
-                f"({', '.join(record['temporal_roles'])}; {links})"
-            )
-        lines.extend(["", "## Observation State", ""])
-        lines.append(
-            "Review thread state is observed current state, not proof of a fix."
-        )
-        lines.append("Aggregate diffs do not establish a fix or fixing commit.")
-        (item_root / "github.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return f"{item.path}/github.md"
-    if item.opencode is not None:
-        opencode_projection = item.opencode
-        _write_json(
-            item_root / "opencode.json",
-            _sanitize_public_value(
-                _replace_uuid_run_ids(
-                    {
-                        "schema_version": 1,
-                        "value_policy": "sensitive-values-redacted",
-                        "session": opencode_projection.session,
-                        "messages": opencode_projection.messages,
-                        "inclusion_reasons": opencode_projection.inclusion_reasons,
-                        "temporal_roles": opencode_projection.temporal_roles,
-                        "gaps": opencode_projection.gaps,
-                    },
-                    item.snapshots,
-                )
-            ),
-        )
-        lines = [
-            "# OpenCode Session",
-            "",
-            "Sensitive values are redacted from this derived view.",
-            "",
-            "## Messages",
-            "",
-        ]
-        for message in opencode_projection.messages:
-            roles = ", ".join(message["temporal_roles"]) or "observed_state"
-            lines.append(f"- `{message['id']}` ({roles})")
-            for part in message.get("parts", ()):
-                roles = ", ".join(part["temporal_roles"]) or "observed_state"
-                lines.append(f"  - {part['type']} `{part['id']}` ({roles})")
-        (item_root / "opencode.md").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8"
-        )
-        return f"{item.path}/opencode.md"
-    view_path = f"{item.path}/{source.manifest['source_kind']}.md"
-    lines = [
-        "# Source Item",
-        "",
-        f"- Source kind: `{source.manifest['source_kind']}`",
-        f"- Object kind: `{source.manifest['object_kind']}`",
-        f"- Source ID: `{source.manifest['source_id']}`",
-        f"- Scope ID: `{source.run['source']['scope_id']}`",
-        "",
-        "## Selected Evidence (sensitive values redacted)",
-        "",
-    ]
-    for observation_index, snapshot in enumerate(item.snapshots, start=1):
-        observation_name = _observation_name(observation_index)
-        lines.extend(
-            f"- [{name}](observations/{observation_name}/{name})"
-            for name in sorted(snapshot.evidence)
-            if _include_evidence_in_output(item, name)
-        )
-    (item_root / f"{source.manifest['source_kind']}.md").write_text(
-        "\n".join(lines) + "\n", encoding="utf-8"
     )
+    _render_provenance(lines, item)
+    for record in projection.records:
+        _render_github_record(lines, record)
+    if projection.relations:
+        lines.extend(["## Within-Item Structure", ""])
+        for relation in projection.relations:
+            lines.append(
+                f"- `{relation['kind']}`: "
+                f"`{relation['from_native_id']}` -> `{relation['to_native_id']}`"
+            )
+        lines.append("")
+    return lines
+
+
+def _root_gaps(items: tuple[ContextItem, ...]) -> list[dict[str, str]]:
+    gaps: list[dict[str, str]] = []
+    for item in items:
+        if item.opencode is None:
+            continue
+        gaps.extend(
+            {
+                "source_kind": "opencode",
+                "source_id": item.source.manifest["source_id"],
+                **{key: _sanitize_text(str(value)) for key, value in gap.items()},
+            }
+            for gap in item.opencode.gaps
+        )
+    return sorted(gaps, key=lambda gap: json.dumps(gap, sort_keys=True))
+
+
+def _render_item(
+    staging: Path, item: ContextItem, result: ContextExtractionResult
+) -> str:
+    item_root = staging.joinpath(*PurePosixPath(item.path).parts)
+    item_root.mkdir(parents=True, exist_ok=True)
+    if item.github is not None:
+        lines = _render_github(item, result)
+        view_name = "github.md"
+    elif item.opencode is not None:
+        lines = _render_opencode(item, result)
+        view_name = "opencode.md"
+    else:
+        raise ContextError("context item has no source projection")
+    view_path = f"{item.path}/{view_name}"
+    _write_markdown(item_root / view_name, lines)
     return view_path
 
 
-def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
-    item_root = staging.joinpath(*PurePosixPath(item.path).parts)
-    item_root.mkdir(parents=True, exist_ok=True)
-    provenance: list[dict[str, Any]] = []
-    for observation_index, snapshot in enumerate(item.snapshots, start=1):
-        run_id = snapshot.run["run_id"]
-        observation_name = _observation_name(observation_index)
-        observation_root = item_root / "observations" / observation_name
-        for name, content in sorted(snapshot.evidence.items()):
-            if not _include_evidence_in_output(item, name):
-                continue
-            destination = observation_root.joinpath(*PurePosixPath(name).parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(_sanitize_evidence(content))
-        provenance.append(
-            {
-                "run_id": _public_run_id(run_id, observation_index),
-                "source": _sanitize_public_value(snapshot.run["source"]),
-                "collection_range": snapshot.run["collection_range"],
-                "coverage": _sanitize_public_value(snapshot.run["coverage"]),
-                "snapshot": _sanitize_public_value(snapshot.manifest),
-                "output_path": f"{item.path}/observations/{observation_name}",
-            }
-        )
-    source = item.source
-    github_records = _github_records_for_output(item)
-    view_path = _render_source_view(item_root, item, github_records)
-    result = {
-        "source_kind": source.manifest["source_kind"],
-        "source_scope_id": source.run["source"]["scope_id"],
-        "object_kind": source.manifest["object_kind"],
-        "source_id": source.manifest["source_id"],
-        "path": item.path,
-        "view_path": view_path,
-        "provenance": provenance,
-        "gaps": _sanitize_public_value(
-            list(item.opencode.gaps) if item.opencode is not None else []
-        ),
-    }
-    if item.github is not None:
-        result["inclusion_reasons"] = item.github.inclusion_reasons
-        result["temporal_roles"] = item.github.temporal_roles
-        result["github_path"] = f"{item.path}/github.json"
-    if item.opencode is not None:
-        result["inclusion_reasons"] = item.opencode.inclusion_reasons
-        result["temporal_roles"] = item.opencode.temporal_roles
-        result["opencode_path"] = f"{item.path}/opencode.json"
-    return result
-
-
-def _root_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    gaps = [
-        _sanitize_public_value(
-            {
-                "source_kind": item["source_kind"],
-                "source_scope_id": item["source_scope_id"],
-                "object_kind": item["object_kind"],
-                "source_id": item["source_id"],
-                **gap,
-            }
-        )
-        for item in items
-        for gap in item.get("gaps", ())
-    ]
-    return sorted(
-        gaps,
-        key=lambda gap: json.dumps(gap, ensure_ascii=False, sort_keys=True),
-    )
-
-
 def _render_index(
-    staging: Path, result: ContextExtractionResult, items: list[dict[str, Any]]
+    staging: Path,
+    result: ContextExtractionResult,
+    items: list[tuple[ContextItem, str]],
 ) -> None:
-    lines = [
-        "# Context Output",
-        "",
-        f"Range: [{result.request.from_text}, {result.request.to_text})",
-        "",
-        "## Source Items",
-        "",
-    ]
-    if items:
-        lines.extend(
-            f"- `{item['path']}/` [{item['source_kind']} view]({item['view_path']})"
-            + (
-                f": {', '.join(item['inclusion_reasons'])}; "
-                f"{', '.join(item['temporal_roles'])}"
-                if "inclusion_reasons" in item
-                else ""
-            )
-            for item in items
+    gaps = _root_gaps(result.items)
+    lines = _front_matter(
+        (
+            ("schema_version", 1),
+            ("request_from", result.request.from_text),
+            ("request_to", result.request.to_text),
         )
-    else:
+    )
+    lines.extend(["# Context Output", "", "## Source Items", ""])
+    if not items:
         lines.append("No source items are available.")
-    gaps = _root_gaps(items)
-    lines.extend(["", "## Gaps", ""])
-    if gaps:
-        lines.extend(
-            f"- `{gap['kind']}` for `{gap['source_kind']}/{gap['source_id']}`: "
-            f"{json.dumps(gap, ensure_ascii=False, sort_keys=True)}"
-            for gap in gaps
+    for item, view_path in items:
+        projection = item.github or item.opencode
+        assert projection is not None
+        source = item.source
+        reasons = ", ".join(projection.inclusion_reasons) or "none"
+        roles = ", ".join(projection.temporal_roles) or "observed_state"
+        lines.append(
+            f"- [{source.manifest['source_kind']}:{source.manifest['source_id']}]"
+            f"({view_path}) - reasons: {reasons}; temporal roles: {roles}"
         )
-    else:
+    lines.extend(["", "## Gaps", ""])
+    if not gaps:
         lines.append("No gaps are available.")
-    (staging / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _render_manifest(
-    staging: Path, result: ContextExtractionResult, items: list[dict[str, Any]]
-) -> None:
-    inventory = sorted(
-        path.relative_to(staging).as_posix()
-        for path in staging.rglob("*")
-        if path.is_file()
-    )
-    _write_json(
-        staging / "context.json",
-        {
-            "schema_version": 1,
-            "content_policy": "sensitive-values-redacted",
-            "request": {"from": result.request.from_text, "to": result.request.to_text},
-            "source_items": items,
-            "relations": [],
-            "unresolved_references": [],
-            "gaps": _root_gaps(items),
-            "output_inventory": [*inventory, "context.json"],
-        },
-    )
+    else:
+        for gap in gaps:
+            kind = gap.get("kind", "unknown")
+            source_id = gap.get("source_id", "unknown")
+            lines.append(
+                f"- `{kind}` for `{source_id}`: `{json.dumps(gap, sort_keys=True)}`"
+            )
+    _write_markdown(staging / "index.md", lines)
 
 
 def _rename_without_replacement(source: Path, target: Path) -> None:
@@ -713,9 +842,10 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
             raise ContextError("context output publication failed") from None
         assert staging is not None
         try:
-            items = [_render_item(staging, item) for item in result.items]
-            _render_index(staging, result, items)
-            _render_manifest(staging, result, items)
+            rendered = [
+                (item, _render_item(staging, item, result)) for item in result.items
+            ]
+            _render_index(staging, result, rendered)
         except ContextError:
             raise
         except KeyError, TypeError, UnicodeError, ValueError:
