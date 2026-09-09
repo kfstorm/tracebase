@@ -39,7 +39,7 @@ def _snapshot(
     run: CollectionRun,
     source_id: str = "session-1",
     object_kind: str = "session",
-    evidence_path: str = "source.json",
+    evidence_path: str = "session.json",
 ) -> None:
     snapshot = run.write_snapshot(
         Snapshot(
@@ -50,7 +50,13 @@ def _snapshot(
             ({"path": evidence_path},),
         )
     )
-    run.write_evidence(snapshot, evidence_path, b"{}")
+    content = (
+        b'{"id":"message-1","messages":[{"id":"message-1",'
+        b'"created":"2026-01-01T00:30:00Z","role":"user","parts":[]}]}'
+        if run.source_kind == "opencode"
+        else b"{}"
+    )
+    run.write_evidence(snapshot, evidence_path, content)
 
 
 def _archive_with_snapshot(root: Path) -> None:
@@ -90,7 +96,6 @@ def test_empty_archive_is_a_complete_deterministic_output(tmp_path: Path) -> Non
     assert manifest["source_items"] == []
     assert manifest["relations"] == []
     assert manifest["unresolved_references"] == []
-    assert manifest["gaps"] == []
 
 
 def test_context_groups_all_archive_observations_without_payload_interpretation(
@@ -111,10 +116,32 @@ def test_context_groups_all_archive_observations_without_payload_interpretation(
         output,
     )
     items = json.loads((output / "context.json").read_text())["source_items"]
-    assert len(items) == 1
-    assert [entry["run_id"] for entry in items[0]["provenance"]] == ["before", "in"]
-    assert "inclusion_reasons" not in items[0]
-    assert "temporal_roles" not in items[0]
+    assert items == []
+
+
+def test_opencode_required_payload_errors_are_not_rendered_as_gaps(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    snapshot = run.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "malformed",
+            run.collection_range.as_manifest(),
+            ({"path": "session.json"},),
+        )
+    )
+    run.write_evidence(snapshot, "session.json", b'{"messages": {}}')
+    run.publish({})
+    with pytest.raises(ContextError, match="OpenCode session payload"):
+        generate_context(
+            archive.root,
+            ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+            tmp_path / "output",
+        )
 
 
 def test_github_context_projects_native_records_without_fix_inference(  # noqa: PLR0915
@@ -360,7 +387,6 @@ def test_github_context_projects_native_records_without_fix_inference(  # noqa: 
     )
     assert manifest["relations"] == []
     assert manifest["unresolved_references"] == []
-    assert manifest["gaps"] == []
     issue = next(
         record for record in projection["records"] if record["kind"] == "pull-request"
     )
@@ -510,7 +536,7 @@ def test_archive_rejects_symlinks_at_every_published_level(
         shutil.rmtree(snapshot_root)
         snapshot_root.symlink_to(outside, target_is_directory=True)
     else:
-        evidence = next((run_root / "snapshots" / "session").iterdir()) / "source.json"
+        evidence = next((run_root / "snapshots" / "session").iterdir()) / "session.json"
         evidence.unlink()
         evidence.symlink_to(outside / "source.json")
     with pytest.raises(ContextError, match=r"symlink|regular|snapshots"):
