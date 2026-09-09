@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tracebase import context as context_module
+from tracebase import context_render as context_render_module
 from tracebase.archive import (
     Archive,
     CollectionRange,
@@ -254,9 +254,9 @@ def test_opencode_renderer_is_whitelisted_and_omits_tool_output(tmp_path: Path) 
     assert "provider-only-marker" not in view
     assert "tokenUsage" not in view
     assert "credential-marker" not in view
-    assert "text-secret" not in view
-    assert "tool-secret" not in view
-    assert "https://localhost/private" not in view
+    assert "text-secret" in view
+    assert "tool-secret" in view
+    assert "https://localhost/private" in view
     assert "## Provenance" in view
     assert "Working directory" in view
 
@@ -288,7 +288,7 @@ def test_unsupported_opencode_parts_are_omitted_without_unknown_part_gap(
     assert "unknown-part-type" not in text
 
 
-def test_gap_values_are_redacted_at_the_markdown_boundary(tmp_path: Path) -> None:
+def test_gap_values_are_retained_after_whitelisting(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     run = _run(archive)
@@ -322,8 +322,8 @@ def test_gap_values_are_redacted_at_the_markdown_boundary(tmp_path: Path) -> Non
     generate_context(archive.root, _request(), output)
     text = _opencode_view(output).read_text() + (output / "index.md").read_text()
 
-    assert "https://private.example/gap?token=gap-secret" not in text
-    assert "gap-secret" not in text
+    assert "https://private.example/gap?token=gap-secret" in text
+    assert "gap-secret" in text
 
 
 def test_final_observation_state_controls_unknown_completion_gap(
@@ -487,7 +487,10 @@ def test_github_renderer_whitelists_discussion_structure_and_diff_once(
                 "node_id": source_id,
                 "number": 1,
                 "title": "Harden output",
-                "body": "Keep this body. https://docs.python.org/3/",
+                "body": (
+                    "Keep this body. https://docs.python.org/3/ "
+                    "https://private.example/item?token=body-secret"
+                ),
                 "state": "closed",
                 "user": {"login": "author"},
                 "created_at": "2025-12-31T23:00:00Z",
@@ -587,8 +590,8 @@ def test_github_renderer_whitelists_discussion_structure_and_diff_once(
     assert text.count("diff --git") == 1
     assert "cross-referenced" not in text
     assert "provider-only" not in text
-    assert "private.example" not in text
-    assert "diff-secret" not in text
+    assert "https://private.example/item?token=body-secret" in text
+    assert "diff-secret" in text
     assert "review-inline-comment" in text
 
 
@@ -881,9 +884,15 @@ def test_publication_and_cleanup_failures_leave_no_partial_target(
         _session_payload("session-1", messages=[_message("m", "2026-01-01T00:30:00Z")]),
     )
 
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    with pytest.raises(ContextError, match="already exists"):
+        generate_context(archive.root, _request(), existing)
+
+    original_rename = context_render_module.Path.rename
     monkeypatch.setattr(
-        context_module,
-        "_rename_without_replacement",
+        context_render_module.Path,
+        "rename",
         lambda *_args: (_ for _ in ()).throw(OSError()),
     )
     with pytest.raises(ContextError, match="publication failed"):
@@ -891,18 +900,16 @@ def test_publication_and_cleanup_failures_leave_no_partial_target(
     assert not (tmp_path / "output").exists()
     assert list(tmp_path.glob(".output.*")) == []
 
+    monkeypatch.setattr(context_render_module.Path, "rename", original_rename)
     monkeypatch.setattr(
-        context_module,
-        "_rename_without_replacement",
-        context_module._rename_without_replacement,
-    )
-    monkeypatch.setattr(
-        context_module,
-        "_write_markdown",
+        context_render_module,
+        "write_markdown",
         lambda *_args: (_ for _ in ()).throw(OSError()),
     )
     monkeypatch.setattr(
-        context_module.shutil, "rmtree", lambda *_args: (_ for _ in ()).throw(OSError())
+        context_render_module.shutil,
+        "rmtree",
+        lambda *_args: (_ for _ in ()).throw(OSError()),
     )
     with pytest.raises(ContextError, match="cleanup failed"):
         generate_context(archive.root, _request(), tmp_path / "cleanup-output")
