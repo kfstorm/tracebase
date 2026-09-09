@@ -302,7 +302,11 @@ def test_opencode_projection_uses_interval_overlap_and_preserves_observations(
                     },
                     {
                         "type": "task",
-                        "state": {"time": {"start": "2025-12-31T23:00:00Z"}},
+                        "id": "child-in-range",
+                        "state": {
+                            "status": "running",
+                            "time": {"start": "2025-12-31T23:00:00Z"},
+                        },
                     },
                 ],
             }
@@ -336,7 +340,10 @@ def test_opencode_projection_uses_interval_overlap_and_preserves_observations(
                     {
                         "type": "task",
                         "id": "child-in-range",
-                        "state": {"time": {"start": "2026-01-01T00:30:00Z"}},
+                        "state": {
+                            "status": "completed",
+                            "time": {"start": "2026-01-01T00:30:00Z"},
+                        },
                     },
                 ],
             }
@@ -371,6 +378,121 @@ def test_opencode_projection_uses_interval_overlap_and_preserves_observations(
     assert [child.get("id") for child in projection["task_children"]] == [
         "child-in-range"
     ]
+    assert len(projection["session"]["representations"]) == 2
+    assert [
+        representation["run_id"]
+        for representation in projection["session"]["representations"]
+    ] == ["a", "b"]
+    task = projection["task_children"][0]
+    assert task["id"] == "child-in-range"
+    assert len(task["representations"]) == 2
+    assert task["representations"][0]["value"]["state"]["status"] == "running"
+    assert task["representations"][1]["value"]["state"]["status"] == "completed"
+    assert [
+        representation["observation_window"]
+        for representation in task["representations"]
+    ] == [
+        {"from": "2025-12-31T00:00:00Z", "to": "2026-01-01T00:00:00Z"},
+        {"from": "2026-01-01T00:00:00Z", "to": "2026-01-02T00:00:00Z"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        {
+            "type": "reasoning",
+            "id": "reasoning-1",
+            "time": {
+                "start": "2026-01-01T00:04:00Z",
+                "end": "2026-01-01T00:08:00Z",
+            },
+        },
+        {
+            "type": "text",
+            "id": "text-1",
+            "time": {
+                "start": "2026-01-01T00:08:00Z",
+                "end": "2026-01-01T00:09:00Z",
+            },
+        },
+    ],
+    ids=["reasoning", "text"],
+)
+def test_timed_non_tool_part_selects_session(
+    tmp_path: Path, part: dict[str, object]
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        _session_payload(
+            "session-1",
+            messages=[
+                _message(
+                    "message-1",
+                    "2025-12-31T23:59:00Z",
+                    [part],
+                )
+            ],
+        ),
+    )
+    run.publish({})
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    assert projection["messages"][0]["temporal_roles"] == ["earlier_background"]
+    assert projection["messages"][0]["parts"][0]["temporal_roles"] == ["in_range_work"]
+
+
+def test_missing_task_child_is_reported_as_gap(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    run = _run(archive)
+    _opencode_snapshot(
+        run,
+        _session_payload(
+            "parent-session",
+            messages=[
+                _message(
+                    "message-1",
+                    "2026-01-01T00:30:00Z",
+                    [
+                        {
+                            "type": "task",
+                            "id": "task-1",
+                            "state": {
+                                "time": {"start": "2026-01-01T00:30:00Z"},
+                                "metadata": {
+                                    "sessionId": "child-session",
+                                    "parentSessionId": "parent-session",
+                                },
+                            },
+                        }
+                    ],
+                )
+            ],
+        ),
+    )
+    run.publish({})
+
+    manifest = _context_manifest(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+    )
+    item = _opencode_item(manifest, "parent-session")
+    projection = json.loads((tmp_path / "output" / item["opencode_path"]).read_text())
+    assert {
+        (gap["kind"], gap["session_id"], gap["child_id"])
+        for gap in projection["gaps"]
+        if gap["kind"] == "missing-task-child"
+    } == {("missing-task-child", "parent-session", "child-session")}
 
 
 def test_selected_session_uses_its_own_task_children(tmp_path: Path) -> None:

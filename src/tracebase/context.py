@@ -123,7 +123,7 @@ def _validate_context_source(snapshot: PublishedSnapshot) -> None:
         raise ContextError("unsupported context source")
 
 
-def extract_context(
+def extract_context(  # noqa: PLR0915
     request: ContextRequest, runs: tuple[PublishedRun, ...]
 ) -> ContextExtractionResult:
     """Group all supported Archive objects without source-record interpretation."""
@@ -208,9 +208,26 @@ def extract_context(
                     "parent_id": parent_id,
                 }
             )
-        for child_id in selected_projection.explicit_task_child_ids:
+        for reference in selected_projection.task_child_references:
+            if "malformed" in reference:
+                ancestry_gaps.setdefault(key, []).append(
+                    {
+                        "kind": "malformed-task-child",
+                        "session_id": selected_projection.session_id,
+                    }
+                )
+                continue
+            child_id = reference["child_id"]
             child_key = session_keys.get((key[1], child_id))
-            if child_key is not None:
+            if child_key is None:
+                ancestry_gaps.setdefault(key, []).append(
+                    {
+                        "kind": "missing-task-child",
+                        "session_id": selected_projection.session_id,
+                        "child_id": child_id,
+                    }
+                )
+            else:
                 supporting_keys.add(child_key)
     all_items = [
         replace(
