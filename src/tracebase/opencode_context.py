@@ -351,11 +351,20 @@ def project_opencode(  # noqa: PLR0915
     """Project messages as points and tool executions as intervals."""
     if not snapshots:
         raise ArchiveError("OpenCode session has no snapshot")
+    source_id = snapshots[0].manifest["source_id"]
     session: dict[str, Any] = {"value": _json(snapshots[-1]), "representations": []}
     messages_by_id: dict[str, dict[str, Any]] = {}
     gaps: list[dict[str, str]] = []
     for snapshot in snapshots:
         payload = _json(snapshot)
+        info = payload.get("info")
+        info = info if isinstance(info, dict) else {}
+        payload_id = payload.get("id")
+        info_id = info.get("id")
+        if not any(value == source_id for value in (payload_id, info_id)) or any(
+            value is not None and value != source_id for value in (payload_id, info_id)
+        ):
+            raise ArchiveError("OpenCode session payload identity was invalid")
         session["representations"].append(
             {
                 "run_id": snapshot.run["run_id"],

@@ -51,8 +51,19 @@ def _snapshot(
         )
     )
     content = (
-        b'{"id":"message-1","messages":[{"id":"message-1",'
-        b'"created":"2026-01-01T00:30:00Z","role":"user","parts":[]}]}'
+        json.dumps(
+            {
+                "id": source_id,
+                "messages": [
+                    {
+                        "id": "message-1",
+                        "created": "2026-01-01T00:30:00Z",
+                        "role": "user",
+                        "parts": [],
+                    }
+                ],
+            }
+        ).encode()
         if run.source_kind == "opencode"
         else b"{}"
     )

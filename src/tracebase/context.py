@@ -42,10 +42,13 @@ _SENSITIVE_KEY = re.compile(
     r"credential|password|private[_-]?key|private[_-]?url|secret|token)",
     re.IGNORECASE,
 )
+_SENSITIVE_FIELD = (
+    r"[A-Za-z0-9_-]*(?:access[_-]?token|api[_-]?key|auth(?:entication|orization)?|"
+    r"cookie|credential|password|private[_-]?key|secret|token)[A-Za-z0-9_-]*"
+)
 _SENSITIVE_TEXT = re.compile(
-    r"(?:bearer\s+|basic\s+|[\"']?(?:access[_-]?token|api[_-]?key|"
-    r"auth(?:entication|orization)?|cookie|credential|password|private[_-]?key|"
-    r"secret|token)[\"']?\s*[=:]\s*(?:(?:bearer|basic)\s+)?)"
+    rf"(?:bearer\s+|basic\s+|[\"']?{_SENSITIVE_FIELD}[\"']?\s*[=:]\s*"
+    r"(?:(?:bearer|basic)\s+)?)"
     r"(?:[\"'][^\"']*[\"']|[^\s,;]+)",
     re.IGNORECASE,
 )
@@ -119,7 +122,7 @@ class ContextExtractionResult:
 
 
 def load_archive(root: str | Path) -> tuple[PublishedRun, ...]:
-    """Load the current Raw Archive without inspecting provider payload semantics."""
+    """Load the current Raw Archive while the caller keeps it immutable."""
     try:
         return load_published_archive(root)
     except ArchiveError as error:
@@ -132,6 +135,20 @@ def _logical_key(snapshot: PublishedSnapshot) -> tuple[str, str, str, str]:
         snapshot.run["source"]["scope_id"],
         snapshot.manifest["object_kind"],
         snapshot.manifest["source_id"],
+    )
+
+
+def _snapshot_sort_key(snapshot: PublishedSnapshot) -> tuple[datetime, datetime, str]:
+    collection_range = snapshot.run["collection_range"]
+
+    def parse(value: str) -> datetime:
+        normalized = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+        return datetime.fromisoformat(normalized)
+
+    return (
+        parse(collection_range["from"]),
+        parse(collection_range["to"]),
+        snapshot.run["run_id"],
     )
 
 
@@ -161,7 +178,7 @@ def extract_context(
     all_items: list[ContextItem] = []
     opencode_projections: dict[tuple[str, str, str, str], OpenCodeProjection] = {}
     for key, snapshots in sorted(grouped.items()):
-        ordered = tuple(sorted(snapshots, key=lambda value: value.run["run_id"]))
+        ordered = tuple(sorted(snapshots, key=_snapshot_sort_key))
         try:
             github = (
                 project_github(ordered, request.start, request.end)
