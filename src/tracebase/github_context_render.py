@@ -162,10 +162,6 @@ def _render_github_record(
         "closed",
         "reopened",
         "merged",
-        "labeled",
-        "unlabeled",
-        "locked",
-        "unlocked",
         "ready_for_review",
         "converted_to_draft",
     }:
@@ -210,6 +206,8 @@ def _render_github_record(
     actor = _github_actor(value)
     if actor is not None:
         lines.append(f"- Actor: `{actor}`")
+    if kind == "timeline":
+        lines.append(f"- Event: `{value['event']}`")
     lines.extend(f"- Timestamp: {timestamp}" for timestamp in _github_times(value))
     _render_body(lines, record)
     if kind == "review" and isinstance(value.get("state"), str):

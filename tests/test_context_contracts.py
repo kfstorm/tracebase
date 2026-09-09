@@ -1,6 +1,7 @@
 import json
 import shutil
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,14 @@ from tracebase.archive import (
     Snapshot,
     encode_path_id,
 )
-from tracebase.context import ContextError, ContextRequest, generate_context
+from tracebase.context import (
+    ContextError,
+    ContextRequest,
+    extract_context,
+    generate_context,
+    load_archive,
+)
+from tracebase.context_render import render_context
 
 
 def _request() -> ContextRequest:
@@ -288,7 +296,7 @@ def test_unsupported_opencode_parts_are_omitted_without_unknown_part_gap(
     assert "unknown-part-type" not in text
 
 
-def test_gap_values_are_retained_after_whitelisting(tmp_path: Path) -> None:
+def test_opencode_gap_whitelist_is_shared_by_item_and_index(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     run = _run(archive)
@@ -319,11 +327,28 @@ def test_gap_values_are_retained_after_whitelisting(tmp_path: Path) -> None:
         ),
     )
     output = tmp_path / "output"
-    generate_context(archive.root, _request(), output)
-    text = _opencode_view(output).read_text() + (output / "index.md").read_text()
+    result = extract_context(_request(), load_archive(archive.root))
+    item = result.items[0]
+    assert item.opencode is not None
+    gap = next(
+        dict(gap) for gap in item.opencode.gaps if gap["kind"] == "missing-task-child"
+    )
+    gap["provider_only_marker"] = "must-not-appear"
+    modified_item = replace(
+        item,
+        opencode=replace(item.opencode, gaps=(gap,)),
+    )
+    render_context(replace(result, items=(modified_item,)), output)
+    view = _opencode_view(output).read_text()
+    index = (output / "index.md").read_text()
 
-    assert "https://private.example/gap?token=gap-secret" in text
-    assert "gap-secret" in text
+    for text in (view, index):
+        assert "https://private.example/gap?token=gap-secret" in text
+        assert "gap-secret" in text
+        assert "missing-task-child" in text
+        assert "session-1" in text
+        assert "child_id" in text
+        assert "provider_only_marker" not in text
 
 
 def test_final_observation_state_controls_unknown_completion_gap(
@@ -553,6 +578,7 @@ def test_github_renderer_whitelists_discussion_structure_and_diff_once(
                     "event": "closed",
                     "actor": {"login": "closer"},
                     "created_at": "2026-01-01T00:25:00Z",
+                    "provider_only_marker": "timeline-secret",
                 },
                 {
                     "id": 50,
@@ -585,10 +611,12 @@ def test_github_renderer_whitelists_discussion_structure_and_diff_once(
         "isResolved",
         "Merged: `false`",
         "diff --git",
+        "Event: `closed`",
     ):
         assert marker in text
     assert text.count("diff --git") == 1
     assert "cross-referenced" not in text
+    assert "timeline-secret" not in text
     assert "provider-only" not in text
     assert "https://private.example/item?token=body-secret" in text
     assert "diff-secret" in text

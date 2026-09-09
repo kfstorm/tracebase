@@ -10,6 +10,28 @@ from typing import Any
 
 from .context import ContextError, ContextExtractionResult, ContextItem
 
+_OPENCODE_GAP_FIELDS: dict[str, tuple[str, ...]] = {
+    "malformed-session-parent": ("session_id",),
+    "missing-session-parent": ("session_id", "parent_id"),
+    "cyclic-session-parent": ("session_id", "parent_id"),
+    "malformed-task-child": ("session_id",),
+    "missing-task-child": ("session_id", "child_id"),
+    "unknown-completion": ("message_id", "part_id"),
+    "no_in_range_messages": ("reason",),
+}
+
+
+def public_gap(gap: dict[str, Any]) -> dict[str, str]:
+    """Select the stable public fields for one OpenCode gap."""
+    kind = gap.get("kind")
+    kind = kind if isinstance(kind, str) else "unknown"
+    public = {"kind": kind}
+    for field in _OPENCODE_GAP_FIELDS.get(kind, ()):
+        value = gap.get(field)
+        if isinstance(value, str):
+            public[field] = value
+    return public
+
 
 def _quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
@@ -112,11 +134,11 @@ def _root_gaps(items: tuple[ContextItem, ...]) -> list[dict[str, str]]:
             {
                 "source_kind": "opencode",
                 "source_id": item.source.manifest["source_id"],
-                **{key: str(value) for key, value in gap.items()},
+                **public_gap(gap),
             }
             for gap in item.opencode.gaps
         )
-    return sorted(gaps, key=lambda gap: json.dumps(gap, sort_keys=True))
+    return sorted(gaps, key=lambda entry: json.dumps(entry, sort_keys=True))
 
 
 def _render_item(
@@ -171,11 +193,12 @@ def _render_index(
     if not gaps:
         lines.append("No gaps are available.")
     else:
-        for gap in gaps:
-            kind = gap.get("kind", "unknown")
-            source_id = gap.get("source_id", "unknown")
+        for public_gap_record in gaps:
+            kind = public_gap_record["kind"]
+            source_id = public_gap_record["source_id"]
             lines.append(
-                f"- `{kind}` for `{source_id}`: `{json.dumps(gap, sort_keys=True)}`"
+                f"- `{kind}` for `{source_id}`: "
+                f"`{json.dumps(public_gap_record, sort_keys=True)}`"
             )
     write_markdown(staging / "index.md", lines)
 

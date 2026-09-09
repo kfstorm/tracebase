@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
-from .context_render import fenced, item_front_matter, render_provenance
+from .context_render import fenced, item_front_matter, public_gap, render_provenance
 
 
 def _session_context(item: ContextItem) -> dict[str, str]:
@@ -166,9 +166,10 @@ def render_opencode(  # noqa: PLR0915
                     lines.append("")
     if projection.gaps:
         lines.extend(["## Gaps", ""])
-        lines.extend(
-            f"- `{gap['kind']}`: `{json.dumps(gap, sort_keys=True)}`"
-            for gap in projection.gaps
-        )
+        for gap in projection.gaps:
+            public = public_gap(gap)
+            lines.append(
+                f"- `{public['kind']}`: `{json.dumps(public, sort_keys=True)}`"
+            )
         lines.append("")
     return lines
