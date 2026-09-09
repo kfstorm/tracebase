@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -10,6 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from .archive import (
     ArchiveError,
@@ -32,8 +36,8 @@ _UUID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 _SENSITIVE_KEY = re.compile(
-    r"(?:access[_-]?token|api[_-]?key|authorization|cookie|credential|password|"
-    r"private[_-]?key|private[_-]?url|secret|token)",
+    r"(?:access[_-]?token|api[_-]?key|auth(?:entication|orization)?|cookie|"
+    r"credential|password|private[_-]?key|private[_-]?url|secret|token)",
     re.IGNORECASE,
 )
 _SENSITIVE_TEXT = re.compile(
@@ -41,12 +45,7 @@ _SENSITIVE_TEXT = re.compile(
     r"[^\s,;\"']+",
     re.IGNORECASE,
 )
-_PRIVATE_URL = re.compile(
-    r"https?://(?:[^/\s@]+:[^/\s@]+@|(?:localhost|127(?:\.\d{1,3}){3}|"
-    r"10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])"
-    r"(?:\.\d{1,3}){2}|[^/\s.]+\.local|[^/\s.]+\.internal))[^\s<>\"']*",
-    re.IGNORECASE,
-)
+_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "github": {"issue", "pull-request"},
     "opencode": {"session"},
@@ -267,7 +266,26 @@ def _replace_uuid_run_ids(value: Any, snapshots: tuple[PublishedSnapshot, ...]) 
 
 
 def _sanitize_text(value: str) -> str:
-    value = _PRIVATE_URL.sub("[REDACTED_URL]", value)
+    def replace_url(match: re.Match[str]) -> str:
+        url = match.group(0)
+        try:
+            parsed = urlsplit(url)
+            hostname = parsed.hostname
+            username = parsed.username
+            password = parsed.password
+        except ValueError:
+            return "[REDACTED_URL]"
+        if (
+            hostname in {"github.com", "api.github.com"}
+            and username is None
+            and password is None
+            and not parsed.query
+            and not parsed.fragment
+        ):
+            return url
+        return "[REDACTED_URL]"
+
+    value = _URL.sub(replace_url, value)
     return _SENSITIVE_TEXT.sub("[REDACTED]", value)
 
 
@@ -301,6 +319,27 @@ def _sanitize_evidence(content: bytes) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _include_evidence_in_output(item: ContextItem, name: str) -> bool:
+    if item.opencode is not None:
+        return name == "session.json"
+    if item.github is not None:
+        return name in {
+            "issue.json",
+            "pull-request.json",
+            "pull-request.diff",
+        } or name.startswith(
+            (
+                "comments.",
+                "timeline.",
+                "reviews.",
+                "review-comments.",
+                "review-threads.",
+                "review-thread-comments.",
+            )
+        )
+    return False
 
 
 def _github_records_for_output(item: ContextItem) -> tuple[dict[str, Any], ...]:
@@ -345,13 +384,19 @@ def _render_source_view(
             item_root / "github.json",
             {
                 "schema_version": 1,
+                "value_policy": "sensitive-values-redacted",
                 "inclusion_reasons": projection.inclusion_reasons,
                 "temporal_roles": projection.temporal_roles,
                 "records": github_records,
                 "relations": projection.relations,
             },
         )
-        lines = ["# GitHub Item", "", "## Source-native Records", ""]
+        lines = [
+            "# GitHub Item",
+            "",
+            "## Source-native Records (sensitive values redacted)",
+            "",
+        ]
         for record in github_records:
             links = ", ".join(
                 f"[{representation['evidence_path']}]({representation['output_path']})"
@@ -376,6 +421,7 @@ def _render_source_view(
                 _replace_uuid_run_ids(
                     {
                         "schema_version": 1,
+                        "value_policy": "sensitive-values-redacted",
                         "session": opencode_projection.session,
                         "messages": opencode_projection.messages,
                         "inclusion_reasons": opencode_projection.inclusion_reasons,
@@ -386,7 +432,14 @@ def _render_source_view(
                 )
             ),
         )
-        lines = ["# OpenCode Session", "", "## Messages", ""]
+        lines = [
+            "# OpenCode Session",
+            "",
+            "Sensitive values are redacted from this derived view.",
+            "",
+            "## Messages",
+            "",
+        ]
         for message in opencode_projection.messages:
             roles = ", ".join(message["temporal_roles"]) or "observed_state"
             lines.append(f"- `{message['id']}` ({roles})")
@@ -406,7 +459,7 @@ def _render_source_view(
         f"- Source ID: `{source.manifest['source_id']}`",
         f"- Scope ID: `{source.run['source']['scope_id']}`",
         "",
-        "## Source-native Evidence",
+        "## Selected Evidence (sensitive values redacted)",
         "",
     ]
     for observation_index, snapshot in enumerate(item.snapshots, start=1):
@@ -414,6 +467,7 @@ def _render_source_view(
         lines.extend(
             f"- [{name}](observations/{observation_name}/{name})"
             for name in sorted(snapshot.evidence)
+            if _include_evidence_in_output(item, name)
         )
     (item_root / f"{source.manifest['source_kind']}.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
@@ -430,6 +484,8 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
         observation_name = _observation_name(observation_index)
         observation_root = item_root / "observations" / observation_name
         for name, content in sorted(snapshot.evidence.items()):
+            if not _include_evidence_in_output(item, name):
+                continue
             destination = observation_root.joinpath(*PurePosixPath(name).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(_sanitize_evidence(content))
@@ -533,6 +589,7 @@ def _render_manifest(
         staging / "context.json",
         {
             "schema_version": 1,
+            "content_policy": "sensitive-values-redacted",
             "request": {"from": result.request.from_text, "to": result.request.to_text},
             "source_items": items,
             "relations": [],
@@ -543,28 +600,74 @@ def _render_manifest(
     )
 
 
+def _rename_without_replacement(source: Path, target: Path) -> None:
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError, OSError:
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST)) from None
+        source.rename(target)
+        return
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(source),
+        -100,
+        os.fsencode(target),
+        1,
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.ENOSYS:
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST))
+        source.rename(target)
+        return
+    if error == errno.EEXIST:
+        raise FileExistsError(error, os.strerror(error))
+    raise OSError(error, os.strerror(error))
+
+
 def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
     """Render completely, then publish the caller-owned output with one rename."""
     target = Path(output).absolute()
     staging: Path | None = None
     try:
-        if target.exists() or target.is_symlink():
-            raise ContextError("context output already exists")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
-        items = [_render_item(staging, item) for item in result.items]
-        _render_index(staging, result, items)
-        _render_manifest(staging, result, items)
-        if target.exists() or target.is_symlink():
-            raise ContextError("context output already exists")
-        staging.rename(target)
+        try:
+            if target.exists() or target.is_symlink():
+                raise ContextError("context output already exists")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging = Path(
+                tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent)
+            )
+        except OSError:
+            raise ContextError("context output publication failed") from None
+        assert staging is not None
+        try:
+            items = [_render_item(staging, item) for item in result.items]
+            _render_index(staging, result, items)
+            _render_manifest(staging, result, items)
+        except ContextError:
+            raise
+        except KeyError, TypeError, UnicodeError, ValueError:
+            raise ContextError("context output rendering failed") from None
+        except OSError:
+            raise ContextError("context output rendering failed") from None
+        try:
+            _rename_without_replacement(staging, target)
+        except FileExistsError:
+            raise ContextError("context output already exists") from None
+        except OSError:
+            raise ContextError("context output publication failed") from None
         return target
-    except ContextError:
-        raise
-    except OSError:
-        raise ContextError("context output publication failed") from None
-    except KeyError, TypeError, UnicodeError, ValueError:
-        raise ContextError("context output rendering failed") from None
     finally:
         if staging is not None:
             _cleanup_staging(staging)

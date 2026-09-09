@@ -1111,7 +1111,8 @@ def test_context_output_redacts_credentials_and_private_urls(
                             "type": "text",
                             "id": "text-1",
                             "text": (
-                                "Bearer secret-sentinel https://localhost:8443/private"
+                                "Bearer secret-sentinel https://localhost:8443/private "
+                                "https://private.example/internal"
                             ),
                         }
                     ],
@@ -1131,6 +1132,7 @@ def test_context_output_redacts_credentials_and_private_urls(
     assert b"credential-sentinel" not in output_bytes
     assert b"secret-sentinel" not in output_bytes
     assert b"https://localhost:8443/private" not in output_bytes
+    assert b"https://private.example/internal" not in output_bytes
     assert b"/home/example/project" in output_bytes
 
 
@@ -1607,7 +1609,7 @@ def test_context_publication_failure_is_atomic(
     def fail_rename(*_args: object) -> None:
         raise OSError()
 
-    monkeypatch.setattr(Path, "rename", fail_rename)
+    monkeypatch.setattr(context_module, "_rename_without_replacement", fail_rename)
     with pytest.raises(ContextError, match="publication failed"):
         generate_context(
             archive,
