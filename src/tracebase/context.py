@@ -664,7 +664,8 @@ def _render_body(lines: list[str], record: dict[str, Any]) -> None:
     versions = _field_versions(record, "body")
     if not versions:
         return
-    current = versions[-1][0]
+    latest = _record_value(record)
+    current = latest.get("body") if isinstance(latest, dict) else None
     if not isinstance(current, str):
         return
     lines.extend(["", "### Body", "", "Current observed value:", ""])
@@ -776,11 +777,10 @@ def _render_github_record(
         if location:
             lines.append(f"- Location: `{json.dumps(location, sort_keys=True)}`")
     if kind == "review-thread":
-        lines.extend(
-            f"- {key}: `{str(value[key]).lower()}`"
-            for key in ("isResolved", "isOutdated")
-            if isinstance(value.get(key), bool)
-        )
+        for key in ("isResolved", "isOutdated"):
+            if isinstance(value.get(key), bool):
+                lines.append(f"- Current {key}: `{str(value[key]).lower()}`")
+                _render_scalar_versions(lines, key, _field_versions(record, key))
     observations = _github_observations(record)
     if observations:
         lines.append(f"- Observed in: {observations}")

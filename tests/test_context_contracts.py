@@ -701,6 +701,104 @@ def test_pull_request_payload_lifecycle_is_whitelisted(tmp_path: Path) -> None:
     assert "private.example" not in text
 
 
+def test_github_body_current_value_comes_from_latest_observation(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    source_id = "PR_cycle"
+    for index, (body, day) in enumerate(
+        (("requirement A", "01"), ("requirement B", "02"), ("requirement A", "03")),
+        start=1,
+    ):
+        _publish_github(
+            archive,
+            source_id,
+            {
+                "issue.json": {
+                    "node_id": source_id,
+                    "number": 3,
+                    "title": "Restored body",
+                    "state": "open",
+                    "body": body,
+                    "updated_at": f"2026-01-{day}T00:30:00Z",
+                },
+                "pull-request.json": {"node_id": source_id, "merged": False},
+            },
+            run_id=f"github-cycle-{index}",
+            from_text=f"2026-01-{day}T00:00:00Z",
+            to_text=f"2026-01-{int(day) + 1:02d}T00:00:00Z",
+        )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, _request(), output)
+    text = _github_view(output, source_id).read_text()
+
+    assert "Current observed value:\n\n```text\nrequirement A\n```" in text
+    assert (
+        "- Observation 1 [2026-01-01T00:00:00Z, 2026-01-02T00:00:00Z), "
+        "Observation 3 [2026-01-03T00:00:00Z, 2026-01-04T00:00:00Z):\n"
+        "  ```text\n  requirement A\n  ```"
+    ) in text
+    assert "Observation 2 [2026-01-02T00:00:00Z, 2026-01-03T00:00:00Z)" in text
+
+
+def test_review_thread_states_retain_observed_versions(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    source_id = "PR_thread_history"
+    for index, (resolved, outdated) in enumerate(
+        ((False, False), (True, True)), start=1
+    ):
+        day = f"0{index}"
+        _publish_github(
+            archive,
+            source_id,
+            {
+                "issue.json": {
+                    "node_id": source_id,
+                    "number": 4,
+                    "title": "Thread state",
+                    "state": "open",
+                    "updated_at": f"2026-01-{day}T00:30:00Z",
+                },
+                "pull-request.json": {"node_id": source_id, "merged": False},
+                "review-threads.001.json": {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "thread-history",
+                                            "isResolved": resolved,
+                                            "isOutdated": outdated,
+                                            "comments": {"nodes": []},
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                },
+            },
+            run_id=f"github-thread-{index}",
+            from_text=f"2026-01-{day}T00:00:00Z",
+            to_text=f"2026-01-{int(day) + 1:02d}T00:00:00Z",
+        )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, _request(), output)
+    text = _github_view(output, source_id).read_text()
+
+    assert "- Current isResolved: `true`" in text
+    assert "- Current isOutdated: `true`" in text
+    assert "- Observed isResolved versions:" in text
+    assert "- Observed isOutdated versions:" in text
+    assert "Observation 1 [2026-01-01T00:00:00Z, 2026-01-02T00:00:00Z): `false`" in text
+    assert "Observation 2 [2026-01-02T00:00:00Z, 2026-01-03T00:00:00Z): `true`" in text
+
+
 def test_output_is_deterministic_and_excludes_collection_run_ids(
     tmp_path: Path,
 ) -> None:
