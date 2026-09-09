@@ -264,6 +264,35 @@ def test_pending_tool_without_start_is_observed_state(tmp_path: Path) -> None:
     assert "end" not in tool
 
 
+def test_known_start_without_end_is_explicitly_incomplete(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    _publish_single_message(
+        archive,
+        _message(
+            "message-1",
+            "2025-12-31T23:00:00Z",
+            [
+                {
+                    "type": "tool",
+                    "id": "tool-1",
+                    "state": {"time": {"start": "2026-01-01T00:30:00Z"}},
+                }
+            ],
+        ),
+    )
+
+    projection = _opencode_projection(
+        archive,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"),
+        tmp_path / "output",
+        "session-1",
+    )
+    tool = _projected_part(projection, "tool")
+    assert tool["completion"] == "unknown"
+    assert any(gap["kind"] == "unknown-completion" for gap in projection["gaps"])
+
+
 def test_opencode_required_payload_errors_are_not_rendered_as_gaps(
     tmp_path: Path,
 ) -> None:
@@ -603,6 +632,7 @@ def test_unknown_part_is_preserved_as_observed_state(tmp_path: Path) -> None:
     assert part["type"] == "future-part-type"
     assert part["value"] == unknown
     assert part["temporal_roles"] == ["observed_state"]
+    assert any(gap["kind"] == "unknown-part-type" for gap in projection["gaps"])
 
 
 def test_missing_task_child_is_reported_as_gap(tmp_path: Path) -> None:
@@ -1463,6 +1493,7 @@ def test_scope_aware_identity_and_source_paths_are_deterministic(
     assert all(
         "run_manifest" not in entry for item in items for entry in item["provenance"]
     )
+    assert all("coverage" in entry for item in items for entry in item["provenance"])
 
 
 def test_shared_archive_loader_accepts_unknown_provider_payloads(

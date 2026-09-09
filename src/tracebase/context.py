@@ -509,6 +509,7 @@ def _render_item(staging: Path, item: ContextItem) -> dict[str, Any]:
                 "run_id": _public_run_id(run_id, observation_index),
                 "source": _sanitize_public_value(snapshot.run["source"]),
                 "collection_range": snapshot.run["collection_range"],
+                "coverage": _sanitize_public_value(snapshot.run["coverage"]),
                 "snapshot": _sanitize_public_value(snapshot.manifest),
                 "output_path": f"{item.path}/observations/{observation_name}",
             }
