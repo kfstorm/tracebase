@@ -142,8 +142,8 @@ def _discover_sessions(
 
 def _discover_projects(
     server_url: str, password: str
-) -> tuple[dict[str, dict[str, str]], dict[str, str] | None]:
-    """Fetch the project identity map once, without retaining full responses."""
+) -> tuple[dict[str, dict[str, Any]], dict[str, str] | None]:
+    """Fetch the project map once without changing Project response objects."""
     credentials = b64encode(f"{_SERVER_USERNAME}:{password}".encode()).decode()
     try:
         request = Request(
@@ -157,21 +157,14 @@ def _discover_projects(
     if not isinstance(projects, list):
         return {}, {"kind": "project-lookup-failed", "endpoint": "/project"}
 
-    by_id: dict[str, dict[str, str]] = {}
+    by_id: dict[str, dict[str, Any]] = {}
     for project in projects:
         if not isinstance(project, dict):
             return {}, {"kind": "project-lookup-failed", "endpoint": "/project"}
         project_id = project.get("id")
-        worktree = project.get("worktree")
-        if (
-            not isinstance(project_id, str)
-            or not project_id
-            or not isinstance(worktree, str)
-            or not worktree
-            or project_id in by_id
-        ):
+        if not isinstance(project_id, str) or not project_id or project_id in by_id:
             return {}, {"kind": "project-lookup-failed", "endpoint": "/project"}
-        by_id[project_id] = {"id": project_id, "worktree": worktree}
+        by_id[project_id] = project
     return by_id, None
 
 

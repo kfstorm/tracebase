@@ -14,6 +14,14 @@ from tracebase.progress import ProgressEvent
 
 PROJECT_ROOT = Path(__file__).parents[1]
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
+EXPECTED_GAMMA_PROJECT = {
+    "id": "gamma",
+    "worktree": "/primary/gamma",
+    "sandboxes": ["/secret/gamma"],
+    "vcs": "git",
+    "time": {"created": 1767225600000},
+    "unknownField": {"keep": True},
+}
 
 
 class RecordingReporter:
@@ -242,12 +250,8 @@ else:
             assert metadata["session"]["directory"] == "/gamma"
             assert metadata["session"]["parentID"] == "overlaps-start"
             assert metadata["session"]["time"]["archived"] == 1767228400000
-            assert json.loads((snapshot / "project.json").read_text()) == {
-                "id": "gamma",
-                "worktree": "/primary/gamma",
-            }
-            assert "sandboxes" not in json.loads(
-                (snapshot / "project.json").read_text()
+            assert json.loads((snapshot / "project.json").read_text()) == (
+                EXPECTED_GAMMA_PROJECT
             )
             assert json.loads((snapshot / "session.json").read_text())["info"] == {
                 "id": "session/unsafe:1",
@@ -300,10 +304,9 @@ else:
 
             assert result.returncode == 0
             snapshot = next((root / "archive" / "runs").glob("*/snapshots/session/*"))
-            assert json.loads((snapshot / "project.json").read_text()) == {
-                "id": "gamma",
-                "worktree": "/primary/gamma",
-            }
+            assert json.loads((snapshot / "project.json").read_text()) == (
+                EXPECTED_GAMMA_PROJECT
+            )
             assert (
                 json.loads((snapshot / "snapshot.json").read_text())["metadata"][
                     "session"
