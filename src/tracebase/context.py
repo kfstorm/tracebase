@@ -3,22 +3,22 @@
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import datetime
-from pathlib import Path
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 from .archive import (
     ArchiveError,
     PublishedRun,
     PublishedSnapshot,
-    encode_path_id,
     load_published_archive,
 )
 from .github_context import GitHubProjection, project_github
 from .opencode_context import (
     OpenCodeProjection,
     project_opencode,
-    resolve_opencode_context,
 )
 
 _TIMESTAMP = re.compile(
@@ -123,8 +123,79 @@ def _snapshot_sort_key(snapshot: PublishedSnapshot) -> tuple[datetime, datetime,
     )
 
 
-def _item_path(key: tuple[str, str, str, str]) -> str:
-    return f"{key[0]}/{encode_path_id(key[1])}/{key[2]}/{encode_path_id(key[3])}"
+def _safe_component(value: str) -> str:
+    component = re.sub(r"[^A-Za-z0-9._-]+", "-", value)
+    return component if component not in {"", ".", ".."} else "unknown"
+
+
+def _github_path(projection: GitHubProjection) -> str:
+    owner, _, repository = projection.repository.partition("/")
+    owner = _safe_component(owner)
+    repository = _safe_component(repository)
+    kind = (
+        "pull"
+        if any(record.get("kind") == "pull-request" for record in projection.records)
+        else "issue"
+    )
+    return f"github/{owner}/{repository}/{kind}/{projection.number}"
+
+
+def _session_parts(
+    projection: OpenCodeProjection,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    value = projection.session.get("value")
+    value = value if isinstance(value, dict) else {}
+    info = value.get("info")
+    info = info if isinstance(info, dict) else {}
+    return value, info
+
+
+def _session_directory(projection: OpenCodeProjection) -> str:
+    project_directory = projection.session.get("project_directory")
+    if isinstance(project_directory, str) and project_directory:
+        return project_directory
+    value, info = _session_parts(projection)
+    directory = info.get("directory", value.get("directory"))
+    if isinstance(directory, str) and directory:
+        return directory
+    directory = projection.session.get("working_directory")
+    if isinstance(directory, str) and directory:
+        return directory
+    return "."
+
+
+def _session_title(projection: OpenCodeProjection) -> str:
+    value, info = _session_parts(projection)
+    title = info.get("title", value.get("title"))
+    return title if isinstance(title, str) and title else "Untitled session"
+
+
+def _opencode_path(directory: str, session_number: int) -> str:
+    parts = PurePosixPath(directory).parts
+    if parts and parts[0] == "/":
+        parts = parts[1:]
+    safe_parts = [_safe_component(part) for part in parts if part not in {"", "."}]
+    if not safe_parts:
+        safe_parts = ["root"]
+    return f"opencode/{'/'.join(safe_parts)}/session/{session_number:02d}"
+
+
+def _session_first_in_range(projection: OpenCodeProjection) -> datetime:
+    candidates: list[datetime] = []
+    for message in projection.messages:
+        if "in_range_work" in message.get("temporal_roles", ()):
+            created = message.get("created")
+            if isinstance(created, str):
+                with suppress(ValueError):
+                    candidates.append(datetime.fromisoformat(created))
+        for part in message.get("parts", ()):
+            if "in_range_work" not in part.get("temporal_roles", ()):
+                continue
+            started = part.get("start")
+            if isinstance(started, str):
+                with suppress(ValueError):
+                    candidates.append(datetime.fromisoformat(started))
+    return min(candidates) if candidates else datetime.max.replace(tzinfo=UTC)
 
 
 def _validate_context_source(snapshot: PublishedSnapshot) -> None:
@@ -165,23 +236,9 @@ def extract_context(
             raise ContextError(str(error)) from None
         if opencode is not None:
             opencode_projections[key] = opencode
-        all_items.append(ContextItem(ordered, _item_path(key), github, opencode))
-    projections_by_scope: dict[
-        str, list[tuple[tuple[str, str, str, str], OpenCodeProjection]]
-    ] = {}
-    for key, projection in opencode_projections.items():
-        projections_by_scope.setdefault(key[1], []).append((key, projection))
-    for scoped in projections_by_scope.values():
-        resolved = resolve_opencode_context(
-            tuple(projection for _, projection in scoped)
-        )
-        for (key, _), projection in zip(scoped, resolved, strict=True):
-            opencode_projections[key] = projection
-    supporting_keys = {
-        key
-        for key, projection in opencode_projections.items()
-        if projection.inclusion_reasons == ("supporting-task-context",)
-    }
+        all_items.append(ContextItem(ordered, "", github, opencode))
+    # Child sessions are evidence consumed by a root task, not independent
+    # user-facing documents. The parent task output is the semantic boundary.
     all_items = [
         replace(
             item,
@@ -189,17 +246,42 @@ def extract_context(
         )
         for item in all_items
     ]
-    items = tuple(
+    all_items = [
         item
         for item in all_items
         if (item.github is None or item.github.selected)
         and (
             item.opencode is None
-            or item.opencode.selected
-            or _logical_key(item.source) in supporting_keys
+            or (item.opencode.selected and item.opencode.parent_id is None)
         )
-    )
-    return ContextExtractionResult(request, runs, items)
+    ]
+    github_items = [item for item in all_items if item.github is not None]
+    for item in github_items:
+        assert item.github is not None
+        item_index = all_items.index(item)
+        all_items[item_index] = replace(item, path=_github_path(item.github))
+    opencode_items = [item for item in all_items if item.opencode is not None]
+    grouped_sessions: dict[str, list[ContextItem]] = {}
+    for item in opencode_items:
+        assert item.opencode is not None
+        grouped_sessions.setdefault(_session_directory(item.opencode), []).append(item)
+    for directory, grouped_items in grouped_sessions.items():
+        ordered_items = sorted(
+            grouped_items,
+            key=lambda item: (
+                _session_first_in_range(item.opencode)
+                if item.opencode is not None
+                else datetime.max,
+                _session_title(item.opencode) if item.opencode is not None else "",
+                item.opencode.session_id if item.opencode is not None else "",
+            ),
+        )
+        for session_number, item in enumerate(ordered_items, start=1):
+            item_index = all_items.index(item)
+            all_items[item_index] = replace(
+                item, path=_opencode_path(directory, session_number)
+            )
+    return ContextExtractionResult(request, runs, tuple(all_items))
 
 
 def generate_context(

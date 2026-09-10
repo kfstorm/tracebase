@@ -15,10 +15,12 @@ class GitHubProjection:
     """Source-native GitHub records and within-Item native structure."""
 
     selected: bool
-    inclusion_reasons: tuple[str, ...]
-    temporal_roles: tuple[str, ...]
     records: tuple[dict[str, Any], ...]
     relations: tuple[dict[str, str], ...]
+    repository: str
+    number: int
+    title: str | None
+    tracked_login: str | None
 
 
 def _json(snapshot: PublishedSnapshot, path: str) -> dict[str, Any] | list[Any]:
@@ -145,6 +147,32 @@ def _thread_nodes(snapshot: PublishedSnapshot, path: str) -> list[dict[str, Any]
     return nodes
 
 
+def _merge_thread_comments(value: dict[str, Any], nodes: list[dict[str, Any]]) -> None:
+    comments = value.get("comments")
+    if not isinstance(comments, dict):
+        comments = {}
+        value["comments"] = comments
+    existing = comments.get("nodes")
+    if not isinstance(existing, list):
+        existing = []
+        comments["nodes"] = existing
+    positions = {
+        node.get("id"): index
+        for index, node in enumerate(existing)
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    for node in nodes:
+        node_id = node.get("id")
+        if not isinstance(node_id, str):
+            continue
+        position = positions.get(node_id)
+        if position is None:
+            positions[node_id] = len(existing)
+            existing.append(node)
+        elif isinstance(node, dict) and len(node) > len(existing[position]):
+            existing[position] = node
+
+
 def _roles(record: dict[str, Any], start: datetime, end: datetime) -> tuple[str, ...]:
     timestamps = [
         timestamp
@@ -203,12 +231,37 @@ def project_github(  # noqa: PLR0915
     relations: set[tuple[str, str, str]] = set()
     source_id = snapshots[0].manifest["source_id"]
     object_kind = snapshots[0].manifest["object_kind"]
+    repository = "unknown/unknown"
+    number = 0
+    title: str | None = None
+    effective_options = (
+        snapshots[0].run.get("collector", {}).get("effective_options", {})
+    )
+    tracked_login = (
+        effective_options.get("actor_login")
+        if isinstance(effective_options, dict)
+        else None
+    )
+    if not isinstance(tracked_login, str) or not tracked_login:
+        tracked_login = None
+    paged_thread_comments: list[tuple[int, str, list[dict[str, Any]]]] = []
     for observation, snapshot in enumerate(snapshots, start=1):
         inline_nodes_by_rest_id: dict[int, str] = {}
         inline_replies: list[tuple[int, str]] = []
         issue = _json(snapshot, "issue.json")
         if not isinstance(issue, dict) or issue.get("node_id") != source_id:
             raise ArchiveError("GitHub Item evidence identity was invalid")
+        repository_value = issue.get("repository_url")
+        if isinstance(repository_value, str) and repository_value:
+            repository = (
+                repository_value.removeprefix("https://api.github.com/repos/")
+                .removeprefix("https://github.com/")
+                .strip("/")
+            )
+        if isinstance(issue.get("number"), int):
+            number = issue["number"]
+        if isinstance(issue.get("title"), str):
+            title = issue["title"]
         _add_record(
             records,
             _record(object_kind, source_id, issue, "issue.json", snapshot, observation),
@@ -218,17 +271,24 @@ def project_github(  # noqa: PLR0915
         ):
             for value in _list(snapshot, path):
                 if isinstance(value.get("id"), int):
+                    comment_id = str(value["id"])
                     _add_record(
                         records,
                         _record(
                             "ordinary-comment",
-                            str(value["id"]),
+                            comment_id,
                             value,
                             path,
                             snapshot,
                             observation,
                         ),
                     )
+                    node_id = value.get("node_id")
+                    if isinstance(node_id, str):
+                        records.setdefault(
+                            ("ordinary-comment-alias", node_id),
+                            {"kind": "ordinary-comment-alias", "native_id": node_id},
+                        )["canonical_id"] = comment_id
         for path in sorted(
             name for name in snapshot.evidence if name.startswith("timeline.")
         ):
@@ -236,10 +296,20 @@ def project_github(  # noqa: PLR0915
                 identifier = value.get("node_id", value.get("id"))
                 if isinstance(identifier, (str, int)):
                     kind = "timeline"
-                    if value.get("event") == "commented" and isinstance(
-                        value.get("id"), int
-                    ):
+                    if value.get("event") == "commented":
                         kind = "ordinary-comment"
+                        alias = value.get("node_id")
+                        if isinstance(alias, str):
+                            alias_record = records.get(
+                                ("ordinary-comment-alias", alias)
+                            )
+                            identifier = (
+                                alias_record.get("canonical_id")
+                                if alias_record is not None
+                                else alias
+                            )
+                        elif isinstance(value.get("id"), int):
+                            identifier = value["id"]
                     elif value.get("event") == "reviewed" and isinstance(
                         value.get("id"), int
                     ):
@@ -346,10 +416,11 @@ def project_github(  # noqa: PLR0915
                 ) from None
             if not isinstance(thread_id, str) or not isinstance(nodes, list):
                 raise ArchiveError("GitHub review-thread comments were invalid")
+            if not all(isinstance(comment, dict) for comment in nodes):
+                raise ArchiveError("GitHub review-thread comments were invalid")
+            paged_thread_comments.append((observation, thread_id, nodes))
             for comment in nodes:
-                if not isinstance(comment, dict) or not isinstance(
-                    comment.get("id"), str
-                ):
+                if not isinstance(comment.get("id"), str):
                     raise ArchiveError("GitHub review-thread comments were invalid")
                 relations.add(("thread-inline-comment", thread_id, comment["id"]))
         for reply_id, node_id in inline_replies:
@@ -371,39 +442,44 @@ def project_github(  # noqa: PLR0915
                             "observation_window": snapshot.manifest[
                                 "observation_window"
                             ],
-                            "value": snapshot.evidence["pull-request.diff"].decode(
-                                "utf-8"
-                            ),
+                            "value": snapshot.evidence["pull-request.diff"],
                         }
                     ],
                 },
             )
+    for observation, thread_id, nodes in paged_thread_comments:
+        record = records.get(("review-thread", thread_id))
+        if record is None:
+            continue
+        for representation in reversed(record["representations"]):
+            if representation.get("observation") != observation:
+                continue
+            value = representation.get("value")
+            if isinstance(value, dict):
+                _merge_thread_comments(value, nodes)
+            break
     ordered = tuple(
         sorted(
-            records.values(),
+            (
+                record
+                for record in records.values()
+                if record.get("kind") != "ordinary-comment-alias"
+            ),
             key=lambda record: _record_sort_key(record, start, end),
         )
     )
     selected = [
         record for record in ordered if "in_range_work" in _roles(record, start, end)
     ]
-    for record in ordered:
-        roles = _roles(record, start, end)
-        record["temporal_roles"] = roles
-        record["inclusion_reasons"] = (
-            ("in_range_source_record",)
-            if "in_range_work" in roles
-            else ("bounded_item_context",)
-        )
     return GitHubProjection(
         bool(selected),
-        ("in_range_source_record",) if selected else (),
-        tuple(
-            sorted({role for record in ordered for role in _roles(record, start, end)})
-        ),
         ordered,
         tuple(
             {"kind": kind, "from_native_id": left, "to_native_id": right}
             for kind, left, right in sorted(relations)
         ),
+        repository,
+        number,
+        title,
+        tracked_login,
     )

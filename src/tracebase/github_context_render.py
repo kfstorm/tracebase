@@ -1,267 +1,528 @@
-"""GitHub whitelist projection rendering as deterministic Markdown."""
+"""Consumer-oriented GitHub Context Output rendering."""
 
 from __future__ import annotations
 
-import json
+from datetime import datetime, tzinfo
 from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
-from .context_render import fenced, item_front_matter, render_provenance
+from .context_render import format_timestamp, parse_timestamp
 
 
-def _record_value(record: dict[str, Any]) -> dict[str, Any] | str | None:
-    representations = record.get("representations")
-    if not isinstance(representations, list) or not representations:
+def _representations(record: dict[str, Any]) -> list[dict[str, Any]]:
+    values = record.get("representations")
+    return (
+        [value for value in values if isinstance(value, dict)]
+        if isinstance(values, list)
+        else []
+    )
+
+
+def _observation_end(representation: dict[str, Any]) -> datetime | None:
+    window = representation.get("observation_window")
+    if not isinstance(window, dict):
         return None
-    value = representations[-1].get("value")
+    return parse_timestamp(window.get("to"))
+
+
+def _representation_value(
+    record: dict[str, Any], end: datetime
+) -> dict[str, Any] | str | bytes | None:
+    value, _ = _representation_selection(record, end)
+    return value
+
+
+def _representation_selection(
+    record: dict[str, Any], end: datetime
+) -> tuple[dict[str, Any] | str | bytes | None, bool]:
+    representations = _representations(record)
+    eligible = [
+        representation
+        for representation in representations
+        if (observed_end := _observation_end(representation)) is not None
+        and observed_end <= end
+    ]
+    candidates = eligible or representations
+    if not candidates:
+        return None, False
+    value = candidates[-1].get("value")
+    selected = value if isinstance(value, (dict, str, bytes)) else None
+    later = not eligible and any(
+        (observed_end := _observation_end(representation)) is not None
+        and observed_end > end
+        for representation in representations
+    )
+    return selected, later
+
+
+def _value(record: dict[str, Any] | None, end: datetime) -> dict[str, Any] | str | None:
+    if record is None:
+        return None
+    value = _representation_value(record, end)
     return value if isinstance(value, (dict, str)) else None
 
 
-def _github_observation_label(representation: dict[str, Any]) -> str:
-    observation = representation.get("observation")
-    label = (
-        f"Observation {observation}"
-        if isinstance(observation, int) and observation > 0
-        else "Observation unknown"
+def _times(value: dict[str, Any]) -> tuple[datetime, ...]:
+    keys = ("created_at", "updated_at", "submitted_at", "merged_at", "closed_at")
+    return tuple(
+        parsed
+        for key in keys
+        if (parsed := parse_timestamp(value.get(key))) is not None
     )
-    window = representation.get("observation_window")
-    if isinstance(window, dict):
-        start = window.get("from")
-        end = window.get("to")
-        if isinstance(start, str) and isinstance(end, str):
-            return f"{label} [{start}, {end})"
-    return label
 
 
-def _field_versions(
-    record: dict[str, Any], key: str
-) -> list[tuple[Any, tuple[str, ...]]]:
-    versions: list[tuple[Any, list[str], str]] = []
-    representations = record.get("representations")
-    if not isinstance(representations, list):
-        return []
-    for representation in representations:
-        if not isinstance(representation, dict):
-            continue
-        value = representation.get("value")
-        if not isinstance(value, dict) or key not in value:
-            continue
-        field_value = value[key]
-        marker = json.dumps(field_value, ensure_ascii=False, sort_keys=True)
-        label = _github_observation_label(representation)
-        for _version_value, labels, version_marker in versions:
-            if version_marker == marker:
-                labels.append(label)
-                break
-        else:
-            versions.append((field_value, [label], marker))
-    return [(value, tuple(labels)) for value, labels, _ in versions]
-
-
-def _github_actor(value: dict[str, Any]) -> str | None:
+def _actor(value: dict[str, Any]) -> str | None:
     for key in ("user", "actor", "author"):
         actor = value.get(key)
-        if isinstance(actor, dict):
-            login = actor.get("login")
-            if isinstance(login, str):
-                return login
+        login = actor.get("login") if isinstance(actor, dict) else None
+        if isinstance(login, str):
+            return login
     return None
 
 
-def _github_times(value: dict[str, Any]) -> list[str]:
-    return [
-        value[key]
-        for key in (
-            "created_at",
-            "updated_at",
-            "submitted_at",
-            "merged_at",
-            "closed_at",
-        )
-        if isinstance(value.get(key), str)
-    ]
+def _actor_label(value: dict[str, Any], tracked_login: str | None) -> str:
+    actor = _actor(value) or "unknown"
+    return f"@{actor} (tracked account)" if actor == tracked_login else f"@{actor}"
 
 
-def _github_observations(record: dict[str, Any]) -> str:
-    representations = record.get("representations")
-    if not isinstance(representations, list):
-        return ""
-    labels = []
-    for representation in representations:
-        if isinstance(representation, dict):
-            label = _github_observation_label(representation)
-            if label not in labels:
-                labels.append(label)
-    return ", ".join(label[0].lower() + label[1:] for label in labels)
+def _time(value: dict[str, Any], timezone: tzinfo) -> str | None:
+    for key in ("created_at", "submitted_at", "updated_at"):
+        result = format_timestamp(value.get(key), timezone)
+        if result is not None:
+            return result
+    return None
 
 
-def _render_scalar_versions(
-    lines: list[str], label: str, versions: list[tuple[Any, tuple[str, ...]]]
+def _edited_time(value: dict[str, Any], timezone: tzinfo) -> str | None:
+    created = format_timestamp(value.get("created_at"), timezone)
+    updated = format_timestamp(value.get("updated_at"), timezone)
+    if created is None or updated is None or created == updated:
+        return None
+    return updated
+
+
+def _comment(
+    lines: list[str], value: dict[str, Any], timezone: tzinfo, tracked_login: str | None
 ) -> None:
-    if len(versions) <= 1:
-        return
-    lines.extend([f"- Observed {label} versions:"])
-    for value, observations in versions:
-        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        lines.append(f"  - {', '.join(observations)}: `{rendered}`")
+    actor = _actor_label(value, tracked_login)
+    created = _time(value, timezone)
+    edited = _edited_time(value, timezone)
+    timestamp = f" · {created}" if created else ""
+    if edited:
+        timestamp += f" · edited {edited}"
+    lines.extend([f"**{actor}{timestamp}**", ""])
+    body = value.get("body")
+    if isinstance(body, str) and body:
+        lines.extend([body, ""])
 
 
-def _render_body(lines: list[str], record: dict[str, Any]) -> None:
-    versions = _field_versions(record, "body")
-    if not versions:
-        return
-    latest = _record_value(record)
-    current = latest.get("body") if isinstance(latest, dict) else None
-    if not isinstance(current, str):
-        return
-    lines.extend(["", "### Body", "", "Current observed value:", ""])
-    lines.extend(fenced(current, "text"))
-    if len(versions) > 1:
-        lines.extend(["", "#### Observed versions", ""])
-        for value, observations in versions:
-            if not isinstance(value, str):
-                continue
-            lines.append(f"- {', '.join(observations)}:")
-            lines.extend(f"  {line}" for line in fenced(value, "text"))
-    lines.append("")
+def _record_by_kind(
+    records: tuple[dict[str, Any], ...], kind: str
+) -> list[dict[str, Any]]:
+    return [record for record in records if record.get("kind") == kind]
 
 
-def _render_github_record(
-    lines: list[str],
-    record: dict[str, Any],
-    lifecycle_record: dict[str, Any] | None = None,
-) -> None:
-    kind = record.get("kind")
-    value = _record_value(record)
-    if kind == "aggregate-diff":
-        if isinstance(value, str):
-            lines.extend(
-                [
-                    "## Aggregate Diff",
-                    "",
-                    "This diff does not establish a fix or fixing commit.",
-                    "",
-                ]
-            )
-            lines.extend(fenced(value, "diff"))
-            lines.append("")
-        return
-    if not isinstance(value, dict):
-        return
-    if kind not in {
-        "issue",
-        "pull-request",
-        "ordinary-comment",
-        "review",
-        "inline-comment",
-        "review-thread",
-        "timeline",
-    }:
-        return
-    if kind == "timeline" and value.get("event") not in {
+def _in_range_time(
+    value: dict[str, Any], start: datetime, end: datetime
+) -> datetime | None:
+    times = [timestamp for timestamp in _times(value) if start <= timestamp < end]
+    return min(times) if times else None
+
+
+def _event_bucket(value: dict[str, Any], start: datetime, end: datetime) -> str | None:
+    times = _times(value)
+    if any(start <= timestamp < end for timestamp in times):
+        return "activity"
+    if any(timestamp < start for timestamp in times):
+        return "background"
+    return None
+
+
+def _location(value: dict[str, Any]) -> str | None:
+    path = value.get("path")
+    line = value.get("line", value.get("original_line"))
+    if isinstance(path, str) and isinstance(line, int):
+        return f"{path}:{line}"
+    return path if isinstance(path, str) else None
+
+
+def _lifecycle(value: dict[str, Any], tracked_login: str | None) -> str | None:
+    event = value.get("event")
+    if event not in {
         "closed",
         "reopened",
         "merged",
         "ready_for_review",
         "converted_to_draft",
     }:
-        return
-    heading = {
-        "issue": "Issue",
-        "pull-request": "Pull Request",
-        "ordinary-comment": "Comment",
-        "review": "Review",
-        "inline-comment": "Inline review comment",
-        "review-thread": "Review thread",
-        "timeline": "Lifecycle event",
-    }[kind]
-    lines.extend([f"## {heading} - `{record['native_id']}`", ""])
-    if kind in {"issue", "pull-request"}:
-        for label, key in (
-            ("Title", "title"),
-            ("State", "state"),
-            ("Number", "number"),
+        return None
+    actor = _actor(value)
+    rendered = str(event).replace("_", " ").capitalize()
+    return f"{rendered}{f' by {_actor_label(value, tracked_login)}' if actor else ''}"
+
+
+def _object_events(
+    record: dict[str, Any], start: datetime, end: datetime
+) -> list[tuple[datetime, str]]:
+    seen: set[tuple[str, datetime]] = set()
+    for representation in _representations(record):
+        value = representation.get("value")
+        if not isinstance(value, dict):
+            continue
+        created = parse_timestamp(value.get("created_at"))
+        updated = parse_timestamp(value.get("updated_at"))
+        if created is not None and start <= created < end:
+            seen.add(("created", created))
+        if (
+            updated is not None
+            and start <= updated < end
+            and (created is None or updated != created)
         ):
-            if isinstance(value.get(key), (str, int)):
-                lines.append(f"- {label}: `{value[key]}`")
-            _render_scalar_versions(lines, label, _field_versions(record, key))
-        if kind == "pull-request" and lifecycle_record is not None:
-            lifecycle = _record_value(lifecycle_record)
-            if isinstance(lifecycle, dict):
-                for label, key in (("Merged", "merged"), ("Draft", "draft")):
-                    if isinstance(lifecycle.get(key), bool):
-                        lines.append(
-                            f"- {label}: `{'true' if lifecycle[key] else 'false'}`"
-                        )
-                        _render_scalar_versions(
-                            lines, label, _field_versions(lifecycle_record, key)
-                        )
-                if isinstance(lifecycle.get("merged_at"), str):
-                    lines.append(f"- Merged at: {lifecycle['merged_at']}")
-                    _render_scalar_versions(
-                        lines,
-                        "Merged at",
-                        _field_versions(lifecycle_record, "merged_at"),
-                    )
-    actor = _github_actor(value)
-    if actor is not None:
-        lines.append(f"- Actor: `{actor}`")
-    if kind == "timeline":
-        lines.append(f"- Event: `{value['event']}`")
-    lines.extend(f"- Timestamp: {timestamp}" for timestamp in _github_times(value))
-    _render_body(lines, record)
-    if kind == "review" and isinstance(value.get("state"), str):
-        lines.append(f"- Review state: `{value['state']}`")
-    if kind == "inline-comment":
-        location = {
-            key: value[key]
-            for key in ("path", "line", "side", "start_line", "start_side")
-            if isinstance(value.get(key), (str, int))
-        }
-        if location:
-            lines.append(f"- Location: `{json.dumps(location, sort_keys=True)}`")
-    if kind == "review-thread":
-        for key in ("isResolved", "isOutdated"):
-            if isinstance(value.get(key), bool):
-                lines.append(f"- Current {key}: `{str(value[key]).lower()}`")
-                _render_scalar_versions(lines, key, _field_versions(record, key))
-    observations = _github_observations(record)
-    if observations:
-        lines.append(f"- Observed in: {observations}")
-    lines.append("")
+            seen.add(("updated", updated))
+    return [
+        (timestamp, event)
+        for event, timestamp in sorted(seen, key=lambda value: (value[1], value[0]))
+    ]
 
 
-def render_github(item: ContextItem, result: ContextExtractionResult) -> list[str]:
+def _review_lines(
+    value: dict[str, Any], timezone: tzinfo, tracked_login: str | None
+) -> list[str] | None:
+    state = value.get("state")
+    body = value.get("body")
+    if isinstance(state, str) and state.upper() == "COMMENTED" and not body:
+        return None
+    actor = _actor_label(value, tracked_login)
+    timestamp = _time(value, timezone)
+    state_suffix = f" ({state})" if isinstance(state, str) else ""
+    suffix = f" · {timestamp}" if timestamp else ""
+    lines = [f"Review by {actor}{suffix}{state_suffix}", ""]
+    if isinstance(body, str) and body:
+        lines.extend([body, ""])
+    return lines
+
+
+def _thread_comments(
+    thread: dict[str, Any],
+    inline: dict[str, dict[str, Any]],
+    start: datetime,
+    end: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    comments = thread.get("comments")
+    nodes = comments.get("nodes") if isinstance(comments, dict) else None
+    if not isinstance(nodes, list):
+        return [], [], []
+    earlier: list[dict[str, Any]] = []
+    activity: list[dict[str, Any]] = []
+    future: list[dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+            continue
+        value = inline.get(node["id"], node)
+        times = _times(value)
+        if any(start <= timestamp < end for timestamp in times):
+            activity.append(value)
+        elif any(timestamp < start for timestamp in times):
+            earlier.append(value)
+        else:
+            future.append(value)
+    return earlier, activity, future
+
+
+def _thread_lines(
+    thread: dict[str, Any],
+    earlier: list[dict[str, Any]],
+    activity: list[dict[str, Any]],
+    timestamp: datetime,
+    timezone: tzinfo,
+    tracked_login: str | None,
+) -> list[str]:
+    location = next(
+        (_location(value) for value in [*earlier, *activity] if _location(value)), None
+    )
+    rendered_time = format_timestamp(timestamp.isoformat(), timezone) or "Unknown time"
+    lines = [
+        f"### {rendered_time} · Review thread · {location or 'unknown location'}",
+        "",
+    ]
+    if earlier:
+        lines.extend(["### Earlier context", ""])
+        for value in earlier:
+            _comment(lines, value, timezone, tracked_login)
+    if activity:
+        lines.extend(["### During requested interval", ""])
+        for value in activity:
+            _comment(lines, value, timezone, tracked_login)
+    return lines
+
+
+def _thread_entries(
+    records: tuple[dict[str, Any], ...],
+    start: datetime,
+    end: datetime,
+    timezone: tzinfo,
+    tracked_login: str | None,
+) -> tuple[list[tuple[datetime, str, list[str]]], set[str], set[str], set[str]]:
+    inline: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if record.get("kind") != "inline-comment":
+            continue
+        value = _value(record, end)
+        if isinstance(value, dict):
+            inline[str(record.get("native_id"))] = value
+    entries: list[tuple[datetime, str, list[str]]] = []
+    active_thread_ids: set[str] = set()
+    earlier_thread_ids: set[str] = set()
+    all_threaded_ids: set[str] = set()
+    for thread_record in _record_by_kind(records, "review-thread"):
+        thread = _value(thread_record, end)
+        if not isinstance(thread, dict):
+            continue
+        earlier, activity, _future = _thread_comments(thread, inline, start, end)
+        comments = thread.get("comments")
+        nodes = comments.get("nodes") if isinstance(comments, dict) else []
+        if not isinstance(nodes, list):
+            nodes = []
+        all_threaded_ids.update(
+            str(node["id"])
+            for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        )
+        if not earlier and not activity:
+            continue
+        if activity:
+            activity_times = [
+                event_time
+                for value in activity
+                if (event_time := _in_range_time(value, start, end)) is not None
+            ]
+            timestamp = min(activity_times)
+        else:
+            timestamp = min(
+                timestamp
+                for value in earlier
+                for timestamp in _times(value)
+                if timestamp < start
+            )
+        lines = _thread_lines(
+            thread, earlier, activity, timestamp, timezone, tracked_login
+        )
+        thread_id = str(thread_record.get("native_id"))
+        if activity:
+            active_thread_ids.add(thread_id)
+        else:
+            earlier_thread_ids.add(thread_id)
+        entries.append((timestamp, thread_id, lines))
+    return entries, active_thread_ids, earlier_thread_ids, all_threaded_ids
+
+
+def _event_entries(  # noqa: PLR0915
+    item: ContextItem,
+    result: ContextExtractionResult,
+    bucket: str,
+) -> list[tuple[datetime, str, list[str]]]:
     assert item.github is not None
     projection = item.github
-    lines = item_front_matter(item, result, "github", projection)
-    lines.extend(
-        [
-            "# GitHub Item",
-            "",
-            "Source-native thread state is current observed state, not proof of a fix.",
-            "",
-        ]
+    start, end = result.request.start, result.request.end
+    timezone = start.tzinfo
+    assert timezone is not None
+    records = projection.records
+    thread_entries, active_thread_ids, earlier_thread_ids, all_threaded_ids = (
+        _thread_entries(records, start, end, timezone, projection.tracked_login)
     )
-    render_provenance(lines, item)
-    lifecycle_records = {
-        (record.get("kind"), record.get("native_id")): record
-        for record in projection.records
-        if record.get("kind") == "pull-request-payload"
-    }
-    for record in projection.records:
-        if record.get("kind") == "pull-request-payload":
+    entries = [
+        entry
+        for entry in thread_entries
+        if (bucket == "activity" and entry[1] in active_thread_ids)
+        or (bucket == "background" and entry[1] in earlier_thread_ids)
+    ]
+    object_kinds = {"issue", "pull-request"}
+    for record in records:
+        kind = record.get("kind")
+        if kind in object_kinds and bucket == "activity":
+            object_name = "PR" if kind == "pull-request" else "Issue"
+            for timestamp, event in _object_events(record, start, end):
+                rendered_time = format_timestamp(timestamp.isoformat(), timezone)
+                if rendered_time is not None:
+                    entries.append(
+                        (
+                            timestamp,
+                            f"{kind}:{event}",
+                            [f"{rendered_time} · {object_name} {event}", ""],
+                        )
+                    )
             continue
-        lifecycle_record = lifecycle_records.get(
-            ("pull-request-payload", record.get("native_id"))
-        )
-        _render_github_record(lines, record, lifecycle_record)
-    if projection.relations:
-        lines.extend(["## Within-Item Structure", ""])
-        for relation in projection.relations:
-            lines.append(
-                f"- `{relation['kind']}`: "
-                f"`{relation['from_native_id']}` -> `{relation['to_native_id']}`"
+        if kind in {"ordinary-comment", "inline-comment"}:
+            native_id = str(record.get("native_id"))
+            if kind == "inline-comment" and native_id in all_threaded_ids:
+                continue
+            value = _value(record, end)
+            if not isinstance(value, dict):
+                continue
+            if _event_bucket(value, start, end) != bucket:
+                continue
+            event_time = _in_range_time(value, start, end)
+            if event_time is None:
+                event_time = min(
+                    (time for time in _times(value) if time < start), default=None
+                )
+            if event_time is None:
+                continue
+            lines: list[str] = []
+            _comment(lines, value, timezone, projection.tracked_login)
+            entries.append((event_time, native_id, lines))
+        elif kind == "timeline":
+            value = _value(record, end)
+            if not isinstance(value, dict):
+                continue
+            label = _lifecycle(value, projection.tracked_login)
+            if _event_bucket(value, start, end) != bucket:
+                continue
+            event_time = _in_range_time(value, start, end)
+            if label is None:
+                continue
+            if event_time is None:
+                event_time = min(
+                    (time for time in _times(value) if time < start), default=None
+                )
+                if event_time is None:
+                    continue
+            rendered_time = format_timestamp(event_time.isoformat(), timezone)
+            entries.append(
+                (
+                    event_time,
+                    str(record.get("native_id")),
+                    [f"- {rendered_time} · {label}", ""],
+                )
             )
-        lines.append("")
+        elif kind == "review":
+            value = _value(record, end)
+            if not isinstance(value, dict):
+                continue
+            review_lines = _review_lines(value, timezone, projection.tracked_login)
+            if _event_bucket(value, start, end) != bucket:
+                continue
+            event_time = _in_range_time(value, start, end)
+            if review_lines is None:
+                continue
+            if event_time is None:
+                event_time = min(
+                    (time for time in _times(value) if time < start), default=None
+                )
+                if event_time is None:
+                    continue
+            entries.append((event_time, str(record.get("native_id")), review_lines))
+    return sorted(entries, key=lambda entry: (entry[0], entry[1]))
+
+
+def _activity(
+    item: ContextItem, result: ContextExtractionResult, bucket: str
+) -> list[str]:
+    entries = _event_entries(item, result, bucket)
+    if not entries:
+        return []
+    lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
+    for _, _, entry_lines in entries:
+        lines.extend(entry_lines)
     return lines
+
+
+def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
+    assert item.github is not None
+    projection = item.github
+    end = result.request.end
+    object_record = next(
+        (
+            record
+            for record in projection.records
+            if record.get("kind") in {"issue", "pull-request"}
+        ),
+        None,
+    )
+    value, object_used_later = (
+        _representation_selection(object_record, end)
+        if object_record is not None
+        else (None, False)
+    )
+    value = value if isinstance(value, dict) else {}
+    kind = (
+        "PR"
+        if any(record.get("kind") == "pull-request" for record in projection.records)
+        else "Issue"
+    )
+    title = value.get("title") or projection.title or "Untitled"
+    lines = [f"# {projection.repository} {kind} #{projection.number} — {title}", ""]
+    author = _actor(value)
+    if author:
+        lines.append(f"- Author: {_actor_label(value, projection.tracked_login)}")
+    lines.append(f"- Type: {'Pull request' if kind == 'PR' else 'Issue'}")
+    for label, key in (("State", "state"), ("Merged", "merged"), ("Draft", "draft")):
+        if isinstance(value.get(key), (str, bool)):
+            rendered = (
+                str(value[key]).lower() if isinstance(value[key], bool) else value[key]
+            )
+            lines.append(f"- {label}: {rendered}")
+    body = value.get("body")
+    if isinstance(body, str) and body:
+        lines.extend(["", "## Description", "", body, ""])
+    diff_record = next(
+        (
+            record
+            for record in projection.records
+            if record.get("kind") == "aggregate-diff"
+        ),
+        None,
+    )
+    _, diff_used_later = (
+        _representation_selection(diff_record, end)
+        if diff_record is not None
+        else (None, False)
+    )
+    if object_used_later or diff_used_later:
+        lines.extend(
+            [
+                "",
+                "Mutable fields may include later-observed changes and are not "
+                "guaranteed to equal the exact state at the request cutoff.",
+            ]
+        )
+    if diff_record is not None:
+        lines.extend(
+            ["", "## Code changes", "", "Full diff: [diff.patch](diff.patch)", ""]
+        )
+    return lines
+
+
+def _diff_content(item: ContextItem, result: ContextExtractionResult) -> bytes | None:
+    assert item.github is not None
+    record = next(
+        (
+            record
+            for record in item.github.records
+            if record.get("kind") == "aggregate-diff"
+        ),
+        None,
+    )
+    if record is None:
+        return None
+    value = _representation_value(record, result.request.end)
+    if isinstance(value, bytes):
+        return value
+    return value.encode("utf-8") if isinstance(value, str) else None
+
+
+def render_github(
+    item: ContextItem, result: ContextExtractionResult
+) -> dict[str, list[str] | bytes]:
+    assert item.github is not None
+    files: dict[str, list[str] | bytes] = {"overview.md": _overview(item, result)}
+    activity = _activity(item, result, "activity")
+    background = _activity(item, result, "background")
+    diff = _diff_content(item, result)
+    if activity:
+        files["activity.md"] = activity
+    if background:
+        files["background.md"] = background
+    if diff is not None:
+        files["diff.patch"] = diff
+    return files
