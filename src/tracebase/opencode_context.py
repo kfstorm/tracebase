@@ -182,6 +182,23 @@ def _json(snapshot: PublishedSnapshot) -> dict[str, Any]:
     return value
 
 
+def _project_worktree(snapshots: tuple[PublishedSnapshot, ...]) -> str | None:
+    for snapshot in reversed(snapshots):
+        raw_project = snapshot.evidence.get("project.json")
+        if raw_project is None:
+            continue
+        try:
+            project = json.loads(raw_project)
+        except UnicodeDecodeError, json.JSONDecodeError:
+            continue
+        if not isinstance(project, dict):
+            continue
+        worktree = project.get("worktree")
+        if isinstance(worktree, str) and worktree:
+            return worktree
+    return None
+
+
 def _created(value: dict[str, Any]) -> datetime:
     # OpenCode has used both flattened exports and info.time payloads.
     info = value.get("info")
@@ -230,9 +247,13 @@ def _interval_roles(
     interval: tuple[datetime, datetime | None], start: datetime, end: datetime
 ) -> tuple[str, ...]:
     began, finished = interval
+    if finished is None:
+        # An unknown end is not an open-ended interval for every later request.
+        # Until completion is observed, only the source-native start is known.
+        return _point_roles(began, start, end)
     if finished == began:
         return _point_roles(began, start, end)
-    in_range = began < end and (finished is None or start < finished)
+    in_range = began < end and start < finished
     return tuple(
         role
         for role, present in (
@@ -357,6 +378,11 @@ def project_opencode(  # noqa: PLR0915
                 break
     if isinstance(directory, str) and directory:
         session["working_directory"] = directory
+    project_directory = _project_worktree(snapshots)
+    if project_directory is None and isinstance(directory, str) and directory:
+        project_directory = directory
+    if project_directory is not None:
+        session["project_directory"] = project_directory
     messages_by_id: dict[str, dict[str, Any]] = {}
     gaps: list[dict[str, str]] = []
     for snapshot in snapshots:

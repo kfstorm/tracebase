@@ -32,6 +32,7 @@ def run(
     source_kind: str = "opencode",
     from_text: str = "2026-01-01T00:00:00+08:00",
     to_text: str = "2026-01-02T00:00:00+08:00",
+    effective_options: dict[str, object] | None = None,
 ) -> CollectionRun:
     return CollectionRun(
         archive,
@@ -39,7 +40,7 @@ def run(
         "instance-1" if source_kind == "opencode" else "tracked-actor",
         CollectionRange.parse(from_text, to_text),
         "test",
-        {},
+        effective_options or {},
         run_id=run_id,
     )
 
@@ -76,16 +77,26 @@ def session(
     return payload
 
 
-def publish_opencode(archive: Archive, payload: dict[str, object], run_id: str) -> None:
+def publish_opencode(
+    archive: Archive,
+    payload: dict[str, object],
+    run_id: str,
+    *,
+    project: dict[str, object] | None = None,
+    from_text: str | None = None,
+    to_text: str | None = None,
+) -> None:
     current = run(
         archive,
         run_id,
-        from_text=(
+        from_text=from_text
+        or (
             "2026-01-02T00:00:00+08:00"
             if run_id == "child-run"
             else "2026-01-01T00:00:00+08:00"
         ),
-        to_text=(
+        to_text=to_text
+        or (
             "2026-01-03T00:00:00+08:00"
             if run_id == "child-run"
             else "2026-01-02T00:00:00+08:00"
@@ -98,7 +109,14 @@ def publish_opencode(archive: Archive, payload: dict[str, object], run_id: str) 
             "session",
             session_id,
             current.collection_range.as_manifest(),
-            ({"path": "session.json"},),
+            tuple(
+                {"path": path}
+                for path in (
+                    ("session.json", "project.json")
+                    if project is not None
+                    else ("session.json",)
+                )
+            ),
             metadata={
                 "session": {
                     "id": session_id,
@@ -108,6 +126,8 @@ def publish_opencode(archive: Archive, payload: dict[str, object], run_id: str) 
         )
     )
     current.write_evidence(snapshot, "session.json", json.dumps(payload).encode())
+    if project is not None:
+        current.write_evidence(snapshot, "project.json", json.dumps(project).encode())
     current.publish({"selected_session_count": 1})
 
 
@@ -120,8 +140,16 @@ def publish_github(
     run_id: str = "github-run",
     from_text: str = "2026-01-01T00:00:00+08:00",
     to_text: str = "2026-01-02T00:00:00+08:00",
+    effective_options: dict[str, object] | None = None,
 ) -> None:
-    current = run(archive, run_id, "github", from_text, to_text)
+    current = run(
+        archive,
+        run_id,
+        "github",
+        from_text,
+        to_text,
+        effective_options,
+    )
     snapshot = current.write_snapshot(
         Snapshot(
             "github",
@@ -277,6 +305,8 @@ def test_github_uses_natural_path_and_heading(tmp_path: Path) -> None:
     overview = text(output, "overview.md")
     assert "# kfstorm/tracebase PR #1" in overview
     assert "PR_1" not in overview
+    assert "(tracked account)" not in overview
+    assert "Tracked GitHub account:" not in (output / "index.md").read_text()
     assert "github/kfstorm/tracebase" in (output / "index.md").read_text()
 
 
@@ -404,7 +434,7 @@ def test_review_threads_are_materialized_and_unthreaded_comments_remain(
     }
     output = github_output(archive, tmp_path, evidence)
     activity = text(output, "activity.md")
-    assert "### `src/foo.py:120`" in activity
+    assert "Review thread · src/foo.py:120" in activity
     assert activity.index("first") < activity.index("reply")
     assert "loose" in activity
     assert activity.count("first") == 1
@@ -544,6 +574,150 @@ def test_future_github_events_are_absent_and_background_is_separate(
     assert "future" not in text(output, "activity.md")
 
 
+def test_github_event_with_earlier_and_in_range_times_has_one_canonical_bucket(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "comments.001.json": [
+                {
+                    "id": 1,
+                    "body": "edited once",
+                    "user": {"login": "a"},
+                    "created_at": "2025-12-31T23:00:00Z",
+                    "updated_at": "2026-01-01T01:00:00Z",
+                }
+            ]
+        },
+    )
+    assert "edited once" in text(output, "activity.md")
+    assert not (output / "github/kfstorm/tracebase/pull/1/background.md").exists()
+
+
+def test_github_mutable_note_only_appears_for_later_observed_fallback(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    old = {
+        "issue.json": {**github_base(), "title": "old"},
+        "pull-request.json": {"node_id": "PR_1"},
+    }
+    later = {
+        "issue.json": {
+            **github_base(),
+            "title": "later",
+            "updated_at": "2026-01-01T01:00:00Z",
+        },
+        "pull-request.json": {"node_id": "PR_1"},
+        "comments.001.json": [
+            {"id": 1, "body": "selected", "created_at": "2026-01-01T01:00:00Z"}
+        ],
+    }
+    publish_github(
+        archive,
+        "PR_1",
+        old,
+        run_id="old-run",
+        from_text="2025-12-31T00:00:00+08:00",
+        to_text="2026-01-01T00:00:00+08:00",
+    )
+    publish_github(
+        archive,
+        "PR_1",
+        later,
+        run_id="later-run",
+        from_text="2026-01-02T00:00:00+08:00",
+        to_text="2026-01-03T00:00:00+08:00",
+    )
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    overview = text(output, "overview.md")
+    assert "Mutable fields may include" not in overview
+
+    only_later_archive = Archive(tmp_path / "only-later-archive")
+    only_later_archive.root.mkdir()
+    publish_github(
+        only_later_archive,
+        "PR_1",
+        later,
+        run_id="only-later",
+        from_text="2026-01-02T00:00:00+08:00",
+        to_text="2026-01-03T00:00:00+08:00",
+    )
+    later_output = tmp_path / "later-output"
+    generate_context(only_later_archive.root, request(), later_output)
+    assert "Mutable fields may include" in text(later_output, "overview.md")
+
+
+def test_github_tracked_actor_is_annotated_without_hard_coding(
+    tmp_path: Path,
+) -> None:
+    tracked_archive = Archive(tmp_path / "tracked-archive")
+    tracked_archive.root.mkdir()
+    publish_github(
+        tracked_archive,
+        "PR_1",
+        {
+            "issue.json": {
+                **github_base(),
+                "user": {"login": "kfstorm"},
+            },
+            "pull-request.json": {"node_id": "PR_1"},
+            "comments.001.json": [
+                {
+                    "id": 1,
+                    "body": "tracked comment",
+                    "user": {"login": "kfstorm"},
+                    "created_at": "2026-01-01T01:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "body": "other comment",
+                    "user": {"login": "other"},
+                    "created_at": "2026-01-01T02:00:00Z",
+                },
+            ],
+            "reviews.001.json": [
+                {
+                    "id": 3,
+                    "body": "tracked review",
+                    "user": {"login": "kfstorm"},
+                    "state": "APPROVED",
+                    "submitted_at": "2026-01-01T03:00:00Z",
+                }
+            ],
+            "timeline.001.json": [
+                {
+                    "id": 4,
+                    "event": "closed",
+                    "actor": {"login": "kfstorm"},
+                    "created_at": "2026-01-01T04:00:00Z",
+                }
+            ],
+        },
+        effective_options={"actor_login": "kfstorm"},
+    )
+    tracked_output = tmp_path / "tracked-output"
+    generate_context(tracked_archive.root, request(), tracked_output)
+    index = (tracked_output / "index.md").read_text()
+    activity = text(tracked_output, "activity.md")
+    overview = text(tracked_output, "overview.md")
+    assert "Tracked GitHub account: @kfstorm" in index
+    assert "Author: @kfstorm (tracked account)" in overview
+    assert "@kfstorm (tracked account)" in activity
+    assert "@other" in activity
+    assert "(tracked account)" in activity
+    assert "reviews.001" not in activity
+    assert "Review by @kfstorm (tracked account)" in activity
+    assert "Closed by @kfstorm (tracked account)" in activity
+    assert "PR_1" not in index
+
+
 def test_github_timestamps_are_local_minute_precision_and_equal_update_once(
     tmp_path: Path,
 ) -> None:
@@ -595,6 +769,71 @@ def test_opencode_root_session_uses_title_directory_and_compact_activity(
     assert "Message" not in activity
     assert "m" not in activity
     assert "2026-01-01 00:30" in activity
+
+
+def test_opencode_groups_by_project_worktree_and_shows_distinct_workdirs(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    project = {"id": "hidden", "worktree": "/repo"}
+    publish_opencode(
+        archive,
+        session(
+            "one",
+            directory="/repo/.worktrees/one",
+            messages=[message("one-message", "2026-01-01T01:00:00Z")],
+        ),
+        "one-run",
+        project=project,
+    )
+    publish_opencode(
+        archive,
+        session(
+            "two",
+            directory="/repo/.worktrees/two",
+            messages=[message("two-message", "2026-01-01T02:00:00Z")],
+        ),
+        "two-run",
+        project=project,
+        from_text="2026-01-02T00:00:00+08:00",
+        to_text="2026-01-03T00:00:00+08:00",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    index = (output / "index.md").read_text()
+    assert index.count("### `/repo`") == 1
+    overviews = "\n".join(path.read_text() for path in output.rglob("overview.md"))
+    assert "/repo/.worktrees/one" in overviews
+    assert "/repo/.worktrees/two" in overviews
+    assert "Project ID" not in index
+    assert "hidden" not in index
+
+
+def test_opencode_without_project_json_falls_back_to_session_directory(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session(
+            "legacy",
+            directory="/legacy/project",
+            messages=[message("legacy-message", "2026-01-01T01:00:00Z")],
+        ),
+        "legacy-run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    index = (output / "index.md").read_text()
+    overview = text(output, "overview.md")
+    assert "### `/legacy/project`" in index
+    assert "Project directory: `/legacy/project`" in overview
+    assert "Working directory:" not in overview
 
 
 def test_opencode_child_sessions_are_not_independent_documents(tmp_path: Path) -> None:
@@ -702,6 +941,112 @@ def test_task_completed_after_cutoff_is_incomplete_without_future_output(
     activity = text(output, "activity.md")
     assert "Incomplete task." in activity
     assert "future result" not in activity
+
+
+def test_unknown_task_end_is_not_active_on_later_request_day(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    task = {
+        "type": "tool",
+        "tool": "task",
+        "state": {
+            "status": "running",
+            "time": {"start": "2026-01-01T15:00:00Z"},
+        },
+    }
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[message("m", "2026-01-01T15:00:00Z", [task])],
+        ),
+        "unknown-run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"),
+        output,
+    )
+    assert not list(output.rglob("activity.md"))
+
+
+def test_historical_backfill_uses_native_completion_for_outcomes(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    parts = [
+        {
+            "type": "tool",
+            "tool": "task",
+            "state": {
+                "status": "completed",
+                "time": {
+                    "start": "2026-01-01T10:00:00Z",
+                    "end": "2026-01-01T11:00:00Z",
+                },
+                "output": "historical result",
+            },
+        },
+        {
+            "type": "tool",
+            "tool": "question",
+            "state": {
+                "status": "completed",
+                "time": {
+                    "start": "2026-01-01T10:00:00Z",
+                    "end": "2026-01-01T12:00:00Z",
+                },
+                "input": {"questions": ["Continue?"]},
+                "metadata": {"answers": ["yes"]},
+            },
+        },
+        {
+            "type": "tool",
+            "tool": "read",
+            "state": {
+                "status": "error",
+                "time": {
+                    "start": "2026-01-01T10:00:00Z",
+                    "end": "2026-01-01T13:00:00Z",
+                },
+                "error": "historical error",
+            },
+        },
+        {
+            "type": "tool",
+            "tool": "task",
+            "state": {
+                "status": "completed",
+                "time": {
+                    "start": "2026-01-01T10:00:00Z",
+                    "end": "2026-01-01T17:00:00Z",
+                },
+                "output": "post-cutoff result",
+            },
+        },
+    ]
+    publish_opencode(
+        archive,
+        session("root", messages=[message("m", "2026-01-01T10:00:00Z", parts)]),
+        "historical-run",
+        from_text="2026-01-02T00:00:00+08:00",
+        to_text="2026-01-03T00:00:00+08:00",
+    )
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T16:00:00Z"),
+        output,
+    )
+    activity = text(output, "activity.md")
+    assert "historical result" in activity
+    assert "yes" in activity
+    assert "historical error" in activity
+    assert "post-cutoff result" not in activity
 
 
 def test_opencode_cutoff_hides_later_text_answers_and_errors(tmp_path: Path) -> None:

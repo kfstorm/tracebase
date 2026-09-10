@@ -28,6 +28,13 @@ def _observation_end(representation: dict[str, Any]) -> datetime | None:
 def _representation_value(
     record: dict[str, Any], end: datetime
 ) -> dict[str, Any] | str | bytes | None:
+    value, _ = _representation_selection(record, end)
+    return value
+
+
+def _representation_selection(
+    record: dict[str, Any], end: datetime
+) -> tuple[dict[str, Any] | str | bytes | None, bool]:
     representations = _representations(record)
     eligible = [
         representation
@@ -37,9 +44,15 @@ def _representation_value(
     ]
     candidates = eligible or representations
     if not candidates:
-        return None
+        return None, False
     value = candidates[-1].get("value")
-    return value if isinstance(value, (dict, str, bytes)) else None
+    selected = value if isinstance(value, (dict, str, bytes)) else None
+    later = not eligible and any(
+        (observed_end := _observation_end(representation)) is not None
+        and observed_end > end
+        for representation in representations
+    )
+    return selected, later
 
 
 def _value(record: dict[str, Any] | None, end: datetime) -> dict[str, Any] | str | None:
@@ -67,6 +80,11 @@ def _actor(value: dict[str, Any]) -> str | None:
     return None
 
 
+def _actor_label(value: dict[str, Any], tracked_login: str | None) -> str:
+    actor = _actor(value) or "unknown"
+    return f"@{actor} (tracked account)" if actor == tracked_login else f"@{actor}"
+
+
 def _time(value: dict[str, Any], timezone: tzinfo) -> str | None:
     for key in ("created_at", "submitted_at", "updated_at"):
         result = format_timestamp(value.get(key), timezone)
@@ -83,14 +101,16 @@ def _edited_time(value: dict[str, Any], timezone: tzinfo) -> str | None:
     return updated
 
 
-def _comment(lines: list[str], value: dict[str, Any], timezone: tzinfo) -> None:
-    actor = _actor(value) or "unknown"
+def _comment(
+    lines: list[str], value: dict[str, Any], timezone: tzinfo, tracked_login: str | None
+) -> None:
+    actor = _actor_label(value, tracked_login)
     created = _time(value, timezone)
     edited = _edited_time(value, timezone)
     timestamp = f" · {created}" if created else ""
     if edited:
         timestamp += f" · edited {edited}"
-    lines.extend([f"**@{actor}{timestamp}**", ""])
+    lines.extend([f"**{actor}{timestamp}**", ""])
     body = value.get("body")
     if isinstance(body, str) and body:
         lines.extend([body, ""])
@@ -109,6 +129,15 @@ def _in_range_time(
     return min(times) if times else None
 
 
+def _event_bucket(value: dict[str, Any], start: datetime, end: datetime) -> str | None:
+    times = _times(value)
+    if any(start <= timestamp < end for timestamp in times):
+        return "activity"
+    if any(timestamp < start for timestamp in times):
+        return "background"
+    return None
+
+
 def _location(value: dict[str, Any]) -> str | None:
     path = value.get("path")
     line = value.get("line", value.get("original_line"))
@@ -117,7 +146,7 @@ def _location(value: dict[str, Any]) -> str | None:
     return path if isinstance(path, str) else None
 
 
-def _lifecycle(value: dict[str, Any]) -> str | None:
+def _lifecycle(value: dict[str, Any], tracked_login: str | None) -> str | None:
     event = value.get("event")
     if event not in {
         "closed",
@@ -129,7 +158,7 @@ def _lifecycle(value: dict[str, Any]) -> str | None:
         return None
     actor = _actor(value)
     rendered = str(event).replace("_", " ").capitalize()
-    return f"{rendered}{f' by @{actor}' if actor else ''}"
+    return f"{rendered}{f' by {_actor_label(value, tracked_login)}' if actor else ''}"
 
 
 def _object_events(
@@ -156,16 +185,18 @@ def _object_events(
     ]
 
 
-def _review_lines(value: dict[str, Any], timezone: tzinfo) -> list[str] | None:
+def _review_lines(
+    value: dict[str, Any], timezone: tzinfo, tracked_login: str | None
+) -> list[str] | None:
     state = value.get("state")
     body = value.get("body")
     if isinstance(state, str) and state.upper() == "COMMENTED" and not body:
         return None
-    actor = _actor(value) or "unknown"
+    actor = _actor_label(value, tracked_login)
     timestamp = _time(value, timezone)
     state_suffix = f" ({state})" if isinstance(state, str) else ""
     suffix = f" · {timestamp}" if timestamp else ""
-    lines = [f"Review by @{actor}{suffix}{state_suffix}", ""]
+    lines = [f"Review by {actor}{suffix}{state_suffix}", ""]
     if isinstance(body, str) and body:
         lines.extend([body, ""])
     return lines
@@ -202,20 +233,26 @@ def _thread_lines(
     thread: dict[str, Any],
     earlier: list[dict[str, Any]],
     activity: list[dict[str, Any]],
+    timestamp: datetime,
     timezone: tzinfo,
+    tracked_login: str | None,
 ) -> list[str]:
     location = next(
         (_location(value) for value in [*earlier, *activity] if _location(value)), None
     )
-    lines = [f"### `{location or 'Review thread'}`", ""]
+    rendered_time = format_timestamp(timestamp.isoformat(), timezone) or "Unknown time"
+    lines = [
+        f"### {rendered_time} · Review thread · {location or 'unknown location'}",
+        "",
+    ]
     if earlier:
         lines.extend(["### Earlier context", ""])
         for value in earlier:
-            _comment(lines, value, timezone)
+            _comment(lines, value, timezone, tracked_login)
     if activity:
         lines.extend(["### During requested interval", ""])
         for value in activity:
-            _comment(lines, value, timezone)
+            _comment(lines, value, timezone, tracked_login)
     return lines
 
 
@@ -224,6 +261,7 @@ def _thread_entries(
     start: datetime,
     end: datetime,
     timezone: tzinfo,
+    tracked_login: str | None,
 ) -> tuple[list[tuple[datetime, str, list[str]]], set[str], set[str], set[str]]:
     inline: dict[str, dict[str, Any]] = {}
     for record in records:
@@ -266,7 +304,9 @@ def _thread_entries(
                 for timestamp in _times(value)
                 if timestamp < start
             )
-        lines = _thread_lines(thread, earlier, activity, timezone)
+        lines = _thread_lines(
+            thread, earlier, activity, timestamp, timezone, tracked_login
+        )
         thread_id = str(thread_record.get("native_id"))
         if activity:
             active_thread_ids.add(thread_id)
@@ -288,7 +328,7 @@ def _event_entries(  # noqa: PLR0915
     assert timezone is not None
     records = projection.records
     thread_entries, active_thread_ids, earlier_thread_ids, all_threaded_ids = (
-        _thread_entries(records, start, end, timezone)
+        _thread_entries(records, start, end, timezone, projection.tracked_login)
     )
     entries = [
         entry
@@ -319,25 +359,29 @@ def _event_entries(  # noqa: PLR0915
             value = _value(record, end)
             if not isinstance(value, dict):
                 continue
+            if _event_bucket(value, start, end) != bucket:
+                continue
             event_time = _in_range_time(value, start, end)
-            if event_time is None and bucket == "background":
+            if event_time is None:
                 event_time = min(
                     (time for time in _times(value) if time < start), default=None
                 )
             if event_time is None:
                 continue
             lines: list[str] = []
-            _comment(lines, value, timezone)
+            _comment(lines, value, timezone, projection.tracked_login)
             entries.append((event_time, native_id, lines))
         elif kind == "timeline":
             value = _value(record, end)
             if not isinstance(value, dict):
                 continue
-            label = _lifecycle(value)
+            label = _lifecycle(value, projection.tracked_login)
+            if _event_bucket(value, start, end) != bucket:
+                continue
             event_time = _in_range_time(value, start, end)
-            if label is None or event_time is None or bucket != "activity":
-                if bucket != "background" or label is None:
-                    continue
+            if label is None:
+                continue
+            if event_time is None:
                 event_time = min(
                     (time for time in _times(value) if time < start), default=None
                 )
@@ -355,11 +399,13 @@ def _event_entries(  # noqa: PLR0915
             value = _value(record, end)
             if not isinstance(value, dict):
                 continue
-            review_lines = _review_lines(value, timezone)
+            review_lines = _review_lines(value, timezone, projection.tracked_login)
+            if _event_bucket(value, start, end) != bucket:
+                continue
             event_time = _in_range_time(value, start, end)
-            if review_lines is None or event_time is None:
-                if bucket != "background" or review_lines is None:
-                    continue
+            if review_lines is None:
+                continue
+            if event_time is None:
                 event_time = min(
                     (time for time in _times(value) if time < start), default=None
                 )
@@ -393,7 +439,11 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
         ),
         None,
     )
-    value = _value(object_record, end)
+    value, object_used_later = (
+        _representation_selection(object_record, end)
+        if object_record is not None
+        else (None, False)
+    )
     value = value if isinstance(value, dict) else {}
     kind = (
         "PR"
@@ -404,7 +454,7 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
     lines = [f"# {projection.repository} {kind} #{projection.number} — {title}", ""]
     author = _actor(value)
     if author:
-        lines.append(f"- Author: @{author}")
+        lines.append(f"- Author: {_actor_label(value, projection.tracked_login)}")
     lines.append(f"- Type: {'Pull request' if kind == 'PR' else 'Issue'}")
     for label, key in (("State", "state"), ("Merged", "merged"), ("Draft", "draft")):
         if isinstance(value.get(key), (str, bool)):
@@ -415,14 +465,28 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
     body = value.get("body")
     if isinstance(body, str) and body:
         lines.extend(["", "## Description", "", body, ""])
-    lines.extend(
-        [
-            "",
-            "Mutable fields may include later-observed changes and are not "
-            "guaranteed to equal the exact state at the request cutoff.",
-        ]
+    diff_record = next(
+        (
+            record
+            for record in projection.records
+            if record.get("kind") == "aggregate-diff"
+        ),
+        None,
     )
-    if any(record.get("kind") == "aggregate-diff" for record in projection.records):
+    _, diff_used_later = (
+        _representation_selection(diff_record, end)
+        if diff_record is not None
+        else (None, False)
+    )
+    if object_used_later or diff_used_later:
+        lines.extend(
+            [
+                "",
+                "Mutable fields may include later-observed changes and are not "
+                "guaranteed to equal the exact state at the request cutoff.",
+            ]
+        )
+    if diff_record is not None:
         lines.extend(
             ["", "## Code changes", "", "Full diff: [diff.patch](diff.patch)", ""]
         )

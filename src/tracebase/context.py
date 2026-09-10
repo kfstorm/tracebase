@@ -151,6 +151,9 @@ def _session_parts(
 
 
 def _session_directory(projection: OpenCodeProjection) -> str:
+    project_directory = projection.session.get("project_directory")
+    if isinstance(project_directory, str) and project_directory:
+        return project_directory
     value, info = _session_parts(projection)
     directory = info.get("directory", value.get("directory"))
     if isinstance(directory, str) and directory:

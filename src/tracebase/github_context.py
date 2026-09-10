@@ -20,6 +20,7 @@ class GitHubProjection:
     repository: str
     number: int
     title: str | None
+    tracked_login: str | None
 
 
 def _json(snapshot: PublishedSnapshot, path: str) -> dict[str, Any] | list[Any]:
@@ -233,6 +234,16 @@ def project_github(  # noqa: PLR0915
     repository = "unknown/unknown"
     number = 0
     title: str | None = None
+    effective_options = (
+        snapshots[0].run.get("collector", {}).get("effective_options", {})
+    )
+    tracked_login = (
+        effective_options.get("actor_login")
+        if isinstance(effective_options, dict)
+        else None
+    )
+    if not isinstance(tracked_login, str) or not tracked_login:
+        tracked_login = None
     paged_thread_comments: list[tuple[int, str, list[dict[str, Any]]]] = []
     for observation, snapshot in enumerate(snapshots, start=1):
         inline_nodes_by_rest_id: dict[int, str] = {}
@@ -470,4 +481,5 @@ def project_github(  # noqa: PLR0915
         repository,
         number,
         title,
+        tracked_login,
     )

@@ -143,6 +143,15 @@ def _render_index(
         "",
     ]
     github_items = [(item, files) for item, files in items if item.github is not None]
+    tracked_logins = sorted(
+        {
+            item.github.tracked_login
+            for item, _ in github_items
+            if item.github is not None and item.github.tracked_login is not None
+        }
+    )
+    for login in tracked_logins:
+        lines.extend([f"Tracked GitHub account: @{login}", ""])
     if not github_items:
         lines.append("No GitHub items are available.")
     for item, files in github_items:
@@ -170,7 +179,7 @@ def _render_index(
     grouped: dict[str, list[tuple[ContextItem, list[tuple[str, str]]]]] = {}
     for item, files in opencode_items:
         assert item.opencode is not None
-        value = item.opencode.session.get("working_directory", ".")
+        value = item.opencode.session.get("project_directory", ".")
         directory = value if isinstance(value, str) else "."
         grouped.setdefault(directory, []).append((item, files))
     for directory in sorted(grouped):
