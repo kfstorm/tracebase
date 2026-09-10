@@ -28,35 +28,65 @@ _PATCH_MARKER = re.compile(
 _EMPTY_DOCUMENT_LINES = 2
 
 
+def _session_context(item: ContextItem) -> dict[str, str]:
+    projection = item.opencode
+    if projection is None:
+        return {}
+    value = projection.session.get("value")
+    value = value if isinstance(value, dict) else {}
+    info = value.get("info")
+    info = info if isinstance(info, dict) else {}
+    context: dict[str, str] = {}
+    for source in (info, value):
+        candidate = source.get("directory")
+        if isinstance(candidate, str) and candidate:
+            context["working_directory"] = candidate
+            break
+    for snapshot in reversed(item.snapshots):
+        metadata = snapshot.manifest.get("metadata")
+        session = metadata.get("session") if isinstance(metadata, dict) else None
+        if isinstance(session, dict):
+            candidate = session.get("directory")
+            if (
+                isinstance(candidate, str)
+                and candidate
+                and "working_directory" not in context
+            ):
+                context["working_directory"] = candidate
+        project = None
+        raw_project = snapshot.evidence.get("project.json")
+        if raw_project is not None:
+            try:
+                project = json.loads(raw_project)
+            except UnicodeDecodeError, json.JSONDecodeError:
+                project = None
+        if isinstance(project, dict):
+            candidate = project.get("worktree")
+            if (
+                isinstance(candidate, str)
+                and candidate
+                and "project_directory" not in context
+            ):
+                context["project_directory"] = candidate
+    session_project = projection.session.get("project_directory")
+    if isinstance(session_project, str) and session_project:
+        context["project_directory"] = session_project
+    if "project_directory" not in context and "working_directory" in context:
+        context["project_directory"] = context["working_directory"]
+    return context
+
+
 def _part_value(part: dict[str, Any]) -> dict[str, Any]:
     value = part.get("value")
     return value if isinstance(value, dict) else part
 
 
-def _observation_end(part: dict[str, Any]) -> datetime | None:
-    window = part.get("observation_window")
-    if not isinstance(window, dict) or not isinstance(window.get("to"), str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(window["to"].replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else None
-
-
 def _effective_part(part: dict[str, Any], end: datetime) -> dict[str, Any]:
-    representations = part.get("representations")
-    representations = representations if isinstance(representations, list) else []
-    eligible = [
-        representation
-        for representation in representations
-        if isinstance(representation, dict)
-        and (observed_end := _observation_end(representation)) is not None
-        and observed_end <= end
-        and isinstance(representation.get("value"), dict)
-    ]
-    if eligible:
-        return {**part, "value": eligible[-1]["value"]}
+    # Historical backfills can observe a completed source record after the
+    # requested interval. Its native completion time, not observation time,
+    # determines whether the outcome is safe to expose.
+    if _completed_before_cutoff(part, end):
+        return part
     value = _part_value(part)
     safe_state = _state(part).copy()
     safe_state.pop("output", None)
@@ -171,6 +201,11 @@ def _task_description(part: dict[str, Any]) -> str | None:
 
 def _completed_before_cutoff(part: dict[str, Any], end: datetime) -> bool:
     value = part.get("end")
+    if not isinstance(value, str):
+        state = _state(part)
+        time_data = state.get("time")
+        time_data = time_data if isinstance(time_data, dict) else {}
+        value = time_data.get("end", state.get("end", state.get("completed")))
     if not isinstance(value, str):
         return False
     try:
@@ -341,8 +376,7 @@ def _render_messages(
     projection = item.opencode
     timezone = result.request.start.tzinfo
     assert timezone is not None
-    directory = projection.session.get("working_directory")
-    directory = directory if isinstance(directory, str) else "."
+    directory = _session_context(item).get("working_directory", ".")
     lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
     for message in projection.messages:
         message_bucket = _message_bucket(
@@ -393,11 +427,14 @@ def render_opencode(
     info = info if isinstance(info, dict) else {}
     title = info.get("title")
     title = title if isinstance(title, str) and title else "Untitled session"
-    directory = projection.session.get("working_directory")
-    directory = directory if isinstance(directory, str) else "."
-    files: dict[str, list[str]] = {
-        "overview.md": [f"# {title}", "", f"Working directory: `{directory}`", ""]
-    }
+    context = _session_context(item)
+    directory = context.get("working_directory", ".")
+    project_directory = context.get("project_directory", directory)
+    overview = [f"#{title}", "", f"Project directory: `{project_directory}`"]
+    if directory != project_directory:
+        overview.append(f"Working directory: `{directory}`")
+    overview.append("")
+    files: dict[str, list[str]] = {"overview.md": overview}
     activity = _render_messages(item, result, "activity")
     background = _render_messages(item, result, "background")
     if activity:
