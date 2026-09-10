@@ -60,7 +60,7 @@ def session(
     messages: list[dict[str, object]] | None = None,
     parent_id: str | None = None,
     title: str = "Trace work",
-    directory: str = "/home/kfstorm/dev/tracebase",
+    directory: str = "/home/tester/dev/example/project",
 ) -> dict[str, object]:
     info: dict[str, object] = {
         "id": session_id,
@@ -120,7 +120,7 @@ def publish_opencode(
             metadata={
                 "session": {
                     "id": session_id,
-                    "directory": "/home/kfstorm/dev/tracebase",
+                    "directory": "/home/tester/dev/example/project",
                 }
             },
         )
@@ -181,7 +181,7 @@ def text(output: Path, suffix: str) -> str:
 def github_base(source_id: str = "PR_1", number: int = 1) -> dict[str, object]:
     return {
         "node_id": source_id,
-        "repository_url": "https://api.github.com/repos/kfstorm/tracebase",
+        "repository_url": "https://api.github.com/repos/example/project",
         "number": number,
         "title": "Context Output",
         "body": "Description",
@@ -301,13 +301,13 @@ def test_github_uses_natural_path_and_heading(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     output = github_output(archive, tmp_path, activity_evidence())
-    assert "github/kfstorm/tracebase/pull/1/overview.md" in files(output)
+    assert "github/example/project/pull/1/overview.md" in files(output)
     overview = text(output, "overview.md")
-    assert "# kfstorm/tracebase PR #1" in overview
+    assert "# example/project PR #1" in overview
     assert "PR_1" not in overview
     assert "(tracked account)" not in overview
     assert "Tracked GitHub account:" not in (output / "index.md").read_text()
-    assert "github/kfstorm/tracebase" in (output / "index.md").read_text()
+    assert "github/example/project" in (output / "index.md").read_text()
 
 
 def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None:
@@ -325,7 +325,7 @@ def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     overview = text(output, "overview.md")
-    assert "github/kfstorm/tracebase/issue/7/overview.md" in files(output)
+    assert "github/example/project/issue/7/overview.md" in files(output)
     assert "Author: @author" in overview
     assert "Actor" not in overview
 
@@ -500,7 +500,7 @@ def test_active_review_thread_separates_earlier_and_future_comments(
     assert "before" in activity
     assert "during" in activity
     assert "after" not in activity
-    assert not (output / "github/kfstorm/tracebase/pull/1/background.md").exists()
+    assert not (output / "github/example/project/pull/1/background.md").exists()
 
 
 def test_diff_is_only_in_diff_patch(tmp_path: Path) -> None:
@@ -514,7 +514,7 @@ def test_diff_is_only_in_diff_patch(tmp_path: Path) -> None:
             "pull-request.diff": "diff --git a/a b/a\n+line\n",
         },
     )
-    assert "github/kfstorm/tracebase/pull/1/diff.patch" in files(output)
+    assert "github/example/project/pull/1/diff.patch" in files(output)
     diff = text(output, "diff.patch")
     assert "diff --git" in diff
     assert "diff --git" not in text(output, "overview.md")
@@ -595,7 +595,7 @@ def test_github_event_with_earlier_and_in_range_times_has_one_canonical_bucket(
         },
     )
     assert "edited once" in text(output, "activity.md")
-    assert not (output / "github/kfstorm/tracebase/pull/1/background.md").exists()
+    assert not (output / "github/example/project/pull/1/background.md").exists()
 
 
 def test_github_mutable_note_only_appears_for_later_observed_fallback(
@@ -665,14 +665,14 @@ def test_github_tracked_actor_is_annotated_without_hard_coding(
         {
             "issue.json": {
                 **github_base(),
-                "user": {"login": "kfstorm"},
+                "user": {"login": "tracked-user"},
             },
             "pull-request.json": {"node_id": "PR_1"},
             "comments.001.json": [
                 {
                     "id": 1,
                     "body": "tracked comment",
-                    "user": {"login": "kfstorm"},
+                    "user": {"login": "tracked-user"},
                     "created_at": "2026-01-01T01:00:00Z",
                 },
                 {
@@ -686,7 +686,7 @@ def test_github_tracked_actor_is_annotated_without_hard_coding(
                 {
                     "id": 3,
                     "body": "tracked review",
-                    "user": {"login": "kfstorm"},
+                    "user": {"login": "tracked-user"},
                     "state": "APPROVED",
                     "submitted_at": "2026-01-01T03:00:00Z",
                 }
@@ -695,26 +695,26 @@ def test_github_tracked_actor_is_annotated_without_hard_coding(
                 {
                     "id": 4,
                     "event": "closed",
-                    "actor": {"login": "kfstorm"},
+                    "actor": {"login": "tracked-user"},
                     "created_at": "2026-01-01T04:00:00Z",
                 }
             ],
         },
-        effective_options={"actor_login": "kfstorm"},
+        effective_options={"actor_login": "tracked-user"},
     )
     tracked_output = tmp_path / "tracked-output"
     generate_context(tracked_archive.root, request(), tracked_output)
     index = (tracked_output / "index.md").read_text()
     activity = text(tracked_output, "activity.md")
     overview = text(tracked_output, "overview.md")
-    assert "Tracked GitHub account: @kfstorm" in index
-    assert "Author: @kfstorm (tracked account)" in overview
-    assert "@kfstorm (tracked account)" in activity
+    assert "Tracked GitHub account: @tracked-user" in index
+    assert "Author: @tracked-user (tracked account)" in overview
+    assert "@tracked-user (tracked account)" in activity
     assert "@other" in activity
     assert "(tracked account)" in activity
     assert "reviews.001" not in activity
-    assert "Review by @kfstorm (tracked account)" in activity
-    assert "Closed by @kfstorm (tracked account)" in activity
+    assert "Review by @tracked-user (tracked account)" in activity
+    assert "Closed by @tracked-user (tracked account)" in activity
     assert "PR_1" not in index
 
 
@@ -764,7 +764,7 @@ def test_opencode_root_session_uses_title_directory_and_compact_activity(
     generate_context(archive.root, request(), output)
     assert any(path.name == "activity.md" for path in output.rglob("activity.md"))
     index = (output / "index.md").read_text()
-    assert "/home/kfstorm/dev/tracebase" in index
+    assert "/home/tester/dev/example/project" in index
     assert "#52 refactor" in index
     assert "# #52 refactor\n" in text(output, "overview.md")
     activity = text(output, "activity.md")
@@ -1165,7 +1165,7 @@ def test_opencode_tool_whitelist_and_path_compaction(tmp_path: Path) -> None:
                     "end": "2026-01-01T01:03:00Z",
                 },
                 "input": {
-                    "filePath": "/home/kfstorm/dev/tracebase/src/foo.py",
+                    "filePath": "/home/tester/dev/example/project/src/foo.py",
                     "oldString": "old secret",
                     "newString": "new secret",
                 },
@@ -1232,7 +1232,7 @@ def test_opencode_equal_workdir_is_omitted_and_relative_paths_are_normalized(
         "state": {
             "status": "completed",
             "time": {"start": "2026-01-01T01:00:00Z", "end": "2026-01-01T01:01:00Z"},
-            "input": {"command": "pwd", "workdir": "/home/kfstorm/dev/tracebase"},
+            "input": {"command": "pwd", "workdir": "/home/tester/dev/example/project"},
         },
     }
     publish_opencode(

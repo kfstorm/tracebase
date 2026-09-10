@@ -17,7 +17,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 EXPECTED_GAMMA_PROJECT = {
     "id": "gamma",
     "worktree": "/primary/gamma",
-    "sandboxes": ["/secret/gamma"],
+    "sandboxes": ["/sandbox/gamma"],
     "vcs": "git",
     "time": {"created": 1767225600000},
     "unknownField": {"keep": True},
