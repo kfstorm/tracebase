@@ -239,6 +239,33 @@ def _read_published_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def _is_empty_directory_tree(path: Path) -> bool:
+    try:
+        children = tuple(path.iterdir())
+    except OSError:
+        return False
+    return all(
+        child.is_dir() and not child.is_symlink() and _is_empty_directory_tree(child)
+        for child in children
+    )
+
+
+def _is_removed_run_directory(run_root: Path) -> bool:
+    """Recognize empty run directories left by deleting an old run."""
+    try:
+        entries = tuple(run_root.iterdir())
+    except OSError:
+        return False
+    if len(entries) != 1 or entries[0].name != "snapshots":
+        return False
+    snapshots_root = entries[0]
+    return (
+        snapshots_root.is_dir()
+        and not snapshots_root.is_symlink()
+        and _is_empty_directory_tree(snapshots_root)
+    )
+
+
 def _published_snapshot_path(entry: Any) -> PurePosixPath:
     if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
         raise ArchiveError("run snapshot entry is invalid")
@@ -395,6 +422,8 @@ def load_published_archive(root: str | Path) -> tuple[PublishedRun, ...]:
         _ensure_inside(run_root, runs_root)
         if not run_root.is_dir() or run_root.is_symlink():
             raise ArchiveError("published run is not a regular directory")
+        if _is_removed_run_directory(run_root):
+            continue
         if {path.name for path in run_root.iterdir()} != {"run.json", "snapshots"}:
             raise ArchiveError("published run contains unregistered entries")
         run = _validate_published_run(run_root)
