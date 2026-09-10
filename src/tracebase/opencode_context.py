@@ -15,8 +15,6 @@ class OpenCodeProjection:
     """The OpenCode-specific, serializable view of one session."""
 
     selected: bool
-    inclusion_reasons: tuple[str, ...]
-    temporal_roles: tuple[str, ...]
     session: dict[str, Any]
     messages: tuple[dict[str, Any], ...]
     gaps: tuple[dict[str, str], ...]
@@ -36,9 +34,9 @@ class OpenCodeProjection:
         value = self.session.get("value")
         value = value if isinstance(value, dict) else {}
         info = value.get("info")
-        parent = (
-            info.get("parentID") if isinstance(info, dict) else value.get("parentID")
-        )
+        parent = info.get("parentID") if isinstance(info, dict) else None
+        if parent is None:
+            parent = value.get("parentID")
         return parent if isinstance(parent, str) else None
 
     @property
@@ -46,7 +44,8 @@ class OpenCodeProjection:
         value = self.session.get("value")
         value = value if isinstance(value, dict) else {}
         info = value.get("info")
-        return info.get("parentID") if isinstance(info, dict) else value.get("parentID")
+        parent = info.get("parentID") if isinstance(info, dict) else None
+        return parent if parent is not None else value.get("parentID")
 
     @property
     def task_child_references(self) -> tuple[dict[str, str], ...]:
@@ -82,7 +81,6 @@ def resolve_opencode_context(
     selected_ids = {
         projection.session_id for projection in projections if projection.selected
     }
-    supporting_ids: set[str] = set()
     graph_gaps: dict[str, list[dict[str, str]]] = {}
 
     for selected_id in selected_ids:
@@ -110,7 +108,6 @@ def resolve_opencode_context(
                     }
                 )
                 break
-            supporting_ids.add(parent_id)
             current_id = parent_id
             current_projection = parent
             parent_value = current_projection.parent_value
@@ -139,9 +136,7 @@ def resolve_opencode_context(
                 )
                 continue
             child_id = reference["child_id"]
-            if child_id in by_session_id:
-                supporting_ids.add(child_id)
-            else:
+            if child_id not in by_session_id:
                 graph_gaps.setdefault(selected_id, []).append(
                     {
                         "kind": "missing-task-child",
@@ -154,13 +149,7 @@ def resolve_opencode_context(
     for original in projections:
         gaps = original.gaps + tuple(graph_gaps.get(original.session_id, ()))
         resolved_projection = original
-        if original.session_id in supporting_ids and not original.selected:
-            resolved_projection = replace(
-                original,
-                inclusion_reasons=("supporting-task-context",),
-                gaps=gaps,
-            )
-        elif gaps:
+        if gaps:
             resolved_projection = replace(original, gaps=gaps)
         resolved.append(resolved_projection)
     return tuple(resolved)
@@ -351,6 +340,25 @@ def project_opencode(  # noqa: PLR0915
         raise ArchiveError("OpenCode session has no snapshot")
     source_id = snapshots[0].manifest["source_id"]
     session: dict[str, Any] = {"value": _json(snapshots[-1]), "representations": []}
+    latest_info = session["value"].get("info")
+    latest_info = latest_info if isinstance(latest_info, dict) else {}
+    directory = latest_info.get("directory", session["value"].get("directory"))
+    if not isinstance(directory, str) or not directory:
+        for snapshot in reversed(snapshots):
+            metadata = snapshot.manifest.get("metadata")
+            session_metadata = (
+                metadata.get("session") if isinstance(metadata, dict) else None
+            )
+            candidate = (
+                session_metadata.get("directory")
+                if isinstance(session_metadata, dict)
+                else None
+            )
+            if isinstance(candidate, str) and candidate:
+                directory = candidate
+                break
+    if isinstance(directory, str) and directory:
+        session["working_directory"] = directory
     messages_by_id: dict[str, dict[str, Any]] = {}
     gaps: list[dict[str, str]] = []
     for snapshot in snapshots:
@@ -509,18 +517,6 @@ def project_opencode(  # noqa: PLR0915
         for record in messages
     ):
         gaps.append({"kind": "no_in_range_messages", "reason": "bounded_range"})
-    all_roles = tuple(
-        sorted(
-            {role for message in messages for role in message["temporal_roles"]}
-            | {
-                role
-                for message in messages
-                for part in message.get("parts", ())
-                if not message["_supporting"] and _part_is_work(part)
-                for role in part["temporal_roles"]
-            }
-        )
-    )
     selected = any(
         (not message["_supporting"] and "in_range_work" in message["temporal_roles"])
         or any(
@@ -535,8 +531,6 @@ def project_opencode(  # noqa: PLR0915
         message.pop("_supporting", None)
     return OpenCodeProjection(
         selected,
-        ("in_range_source_record",) if selected else (),
-        all_roles,
         session,
         tuple(messages),
         tuple(gaps),

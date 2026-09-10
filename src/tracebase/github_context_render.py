@@ -1,64 +1,64 @@
-"""GitHub whitelist projection rendering as deterministic Markdown."""
+"""Consumer-oriented GitHub Context Output rendering."""
 
 from __future__ import annotations
 
-import json
+from datetime import datetime, tzinfo
 from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
-from .context_render import fenced, item_front_matter, render_provenance
+from .context_render import format_timestamp, parse_timestamp
 
 
-def _record_value(record: dict[str, Any]) -> dict[str, Any] | str | None:
-    representations = record.get("representations")
-    if not isinstance(representations, list) or not representations:
+def _representations(record: dict[str, Any]) -> list[dict[str, Any]]:
+    values = record.get("representations")
+    return (
+        [value for value in values if isinstance(value, dict)]
+        if isinstance(values, list)
+        else []
+    )
+
+
+def _value(record: dict[str, Any], end: datetime) -> dict[str, Any] | str | None:
+    candidates: list[dict[str, Any]] = []
+    for representation in _representations(record):
+        value = representation.get("value")
+        if isinstance(value, str):
+            candidates.append(representation)
+            continue
+        if not isinstance(value, dict):
+            continue
+        times = _times(value)
+        if not times or any(timestamp < end for timestamp in times):
+            candidates.append(representation)
+    if not candidates:
         return None
-    value = representations[-1].get("value")
+    value = candidates[-1].get("value")
     return value if isinstance(value, (dict, str)) else None
 
 
-def _github_observation_label(representation: dict[str, Any]) -> str:
-    observation = representation.get("observation")
-    label = (
-        f"Observation {observation}"
-        if isinstance(observation, int) and observation > 0
-        else "Observation unknown"
-    )
-    window = representation.get("observation_window")
-    if isinstance(window, dict):
-        start = window.get("from")
-        end = window.get("to")
-        if isinstance(start, str) and isinstance(end, str):
-            return f"{label} [{start}, {end})"
-    return label
+def _times(value: dict[str, Any]) -> tuple[datetime, ...]:
+    keys = ("created_at", "updated_at", "submitted_at", "merged_at", "closed_at")
+    parsed = [
+        parse_timestamp(value[key]) for key in keys if isinstance(value.get(key), str)
+    ]
+    return tuple(value for value in parsed if value is not None)
 
 
-def _field_versions(
-    record: dict[str, Any], key: str
-) -> list[tuple[Any, tuple[str, ...]]]:
-    versions: list[tuple[Any, list[str], str]] = []
-    representations = record.get("representations")
-    if not isinstance(representations, list):
-        return []
-    for representation in representations:
-        if not isinstance(representation, dict):
-            continue
-        value = representation.get("value")
-        if not isinstance(value, dict) or key not in value:
-            continue
-        field_value = value[key]
-        marker = json.dumps(field_value, ensure_ascii=False, sort_keys=True)
-        label = _github_observation_label(representation)
-        for _version_value, labels, version_marker in versions:
-            if version_marker == marker:
-                labels.append(label)
-                break
-        else:
-            versions.append((field_value, [label], marker))
-    return [(value, tuple(labels)) for value, labels, _ in versions]
+def _bucket(record: dict[str, Any], start: datetime, end: datetime) -> str | None:
+    timestamps = [
+        timestamp
+        for representation in _representations(record)
+        if isinstance(representation.get("value"), dict)
+        for timestamp in _times(representation["value"])
+    ]
+    if any(start <= timestamp < end for timestamp in timestamps):
+        return "activity"
+    if any(timestamp < start for timestamp in timestamps):
+        return "background"
+    return None
 
 
-def _github_actor(value: dict[str, Any]) -> str | None:
+def _actor(value: dict[str, Any]) -> str | None:
     for key in ("user", "actor", "author"):
         actor = value.get(key)
         if isinstance(actor, dict):
@@ -68,200 +68,244 @@ def _github_actor(value: dict[str, Any]) -> str | None:
     return None
 
 
-def _github_times(value: dict[str, Any]) -> list[str]:
-    return [
-        value[key]
-        for key in (
-            "created_at",
-            "updated_at",
-            "submitted_at",
-            "merged_at",
-            "closed_at",
-        )
-        if isinstance(value.get(key), str)
-    ]
+def _time(value: dict[str, Any], timezone: tzinfo) -> str | None:
+    for key in ("created_at", "submitted_at", "updated_at"):
+        result = format_timestamp(value.get(key), timezone)
+        if result is not None:
+            return result
+    return None
 
 
-def _github_observations(record: dict[str, Any]) -> str:
-    representations = record.get("representations")
-    if not isinstance(representations, list):
-        return ""
-    labels = []
-    for representation in representations:
-        if isinstance(representation, dict):
-            label = _github_observation_label(representation)
-            if label not in labels:
-                labels.append(label)
-    return ", ".join(label[0].lower() + label[1:] for label in labels)
+def _edited_time(value: dict[str, Any], timezone: tzinfo) -> str | None:
+    created = parse_timestamp(value.get("created_at"))
+    updated = parse_timestamp(value.get("updated_at"))
+    if created is None or updated is None or created == updated:
+        return None
+    return format_timestamp(value.get("updated_at"), timezone)
 
 
-def _render_scalar_versions(
-    lines: list[str], label: str, versions: list[tuple[Any, tuple[str, ...]]]
-) -> None:
-    if len(versions) <= 1:
-        return
-    lines.extend([f"- Observed {label} versions:"])
-    for value, observations in versions:
-        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        lines.append(f"  - {', '.join(observations)}: `{rendered}`")
+def _comment(lines: list[str], value: dict[str, Any], timezone: tzinfo) -> None:
+    actor = _actor(value) or "unknown"
+    created = _time(value, timezone)
+    edited = _edited_time(value, timezone)
+    timestamp = f" · {created}" if created else ""
+    if edited:
+        timestamp += f" · edited {edited}"
+    lines.extend([f"**@{actor}{timestamp}**", ""])
+    body = value.get("body")
+    if isinstance(body, str) and body:
+        lines.extend([body, ""])
 
 
-def _render_body(lines: list[str], record: dict[str, Any]) -> None:
-    versions = _field_versions(record, "body")
-    if not versions:
-        return
-    latest = _record_value(record)
-    current = latest.get("body") if isinstance(latest, dict) else None
-    if not isinstance(current, str):
-        return
-    lines.extend(["", "### Body", "", "Current observed value:", ""])
-    lines.extend(fenced(current, "text"))
-    if len(versions) > 1:
-        lines.extend(["", "#### Observed versions", ""])
-        for value, observations in versions:
-            if not isinstance(value, str):
-                continue
-            lines.append(f"- {', '.join(observations)}:")
-            lines.extend(f"  {line}" for line in fenced(value, "text"))
-    lines.append("")
+def _record_by_kind(
+    records: tuple[dict[str, Any], ...], kind: str
+) -> list[dict[str, Any]]:
+    return [record for record in records if record.get("kind") == kind]
 
 
-def _render_github_record(
-    lines: list[str],
-    record: dict[str, Any],
-    lifecycle_record: dict[str, Any] | None = None,
-) -> None:
-    kind = record.get("kind")
-    value = _record_value(record)
-    if kind == "aggregate-diff":
-        if isinstance(value, str):
-            lines.extend(
-                [
-                    "## Aggregate Diff",
-                    "",
-                    "This diff does not establish a fix or fixing commit.",
-                    "",
-                ]
-            )
-            lines.extend(fenced(value, "diff"))
-            lines.append("")
-        return
-    if not isinstance(value, dict):
-        return
-    if kind not in {
-        "issue",
-        "pull-request",
-        "ordinary-comment",
-        "review",
-        "inline-comment",
-        "review-thread",
-        "timeline",
-    }:
-        return
-    if kind == "timeline" and value.get("event") not in {
-        "closed",
-        "reopened",
-        "merged",
-        "ready_for_review",
-        "converted_to_draft",
-    }:
-        return
-    heading = {
-        "issue": "Issue",
-        "pull-request": "Pull Request",
-        "ordinary-comment": "Comment",
-        "review": "Review",
-        "inline-comment": "Inline review comment",
-        "review-thread": "Review thread",
-        "timeline": "Lifecycle event",
-    }[kind]
-    lines.extend([f"## {heading} - `{record['native_id']}`", ""])
-    if kind in {"issue", "pull-request"}:
-        for label, key in (
-            ("Title", "title"),
-            ("State", "state"),
-            ("Number", "number"),
-        ):
-            if isinstance(value.get(key), (str, int)):
-                lines.append(f"- {label}: `{value[key]}`")
-            _render_scalar_versions(lines, label, _field_versions(record, key))
-        if kind == "pull-request" and lifecycle_record is not None:
-            lifecycle = _record_value(lifecycle_record)
-            if isinstance(lifecycle, dict):
-                for label, key in (("Merged", "merged"), ("Draft", "draft")):
-                    if isinstance(lifecycle.get(key), bool):
-                        lines.append(
-                            f"- {label}: `{'true' if lifecycle[key] else 'false'}`"
-                        )
-                        _render_scalar_versions(
-                            lines, label, _field_versions(lifecycle_record, key)
-                        )
-                if isinstance(lifecycle.get("merged_at"), str):
-                    lines.append(f"- Merged at: {lifecycle['merged_at']}")
-                    _render_scalar_versions(
-                        lines,
-                        "Merged at",
-                        _field_versions(lifecycle_record, "merged_at"),
-                    )
-    actor = _github_actor(value)
-    if actor is not None:
-        lines.append(f"- Actor: `{actor}`")
-    if kind == "timeline":
-        lines.append(f"- Event: `{value['event']}`")
-    lines.extend(f"- Timestamp: {timestamp}" for timestamp in _github_times(value))
-    _render_body(lines, record)
-    if kind == "review" and isinstance(value.get("state"), str):
-        lines.append(f"- Review state: `{value['state']}`")
-    if kind == "inline-comment":
-        location = {
-            key: value[key]
-            for key in ("path", "line", "side", "start_line", "start_side")
-            if isinstance(value.get(key), (str, int))
-        }
-        if location:
-            lines.append(f"- Location: `{json.dumps(location, sort_keys=True)}`")
-    if kind == "review-thread":
-        for key in ("isResolved", "isOutdated"):
-            if isinstance(value.get(key), bool):
-                lines.append(f"- Current {key}: `{str(value[key]).lower()}`")
-                _render_scalar_versions(lines, key, _field_versions(record, key))
-    observations = _github_observations(record)
-    if observations:
-        lines.append(f"- Observed in: {observations}")
-    lines.append("")
-
-
-def render_github(item: ContextItem, result: ContextExtractionResult) -> list[str]:
+def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
     assert item.github is not None
     projection = item.github
-    lines = item_front_matter(item, result, "github", projection)
-    lines.extend(
-        [
-            "# GitHub Item",
-            "",
-            "Source-native thread state is current observed state, not proof of a fix.",
-            "",
-        ]
+    end = result.request.end
+    object_record = next(
+        (
+            record
+            for record in projection.records
+            if record.get("kind") in {"issue", "pull-request"}
+        ),
+        None,
     )
-    render_provenance(lines, item)
-    lifecycle_records = {
-        (record.get("kind"), record.get("native_id")): record
-        for record in projection.records
-        if record.get("kind") == "pull-request-payload"
-    }
-    for record in projection.records:
-        if record.get("kind") == "pull-request-payload":
-            continue
-        lifecycle_record = lifecycle_records.get(
-            ("pull-request-payload", record.get("native_id"))
-        )
-        _render_github_record(lines, record, lifecycle_record)
-    if projection.relations:
-        lines.extend(["## Within-Item Structure", ""])
-        for relation in projection.relations:
-            lines.append(
-                f"- `{relation['kind']}`: "
-                f"`{relation['from_native_id']}` -> `{relation['to_native_id']}`"
+    value = _value(object_record, end) if object_record else None
+    value = value if isinstance(value, dict) else {}
+    kind = (
+        "PR"
+        if any(record.get("kind") == "pull-request" for record in projection.records)
+        else "Issue"
+    )
+    title = projection.title or value.get("title") or "Untitled"
+    lines = [f"# {projection.repository} {kind} #{projection.number} — {title}", ""]
+    author = _actor(value)
+    if author:
+        lines.append(f"- Author: @{author}")
+    lines.append(f"- Type: {'Pull request' if kind == 'PR' else 'Issue'}")
+    for label, key in (("State", "state"), ("Merged", "merged"), ("Draft", "draft")):
+        if isinstance(value.get(key), (str, bool)):
+            rendered = (
+                str(value[key]).lower() if isinstance(value[key], bool) else value[key]
             )
-        lines.append("")
+            lines.append(f"- {label}: {rendered}")
+    body = value.get("body")
+    if isinstance(body, str) and body:
+        lines.extend(["", "## Description", "", body, ""])
+    if any(record.get("kind") == "aggregate-diff" for record in projection.records):
+        lines.extend(
+            ["", "## Code changes", "", "Full diff: [diff.patch](diff.patch)", ""]
+        )
     return lines
+
+
+def _activity(
+    item: ContextItem, result: ContextExtractionResult, bucket: str
+) -> list[str]:
+    assert item.github is not None
+    projection = item.github
+    timezone = result.request.start.tzinfo
+    assert timezone is not None
+    lines = ["# Activity", ""]
+    records = projection.records
+    for record in records:
+        if _bucket(record, result.request.start, result.request.end) != bucket:
+            continue
+        kind = record.get("kind")
+        value = _value(record, result.request.end)
+        if not isinstance(value, dict):
+            continue
+        if kind == "ordinary-comment":
+            _comment(lines, value, timezone)
+        elif kind == "timeline" and value.get("event") in {
+            "closed",
+            "reopened",
+            "merged",
+            "ready_for_review",
+            "converted_to_draft",
+        }:
+            actor = _actor(value)
+            event = str(value.get("event"))
+            timestamp = _time(value, timezone)
+            suffix = f" · {timestamp}" if timestamp else ""
+            by = f" by @{actor}" if actor else ""
+            lines.extend([f"- {event.replace('_', ' ').capitalize()}{by}{suffix}", ""])
+    if lines == ["# Activity", ""]:
+        return []
+    return lines
+
+
+def _location(value: dict[str, Any]) -> str | None:
+    path = value.get("path")
+    line = value.get("line", value.get("original_line"))
+    if isinstance(path, str) and isinstance(line, int):
+        return f"{path}:{line}"
+    return path if isinstance(path, str) else None
+
+
+def _review_submission(
+    lines: list[str], value: dict[str, Any], timezone: tzinfo
+) -> None:
+    actor = _actor(value) or "unknown"
+    timestamp = _time(value, timezone)
+    suffix = f" · {timestamp}" if timestamp else ""
+    state = value.get("state")
+    state_suffix = f" ({state})" if isinstance(state, str) else ""
+    lines.extend([f"### Review by @{actor}{suffix}{state_suffix}", ""])
+    body = value.get("body")
+    if isinstance(body, str) and body:
+        lines.extend([body, ""])
+
+
+def _thread_lines(
+    lines: list[str],
+    thread: dict[str, Any],
+    inline: dict[str, dict[str, Any]],
+    timezone: tzinfo,
+) -> None:
+    comments = thread.get("comments")
+    nodes = comments.get("nodes") if isinstance(comments, dict) else None
+    if not isinstance(nodes, list):
+        return
+    values: list[dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("id")
+        value = inline.get(node_id) if isinstance(node_id, str) else None
+        if value is not None:
+            values.append(value)
+    if not values:
+        return
+    location = next((_location(value) for value in values if _location(value)), None)
+    lines.extend([f"### `{location or 'Review thread'}`", ""])
+    for value in values:
+        _comment(lines, value, timezone)
+
+
+def _reviews(item: ContextItem, result: ContextExtractionResult) -> list[str]:
+    assert item.github is not None
+    projection = item.github
+    timezone = result.request.start.tzinfo
+    assert timezone is not None
+    lines = ["# Reviews", ""]
+    records = projection.records
+    inline: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if record.get("kind") != "inline-comment":
+            continue
+        value = _value(record, result.request.end)
+        if isinstance(value, dict):
+            inline[str(record.get("native_id"))] = value
+    threaded_ids: set[str] = set()
+    for thread_record in _record_by_kind(records, "review-thread"):
+        value = _value(thread_record, result.request.end)
+        if not isinstance(value, dict):
+            continue
+        comments = value.get("comments")
+        nodes = comments.get("nodes") if isinstance(comments, dict) else None
+        if isinstance(nodes, list):
+            threaded_ids.update(
+                str(node["id"])
+                for node in nodes
+                if isinstance(node, dict) and isinstance(node.get("id"), str)
+            )
+        _thread_lines(lines, value, inline, timezone)
+    for record in records:
+        kind = record.get("kind")
+        if kind not in {"review", "inline-comment"}:
+            continue
+        if kind == "inline-comment" and str(record.get("native_id")) in threaded_ids:
+            continue
+        if _bucket(record, result.request.start, result.request.end) is None:
+            continue
+        value = _value(record, result.request.end)
+        if not isinstance(value, dict):
+            continue
+        if kind == "review":
+            _review_submission(lines, value, timezone)
+        else:
+            location = _location(value)
+            if location:
+                lines.extend([f"### Unthreaded review comment at `{location}`", ""])
+            _comment(lines, value, timezone)
+    return [] if lines == ["# Reviews", ""] else lines
+
+
+def _diff_content(item: ContextItem, result: ContextExtractionResult) -> list[str]:
+    assert item.github is not None
+    record = next(
+        (
+            record
+            for record in item.github.records
+            if record.get("kind") == "aggregate-diff"
+        ),
+        None,
+    )
+    value = _value(record, result.request.end) if record else None
+    return value.splitlines() if isinstance(value, str) else []
+
+
+def render_github(
+    item: ContextItem, result: ContextExtractionResult
+) -> dict[str, list[str]]:
+    assert item.github is not None
+    files: dict[str, list[str]] = {"overview.md": _overview(item, result)}
+    activity = _activity(item, result, "activity")
+    background = _activity(item, result, "background")
+    reviews = _reviews(item, result)
+    diff = any(record.get("kind") == "aggregate-diff" for record in item.github.records)
+    if activity:
+        files["activity.md"] = activity
+    if background:
+        files["background.md"] = background
+    if reviews:
+        files["reviews.md"] = reviews
+    if diff and _diff_content(item, result):
+        files["diff.patch"] = _diff_content(item, result)
+    return files

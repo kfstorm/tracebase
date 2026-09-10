@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -22,7 +23,7 @@ _OPENCODE_GAP_FIELDS: dict[str, tuple[str, ...]] = {
 
 
 def public_gap(gap: dict[str, Any]) -> dict[str, str]:
-    """Select the stable public fields for one OpenCode gap."""
+    """Select stable, useful fields for one OpenCode gap."""
     kind = gap.get("kind")
     kind = kind if isinstance(kind, str) else "unknown"
     public = {"kind": kind}
@@ -31,24 +32,6 @@ def public_gap(gap: dict[str, Any]) -> dict[str, str]:
         if isinstance(value, str):
             public[field] = value
     return public
-
-
-def _quote(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
-
-
-def front_matter(fields: tuple[tuple[str, Any], ...]) -> list[str]:
-    lines = ["---"]
-    for key, value in fields:
-        if isinstance(value, (list, tuple)):
-            lines.append(f"{key}:")
-            lines.extend(f"  - {_quote(str(entry))}" for entry in value)
-        elif isinstance(value, bool):
-            lines.append(f"{key}: {'true' if value else 'false'}")
-        else:
-            lines.append(f"{key}: {_quote(str(value))}")
-    lines.extend(["---", ""])
-    return lines
 
 
 def fenced(value: str, language: str) -> list[str]:
@@ -62,67 +45,21 @@ def write_markdown(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def _coverage_summary(coverage: Any) -> dict[str, Any]:
-    if not isinstance(coverage, dict):
-        return {}
-    allowed = (
-        "discovery_matrix_version",
-        "listed_session_count",
-        "pagination_complete",
-        "permission_boundary",
-        "selected_artifacts",
-        "selected_session_count",
-    )
-    return {
-        key: coverage[key]
-        for key in allowed
-        if key in coverage and isinstance(coverage[key], (str, int, bool))
-    }
+def parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
-def render_provenance(lines: list[str], item: ContextItem) -> None:
-    lines.extend(["## Provenance", ""])
-    for index, snapshot in enumerate(item.snapshots, start=1):
-        collection = snapshot.run["collection_range"]
-        observation = snapshot.manifest["observation_window"]
-        lines.extend(
-            [
-                f"### Observation {index}",
-                "",
-                "- Collection Run Coverage: "
-                f"[{collection['from']}, {collection['to']})",
-                "- Snapshot Observation Window: "
-                f"[{observation['from']}, {observation['to']})",
-            ]
-        )
-        coverage = _coverage_summary(snapshot.run.get("coverage"))
-        if coverage:
-            lines.append(
-                f"- Coverage summary: `{json.dumps(coverage, sort_keys=True)}`"
-            )
-        lines.append("")
-
-
-def item_front_matter(
-    item: ContextItem,
-    result: ContextExtractionResult,
-    source_kind: str,
-    projection: Any,
-) -> list[str]:
-    source = item.source
-    return front_matter(
-        (
-            ("schema_version", 1),
-            ("source_kind", source_kind),
-            ("source_scope_id", source.run["source"]["scope_id"]),
-            ("source_id", source.manifest["source_id"]),
-            ("object_kind", source.manifest["object_kind"]),
-            ("request_from", result.request.from_text),
-            ("request_to", result.request.to_text),
-            ("inclusion_reasons", projection.inclusion_reasons),
-            ("temporal_roles", projection.temporal_roles),
-        )
-    )
+def format_timestamp(value: Any, timezone: Any) -> str | None:
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(timezone).strftime("%Y-%m-%d %H:%M")
 
 
 def _root_gaps(items: tuple[ContextItem, ...]) -> list[dict[str, str]]:
@@ -130,76 +67,103 @@ def _root_gaps(items: tuple[ContextItem, ...]) -> list[dict[str, str]]:
     for item in items:
         if item.opencode is None:
             continue
-        gaps.extend(
-            {
-                "source_kind": "opencode",
-                "source_id": item.source.manifest["source_id"],
-                **public_gap(gap),
-            }
-            for gap in item.opencode.gaps
-        )
+        gaps.extend(public_gap(gap) for gap in item.opencode.gaps)
     return sorted(gaps, key=lambda entry: json.dumps(entry, sort_keys=True))
 
 
 def _render_item(
     staging: Path, item: ContextItem, result: ContextExtractionResult
-) -> str:
+) -> list[tuple[str, str]]:
     item_root = staging.joinpath(*PurePosixPath(item.path).parts)
     item_root.mkdir(parents=True, exist_ok=True)
     if item.github is not None:
         from .github_context_render import render_github  # noqa: PLC0415
 
-        lines = render_github(item, result)
-        view_name = "github.md"
+        files = render_github(item, result)
     elif item.opencode is not None:
         from .opencode_context_render import render_opencode  # noqa: PLC0415
 
-        lines = render_opencode(item, result)
-        view_name = "opencode.md"
+        files = render_opencode(item, result)
     else:
         raise ContextError("context item has no source projection")
-    view_path = f"{item.path}/{view_name}"
-    write_markdown(item_root / view_name, lines)
-    return view_path
+    rendered: list[tuple[str, str]] = []
+    for name, lines in files.items():
+        write_markdown(item_root / name, lines)
+        rendered.append((f"{item.path}/{name}", name))
+    return rendered
+
+
+def _link_list(paths: list[str]) -> str:
+    return ", ".join(f"[{PurePosixPath(path).name}]({path})" for path in paths)
 
 
 def _render_index(
     staging: Path,
     result: ContextExtractionResult,
-    items: list[tuple[ContextItem, str]],
+    items: list[tuple[ContextItem, list[tuple[str, str]]]],
 ) -> None:
-    gaps = _root_gaps(result.items)
-    lines = front_matter(
-        (
-            ("schema_version", 1),
-            ("request_from", result.request.from_text),
-            ("request_to", result.request.to_text),
-        )
-    )
-    lines.extend(["# Context Output", "", "## Source Items", ""])
-    if not items:
-        lines.append("No source items are available.")
-    for item, view_path in items:
-        projection = item.github or item.opencode
-        assert projection is not None
-        source = item.source
-        reasons = ", ".join(projection.inclusion_reasons) or "none"
-        roles = ", ".join(projection.temporal_roles) or "observed_state"
-        lines.append(
-            f"- [{source.manifest['source_kind']}:{source.manifest['source_id']}]"
-            f"({view_path}) - reasons: {reasons}; temporal roles: {roles}"
-        )
-    lines.extend(["", "## Gaps", ""])
-    if not gaps:
-        lines.append("No gaps are available.")
-    else:
-        for public_gap_record in gaps:
-            kind = public_gap_record["kind"]
-            source_id = public_gap_record["source_id"]
-            lines.append(
-                f"- `{kind}` for `{source_id}`: "
-                f"`{json.dumps(public_gap_record, sort_keys=True)}`"
+    lines = [
+        "# Context Output",
+        "",
+        "Requested interval: "
+        f"`{result.request.from_text} <= t < {result.request.to_text}`",
+        "Times are displayed in the requested interval offset.",
+        "",
+        "## GitHub",
+        "",
+    ]
+    github_items = [(item, files) for item, files in items if item.github is not None]
+    if not github_items:
+        lines.append("No GitHub items are available.")
+    for item, files in github_items:
+        assert item.github is not None
+        projection = item.github
+        kind = (
+            "PR"
+            if any(
+                record.get("kind") == "pull-request" for record in projection.records
             )
+            else "Issue"
+        )
+        title = projection.title or "Untitled"
+        links = [path for path, _ in files]
+        lines.append(
+            f"- **{projection.repository} {kind} #{projection.number}**: {title} "
+            f"({_link_list(links)})"
+        )
+    lines.extend(["", "## OpenCode", ""])
+    opencode_items = [
+        (item, files) for item, files in items if item.opencode is not None
+    ]
+    if not opencode_items:
+        lines.append("No OpenCode root sessions are available.")
+    grouped: dict[str, list[tuple[ContextItem, list[tuple[str, str]]]]] = {}
+    for item, files in opencode_items:
+        assert item.opencode is not None
+        value = item.opencode.session.get("working_directory", ".")
+        directory = value if isinstance(value, str) else "."
+        grouped.setdefault(directory, []).append((item, files))
+    for directory in sorted(grouped):
+        lines.append(f"### `{directory}`")
+        lines.append("")
+        for item, files in grouped[directory]:
+            assert item.opencode is not None
+            value = item.opencode.session.get("value")
+            value = value if isinstance(value, dict) else {}
+            info = value.get("info")
+            info = info if isinstance(info, dict) else {}
+            title_value = info.get("title")
+            title = (
+                title_value
+                if isinstance(title_value, str) and title_value
+                else "Untitled session"
+            )
+            lines.append(f"- **{title}** ({_link_list([path for path, _ in files])})")
+        lines.append("")
+    gaps = _root_gaps(result.items)
+    if gaps:
+        lines.extend(["", "## Gaps", ""])
+        lines.extend(f"- `{gap['kind']}`" for gap in gaps)
     write_markdown(staging / "index.md", lines)
 
 
