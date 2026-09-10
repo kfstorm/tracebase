@@ -140,6 +140,34 @@ def _discover_sessions(
     return _parse_sessions(content)
 
 
+def _discover_projects(
+    server_url: str, password: str
+) -> tuple[dict[str, dict[str, Any]], dict[str, str] | None]:
+    """Fetch the project map once without changing Project response objects."""
+    credentials = b64encode(f"{_SERVER_USERNAME}:{password}".encode()).decode()
+    try:
+        request = Request(
+            f"{server_url}/project",
+            headers={"Authorization": f"Basic {credentials}"},
+        )
+        with urlopen(request, timeout=_SERVER_START_TIMEOUT_SECONDS) as response:
+            projects = json.loads(response.read())
+    except HTTPError, URLError, OSError, ValueError, json.JSONDecodeError:
+        return {}, {"kind": "project-lookup-failed", "endpoint": "/project"}
+    if not isinstance(projects, list):
+        return {}, {"kind": "project-lookup-failed", "endpoint": "/project"}
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for project in projects:
+        if not isinstance(project, dict):
+            return {}, {"kind": "project-lookup-failed", "endpoint": "/project"}
+        project_id = project.get("id")
+        if not isinstance(project_id, str) or not project_id or project_id in by_id:
+            return {}, {"kind": "project-lookup-failed", "endpoint": "/project"}
+        by_id[project_id] = project
+    return by_id, None
+
+
 def _parse_sessions(content: bytes) -> list[dict[str, Any]]:
     try:
         sessions = json.loads(content)
@@ -161,6 +189,18 @@ def _parse_sessions(content: bytes) -> list[dict[str, Any]]:
             ):
                 raise ArchiveError("OpenCode session list is invalid")
     return sessions
+
+
+def _read_export_info(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as output:
+            payload = json.load(output)
+    except OSError, json.JSONDecodeError:
+        raise ArchiveError("OpenCode session export is invalid") from None
+    if not isinstance(payload, dict):
+        return {}
+    info = payload.get("info")
+    return info if isinstance(info, dict) else {}
 
 
 def _session_interval(session: dict[str, Any]) -> tuple[datetime, datetime]:
@@ -186,7 +226,7 @@ def resolve_context(instance_id: str) -> CollectionContext:
     )
 
 
-def collect(
+def collect(  # noqa: PLR0915
     run: CollectionRun,
     reporter: ProgressReporter,
 ) -> CollectionResult:
@@ -204,6 +244,7 @@ def collect(
     server, server_url, password = _start_server()
     try:
         sessions = _discover_sessions(server_url, password, run)
+        projects, project_lookup_gap = _discover_projects(server_url, password)
     finally:
         _stop_server(server)
     list_completed_at = _observation_time()
@@ -238,6 +279,9 @@ def collect(
             total=len(selected),
         )
     )
+    project_gaps: list[dict[str, str]] = []
+    if project_lookup_gap is not None:
+        project_gaps.append(project_lookup_gap)
     for completed, session in enumerate(selected, start=1):
         reporter.emit(
             ProgressEvent(
@@ -259,12 +303,53 @@ def collect(
         try:
             with temporary_path.open("wb") as output:
                 _run_opencode_to_file(export_command[1:], output)
-            try:
-                with temporary_path.open("rb") as output:
-                    json.load(output)
-            except OSError, json.JSONDecodeError:
-                raise ArchiveError("OpenCode session export is invalid") from None
+            info = _read_export_info(temporary_path)
+            session_gaps: list[dict[str, str]] = []
+            project_id = info.get("projectID")
+            directory = info.get("directory")
+            if not isinstance(directory, str) or not directory:
+                session_gaps.append(
+                    {"kind": "missing-session-directory", "session_id": session["id"]}
+                )
+            if not isinstance(project_id, str) or not project_id:
+                session_gaps.append(
+                    {"kind": "missing-project-id", "session_id": session["id"]}
+                )
+            elif project_lookup_gap is not None:
+                session_gaps.append(
+                    {
+                        **project_lookup_gap,
+                        "session_id": session["id"],
+                        "project_id": project_id,
+                    }
+                )
+            else:
+                project = projects.get(project_id)
+                if project is None:
+                    session_gaps.append(
+                        {
+                            "kind": "missing-project",
+                            "session_id": session["id"],
+                            "project_id": project_id,
+                        }
+                    )
             observation_completed_at = _observation_time()
+            metadata: dict[str, Any] = {
+                "export_command": export_command,
+                "collector_version": run.collector_version,
+                "opencode_version": opencode_version,
+                "effective_options": run.effective_options,
+                "source_instance_id": run.scope_id,
+                "session": session,
+            }
+            project = projects.get(project_id) if isinstance(project_id, str) else None
+            evidence_files: tuple[dict[str, Any], ...] = ({"path": "session.json"},)
+            if project is not None:
+                evidence_files += ({"path": "project.json"},)
+            if session_gaps:
+                metadata["acquisition_gaps"] = session_gaps
+                if project_lookup_gap is None:
+                    project_gaps.extend(session_gaps)
             snapshot_root = run.write_snapshot(
                 Snapshot(
                     source_kind="opencode",
@@ -274,18 +359,17 @@ def collect(
                         "from": observation_started_at,
                         "to": observation_completed_at,
                     },
-                    evidence_files=({"path": "session.json"},),
-                    metadata={
-                        "export_command": export_command,
-                        "collector_version": run.collector_version,
-                        "opencode_version": opencode_version,
-                        "effective_options": run.effective_options,
-                        "source_instance_id": run.scope_id,
-                        "session": session,
-                    },
+                    evidence_files=evidence_files,
+                    metadata=metadata,
                 )
             )
             run.move_evidence(snapshot_root, "session.json", temporary_path)
+            if project is not None:
+                run.write_evidence(
+                    snapshot_root,
+                    "project.json",
+                    (json.dumps(project, indent=2, sort_keys=True) + "\n").encode(),
+                )
         finally:
             temporary_path.unlink(missing_ok=True)
         reporter.emit(
@@ -319,5 +403,10 @@ def collect(
             "observation_window": {"from": list_started_at, "to": list_completed_at},
             "listed_session_count": len(sessions),
             "selected_session_count": len(selected),
+            "project_lookup": {
+                "endpoint": "/project",
+                "request_count": 1,
+                "gaps": project_gaps,
+            },
         }
     )
