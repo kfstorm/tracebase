@@ -753,6 +753,7 @@ def test_opencode_root_session_uses_title_directory_and_compact_activity(
         archive,
         session(
             "root",
+            title="#52 refactor",
             messages=[
                 message("m", "2025-12-31T16:30:00Z", [{"type": "text", "text": "work"}])
             ],
@@ -764,7 +765,8 @@ def test_opencode_root_session_uses_title_directory_and_compact_activity(
     assert any(path.name == "activity.md" for path in output.rglob("activity.md"))
     index = (output / "index.md").read_text()
     assert "/home/kfstorm/dev/tracebase" in index
-    assert "Trace work" in index
+    assert "#52 refactor" in index
+    assert "# #52 refactor\n" in text(output, "overview.md")
     activity = text(output, "activity.md")
     assert "Message" not in activity
     assert "m" not in activity
@@ -810,6 +812,47 @@ def test_opencode_groups_by_project_worktree_and_shows_distinct_workdirs(
     assert "/repo/.worktrees/two" in overviews
     assert "Project ID" not in index
     assert "hidden" not in index
+
+
+def test_opencode_global_project_falls_back_to_each_session_directory(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    global_project = {"id": "global", "worktree": "/"}
+    publish_opencode(
+        archive,
+        session(
+            "global-one",
+            directory="/projects/one",
+            messages=[message("one-message", "2026-01-01T01:00:00Z")],
+        ),
+        "global-one-run",
+        project=global_project,
+    )
+    publish_opencode(
+        archive,
+        session(
+            "global-two",
+            directory="/projects/two",
+            messages=[message("two-message", "2026-01-01T02:00:00Z")],
+        ),
+        "global-two-run",
+        project=global_project,
+        from_text="2026-01-02T00:00:00+08:00",
+        to_text="2026-01-03T00:00:00+08:00",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    index = (output / "index.md").read_text()
+
+    assert "### `/projects/one`" in index
+    assert "### `/projects/two`" in index
+    assert "### `/`" not in index
+    overviews = "\n".join(path.read_text() for path in output.rglob("overview.md"))
+    assert "Project directory: `/projects/one`" in overviews
+    assert "Project directory: `/projects/two`" in overviews
 
 
 def test_opencode_without_project_json_falls_back_to_session_directory(

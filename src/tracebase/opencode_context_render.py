@@ -65,6 +65,8 @@ def _session_context(item: ContextItem) -> dict[str, str]:
             if (
                 isinstance(candidate, str)
                 and candidate
+                and project.get("id") != "global"
+                and candidate != "/"
                 and "project_directory" not in context
             ):
                 context["project_directory"] = candidate
@@ -430,7 +432,7 @@ def render_opencode(
     context = _session_context(item)
     directory = context.get("working_directory", ".")
     project_directory = context.get("project_directory", directory)
-    overview = [f"#{title}", "", f"Project directory: `{project_directory}`"]
+    overview = [f"# {title}", "", f"Project directory: `{project_directory}`"]
     if directory != project_directory:
         overview.append(f"Working directory: `{directory}`")
     overview.append("")

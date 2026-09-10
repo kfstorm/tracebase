@@ -193,8 +193,10 @@ def _project_worktree(snapshots: tuple[PublishedSnapshot, ...]) -> str | None:
             continue
         if not isinstance(project, dict):
             continue
+        if project.get("id") == "global":
+            continue
         worktree = project.get("worktree")
-        if isinstance(worktree, str) and worktree:
+        if isinstance(worktree, str) and worktree and worktree != "/":
             return worktree
     return None
 
