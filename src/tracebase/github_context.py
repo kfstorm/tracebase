@@ -146,6 +146,32 @@ def _thread_nodes(snapshot: PublishedSnapshot, path: str) -> list[dict[str, Any]
     return nodes
 
 
+def _merge_thread_comments(value: dict[str, Any], nodes: list[dict[str, Any]]) -> None:
+    comments = value.get("comments")
+    if not isinstance(comments, dict):
+        comments = {}
+        value["comments"] = comments
+    existing = comments.get("nodes")
+    if not isinstance(existing, list):
+        existing = []
+        comments["nodes"] = existing
+    positions = {
+        node.get("id"): index
+        for index, node in enumerate(existing)
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    for node in nodes:
+        node_id = node.get("id")
+        if not isinstance(node_id, str):
+            continue
+        position = positions.get(node_id)
+        if position is None:
+            positions[node_id] = len(existing)
+            existing.append(node)
+        elif isinstance(node, dict) and len(node) > len(existing[position]):
+            existing[position] = node
+
+
 def _roles(record: dict[str, Any], start: datetime, end: datetime) -> tuple[str, ...]:
     timestamps = [
         timestamp
@@ -207,6 +233,7 @@ def project_github(  # noqa: PLR0915
     repository = "unknown/unknown"
     number = 0
     title: str | None = None
+    paged_thread_comments: list[tuple[int, str, list[dict[str, Any]]]] = []
     for observation, snapshot in enumerate(snapshots, start=1):
         inline_nodes_by_rest_id: dict[int, str] = {}
         inline_replies: list[tuple[int, str]] = []
@@ -378,10 +405,11 @@ def project_github(  # noqa: PLR0915
                 ) from None
             if not isinstance(thread_id, str) or not isinstance(nodes, list):
                 raise ArchiveError("GitHub review-thread comments were invalid")
+            if not all(isinstance(comment, dict) for comment in nodes):
+                raise ArchiveError("GitHub review-thread comments were invalid")
+            paged_thread_comments.append((observation, thread_id, nodes))
             for comment in nodes:
-                if not isinstance(comment, dict) or not isinstance(
-                    comment.get("id"), str
-                ):
+                if not isinstance(comment.get("id"), str):
                     raise ArchiveError("GitHub review-thread comments were invalid")
                 relations.add(("thread-inline-comment", thread_id, comment["id"]))
         for reply_id, node_id in inline_replies:
@@ -403,13 +431,22 @@ def project_github(  # noqa: PLR0915
                             "observation_window": snapshot.manifest[
                                 "observation_window"
                             ],
-                            "value": snapshot.evidence["pull-request.diff"].decode(
-                                "utf-8"
-                            ),
+                            "value": snapshot.evidence["pull-request.diff"],
                         }
                     ],
                 },
             )
+    for observation, thread_id, nodes in paged_thread_comments:
+        record = records.get(("review-thread", thread_id))
+        if record is None:
+            continue
+        for representation in reversed(record["representations"]):
+            if representation.get("observation") != observation:
+                continue
+            value = representation.get("value")
+            if isinstance(value, dict):
+                _merge_thread_comments(value, nodes)
+            break
     ordered = tuple(
         sorted(
             (

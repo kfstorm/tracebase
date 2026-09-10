@@ -76,6 +76,7 @@ def _render_item(
 ) -> list[tuple[str, str]]:
     item_root = staging.joinpath(*PurePosixPath(item.path).parts)
     item_root.mkdir(parents=True, exist_ok=True)
+    files: dict[str, list[str] | bytes] = {}
     if item.github is not None:
         from .github_context_render import render_github  # noqa: PLC0415
 
@@ -83,18 +84,47 @@ def _render_item(
     elif item.opencode is not None:
         from .opencode_context_render import render_opencode  # noqa: PLC0415
 
-        files = render_opencode(item, result)
+        files.update(render_opencode(item, result))
     else:
         raise ContextError("context item has no source projection")
     rendered: list[tuple[str, str]] = []
-    for name, lines in files.items():
-        write_markdown(item_root / name, lines)
+    for name, content in files.items():
+        if isinstance(content, bytes):
+            (item_root / name).write_bytes(content)
+        else:
+            write_markdown(item_root / name, content)
         rendered.append((f"{item.path}/{name}", name))
     return rendered
 
 
 def _link_list(paths: list[str]) -> str:
     return ", ".join(f"[{PurePosixPath(path).name}]({path})" for path in paths)
+
+
+def _session_span(item: ContextItem, result: ContextExtractionResult) -> str | None:
+    assert item.opencode is not None
+    times: list[datetime] = []
+    for message in item.opencode.messages:
+        if "in_range_work" in message.get("temporal_roles", ()):
+            created = parse_timestamp(message.get("created"))
+            if created is not None:
+                times.append(created)
+        for part in message.get("parts", ()):
+            if "in_range_work" not in part.get("temporal_roles", ()):
+                continue
+            started = parse_timestamp(part.get("start"))
+            if started is not None:
+                times.append(started)
+            finished = parse_timestamp(part.get("end"))
+            if finished is not None and finished < result.request.end:
+                times.append(finished)
+    if not times:
+        return None
+    timezone = result.request.start.tzinfo
+    assert timezone is not None
+    first = min(times).astimezone(timezone).strftime("%H:%M")
+    last = max(times).astimezone(timezone).strftime("%H:%M")
+    return first if first == last else f"{first}-{last}"
 
 
 def _render_index(
@@ -146,7 +176,13 @@ def _render_index(
     for directory in sorted(grouped):
         lines.append(f"### `{directory}`")
         lines.append("")
-        for item, files in grouped[directory]:
+        ordered_group = sorted(
+            grouped[directory],
+            key=lambda pair: next(
+                path for path, _ in pair[1] if path.endswith("/overview.md")
+            ),
+        )
+        for item, files in ordered_group:
             assert item.opencode is not None
             value = item.opencode.session.get("value")
             value = value if isinstance(value, dict) else {}
@@ -158,7 +194,10 @@ def _render_index(
                 if isinstance(title_value, str) and title_value
                 else "Untitled session"
             )
-            lines.append(f"- **{title}** ({_link_list([path for path, _ in files])})")
+            span = _session_span(item, result) or "No in-range time"
+            lines.append(
+                f"- **{span} - {title}** ({_link_list([path for path, _ in files])})"
+            )
         lines.append("")
     gaps = _root_gaps(result.items)
     if gaps:

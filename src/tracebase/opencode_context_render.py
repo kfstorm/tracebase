@@ -33,6 +33,48 @@ def _part_value(part: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else part
 
 
+def _observation_end(part: dict[str, Any]) -> datetime | None:
+    window = part.get("observation_window")
+    if not isinstance(window, dict) or not isinstance(window.get("to"), str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(window["to"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _effective_part(part: dict[str, Any], end: datetime) -> dict[str, Any]:
+    representations = part.get("representations")
+    representations = representations if isinstance(representations, list) else []
+    eligible = [
+        representation
+        for representation in representations
+        if isinstance(representation, dict)
+        and (observed_end := _observation_end(representation)) is not None
+        and observed_end <= end
+        and isinstance(representation.get("value"), dict)
+    ]
+    if eligible:
+        return {**part, "value": eligible[-1]["value"]}
+    value = _part_value(part)
+    safe_state = _state(part).copy()
+    safe_state.pop("output", None)
+    safe_state.pop("error", None)
+    metadata = safe_state.get("metadata")
+    if isinstance(metadata, dict):
+        safe_state["metadata"] = {
+            key: value for key, value in metadata.items() if key != "answers"
+        }
+    safe_state["status"] = "running"
+    time_data = safe_state.get("time")
+    if isinstance(time_data, dict):
+        safe_state["time"] = {
+            key: value for key, value in time_data.items() if key != "end"
+        }
+    return {**part, "value": {**value, "state": safe_state}}
+
+
 def _state(part: dict[str, Any]) -> dict[str, Any]:
     state = _part_value(part).get("state")
     return state if isinstance(state, dict) else {}
@@ -68,7 +110,13 @@ def _path(value: Any, directory: str) -> str | None:
         candidate = Path(value)
         root = Path(directory)
         if candidate.is_absolute():
-            return f"./{candidate.relative_to(root).as_posix()}"
+            try:
+                relative = candidate.resolve(strict=False).relative_to(
+                    root.resolve(strict=False)
+                )
+            except ValueError:
+                return value
+            return f"./{relative.as_posix()}"
     except ValueError:
         return value
     return value
@@ -104,7 +152,15 @@ def _answers(part: dict[str, Any]) -> Any:
 
 
 def _task_output(part: dict[str, Any]) -> Any:
-    return _state(part).get("output")
+    output = _state(part).get("output")
+    if not isinstance(output, str):
+        return output
+    match = re.fullmatch(
+        r"<task\b[^>]*>\s*<task_result>\s*(.*?)\s*</task_result>\s*</task>\s*",
+        output,
+        flags=re.DOTALL,
+    )
+    return match.group(1) if match is not None else output
 
 
 def _task_description(part: dict[str, Any]) -> str | None:
@@ -113,14 +169,21 @@ def _task_description(part: dict[str, Any]) -> str | None:
     return description if isinstance(description, str) and description else None
 
 
+def _completed_before_cutoff(part: dict[str, Any], end: datetime) -> bool:
+    value = part.get("end")
+    if not isinstance(value, str):
+        return False
+    try:
+        completed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return completed < end
+
+
 def _message_bucket(
     message: dict[str, Any], start: datetime, end: datetime
 ) -> str | None:
     roles = message.get("temporal_roles", ())
-    if "in_range_work" in roles:
-        return "activity"
-    if "earlier_background" in roles:
-        return "background"
     parts = message.get("parts", ())
     if any(
         "in_range_work" in part.get("temporal_roles", ())
@@ -134,11 +197,17 @@ def _message_bucket(
         if isinstance(part, dict)
     ):
         return "background"
+    if "in_range_work" in roles:
+        return "activity"
+    if "earlier_background" in roles:
+        return "background"
     return None
 
 
 def _part_bucket(part: dict[str, Any], message_bucket: str | None) -> str | None:
     roles = part.get("temporal_roles", ())
+    if "later_progression" in roles:
+        return None
     if "in_range_work" in roles:
         return "activity"
     if "earlier_background" in roles:
@@ -162,8 +231,11 @@ def _render_tool(  # noqa: PLR0911, PLR0915
     timezone: tzinfo,
     end: datetime,
 ) -> None:
+    part = _effective_part(part, end)
     tool = _tool_name(part)
     error = _error(part)
+    if error is not None and not _completed_before_cutoff(part, end):
+        error = None
     if error is not None:
         _render_error(lines, tool, error)
         return
@@ -174,15 +246,7 @@ def _render_tool(  # noqa: PLR0911, PLR0915
             [f"### Delegated task{f': {description}' if description else ''}", ""]
         )
         status = state.get("status")
-        part_end = part.get("end")
-        completed_before_cutoff = False
-        if isinstance(part_end, str):
-            try:
-                completed_before_cutoff = (
-                    datetime.fromisoformat(part_end.replace("Z", "+00:00")) < end
-                )
-            except ValueError:
-                completed_before_cutoff = False
+        completed_before_cutoff = _completed_before_cutoff(part, end)
         if status in {"running", "pending"} or not completed_before_cutoff:
             lines.extend(["Incomplete task.", ""])
         output = _task_output(part) if completed_before_cutoff else None
@@ -214,7 +278,7 @@ def _render_tool(  # noqa: PLR0911, PLR0915
                 fenced(rendered, "text" if isinstance(questions, str) else "json")
             )
             lines.append("")
-        answers = _answers(part)
+        answers = _answers(part) if _completed_before_cutoff(part, end) else None
         if answers is not None:
             rendered = (
                 answers
@@ -298,7 +362,8 @@ def _render_messages(
             ):
                 continue
             part_type = part.get("type")
-            value = _part_value(part)
+            effective_part = _effective_part(part, result.request.end)
+            value = _part_value(effective_part)
             if part_type == "text":
                 text = value.get("text", part.get("text"))
                 if isinstance(text, str) and text:
@@ -307,7 +372,9 @@ def _render_messages(
                 part_type in {"tool", "task", "question"}
                 or _tool_name(part) == "question"
             ):
-                _render_tool(lines, part, directory, timezone, result.request.end)
+                _render_tool(
+                    lines, effective_part, directory, timezone, result.request.end
+                )
             elif part_type == "compaction" or value.get("synthetic") is True:
                 lines.extend(
                     ["Supporting context retained from an earlier compaction.", ""]

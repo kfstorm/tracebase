@@ -232,9 +232,7 @@ def _interval_roles(
     began, finished = interval
     if finished == began:
         return _point_roles(began, start, end)
-    in_range = (
-        start <= began < end if finished is None else began < end and start < finished
-    )
+    in_range = began < end and (finished is None or start < finished)
     return tuple(
         role
         for role, present in (

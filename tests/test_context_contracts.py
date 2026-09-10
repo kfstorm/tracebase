@@ -5,8 +5,19 @@ from pathlib import Path
 
 import pytest
 
-from tracebase.archive import Archive, CollectionRange, CollectionRun, Snapshot
-from tracebase.context import ContextError, ContextRequest, generate_context
+from tracebase.archive import (
+    Archive,
+    CollectionRange,
+    CollectionRun,
+    Snapshot,
+    encode_path_id,
+)
+from tracebase.context import (
+    ContextError,
+    ContextRequest,
+    generate_context,
+    load_archive,
+)
 
 
 def request() -> ContextRequest:
@@ -205,6 +216,59 @@ def test_empty_output_has_only_useful_index_without_front_matter(
     assert "coverage" not in index.lower()
 
 
+def test_empty_removed_run_directory_is_tolerated(tmp_path: Path) -> None:
+    archive = tmp_path / "archive"
+    (archive / "runs" / "removed-run" / "snapshots").mkdir(parents=True)
+
+    output = tmp_path / "output"
+    generate_context(archive, request(), output)
+
+    assert files(output) == {"index.md"}
+
+
+def test_nonempty_unregistered_run_content_fails(tmp_path: Path) -> None:
+    archive = tmp_path / "archive"
+    invalid_run = archive / "runs" / "invalid-run"
+    (invalid_run / "snapshots").mkdir(parents=True)
+    (invalid_run / "unregistered.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ContextError, match="unregistered entries"):
+        load_archive(archive)
+
+
+def test_missing_declared_evidence_fails_before_publication(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    current = run(archive)
+    snapshot = current.write_snapshot(
+        Snapshot(
+            "opencode",
+            "session",
+            "session-1",
+            current.collection_range.as_manifest(),
+            ({"path": "session.json"},),
+        )
+    )
+    current.write_evidence(
+        snapshot, "session.json", b'{"id":"session-1","messages":[]}'
+    )
+    current.publish({})
+    evidence = (
+        archive.root
+        / "runs"
+        / current.run_id
+        / "snapshots"
+        / "session"
+        / encode_path_id("session-1")
+        / "session.json"
+    )
+    evidence.unlink()
+
+    with pytest.raises(ContextError, match="missing"):
+        generate_context(archive.root, request(), tmp_path / "output")
+    assert not (tmp_path / "output").exists()
+
+
 def test_github_uses_natural_path_and_heading(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
@@ -339,12 +403,74 @@ def test_review_threads_are_materialized_and_unthreaded_comments_remain(
         },
     }
     output = github_output(archive, tmp_path, evidence)
-    reviews = text(output, "reviews.md")
-    assert "### `src/foo.py:120`" in reviews
-    assert reviews.index("first") < reviews.index("reply")
-    assert "Unthreaded review comment at `src/bar.py:3`" in reviews
-    assert reviews.count("first") == 1
-    assert reviews.count("reply") == 1
+    activity = text(output, "activity.md")
+    assert "### `src/foo.py:120`" in activity
+    assert activity.index("first") < activity.index("reply")
+    assert "loose" in activity
+    assert activity.count("first") == 1
+    assert activity.count("reply") == 1
+
+
+def test_active_review_thread_separates_earlier_and_future_comments(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    evidence = {
+        "review-comments.001.json": [
+            {
+                "id": 19,
+                "node_id": "IC_19",
+                "body": "before",
+                "user": {"login": "reviewer"},
+                "created_at": "2025-12-31T15:00:00Z",
+            },
+            {
+                "id": 20,
+                "node_id": "IC_20",
+                "body": "during",
+                "user": {"login": "reviewer"},
+                "created_at": "2026-01-01T01:00:00Z",
+            },
+            {
+                "id": 21,
+                "node_id": "IC_21",
+                "body": "after",
+                "user": {"login": "author"},
+                "created_at": "2026-01-02T01:00:00Z",
+            },
+        ],
+        "review-threads.001.json": {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "THREAD_1",
+                                    "comments": {
+                                        "nodes": [
+                                            {"id": "IC_19"},
+                                            {"id": "IC_20"},
+                                            {"id": "IC_21"},
+                                        ]
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+    }
+    output = github_output(archive, tmp_path, evidence)
+    activity = text(output, "activity.md")
+
+    assert "### Earlier context" in activity
+    assert "before" in activity
+    assert "during" in activity
+    assert "after" not in activity
+    assert not (output / "github/kfstorm/tracebase/pull/1/background.md").exists()
 
 
 def test_diff_is_only_in_diff_patch(tmp_path: Path) -> None:
@@ -362,6 +488,20 @@ def test_diff_is_only_in_diff_patch(tmp_path: Path) -> None:
     diff = text(output, "diff.patch")
     assert "diff --git" in diff
     assert "diff --git" not in text(output, "overview.md")
+
+
+def test_diff_patch_preserves_raw_bytes(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    raw_diff = b"diff --git a/a b/a\n+trailing  \n\n"
+    output = github_output(
+        archive,
+        tmp_path,
+        {"pull-request.diff": raw_diff.decode("utf-8")},
+    )
+
+    diff_path = next(output.rglob("diff.patch"))
+    assert diff_path.read_bytes() == raw_diff
 
 
 def test_future_github_events_are_absent_and_background_is_separate(
@@ -400,10 +540,8 @@ def test_future_github_events_are_absent_and_background_is_separate(
     output = github_output(archive, tmp_path, evidence)
     assert "earlier" in text(output, "background.md")
     assert "today" in text(output, "activity.md")
-    for path in output.rglob("*.md"):
-        content = path.read_text()
-        assert "cutoff" not in content
-        assert "future" not in content
+    assert "cutoff" not in text(output, "activity.md")
+    assert "future" not in text(output, "activity.md")
 
 
 def test_github_timestamps_are_local_minute_precision_and_equal_update_once(
@@ -494,7 +632,10 @@ def test_task_output_question_and_error_projection(tmp_path: Path) -> None:
                     "start": "2026-01-01T01:00:00Z",
                     "end": "2026-01-01T01:01:00Z",
                 },
-                "output": "parent result",
+                "output": (
+                    '<task id="ses_child" state="completed">'
+                    "<task_result>parent result</task_result></task>"
+                ),
                 "sessionId": "child",
             },
         },
@@ -527,6 +668,8 @@ def test_task_output_question_and_error_projection(tmp_path: Path) -> None:
     ]
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T00:30:00Z")
     assert "parent result" in activity
+    assert "task_result" not in activity
+    assert "ses_child" not in activity
     assert "Continue?" in activity and "yes" in activity
     assert "read failed" in activity and "secret" not in activity
     assert "sessionId" not in activity
@@ -559,6 +702,51 @@ def test_task_completed_after_cutoff_is_incomplete_without_future_output(
     activity = text(output, "activity.md")
     assert "Incomplete task." in activity
     assert "future result" not in activity
+
+
+def test_opencode_cutoff_hides_later_text_answers_and_errors(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    parts = [
+        {
+            "type": "text",
+            "text": "future text",
+            "time": {"created": "2026-01-01T16:00:00Z"},
+        },
+        {
+            "type": "tool",
+            "tool": "task",
+            "state": {
+                "status": "error",
+                "time": {
+                    "start": "2026-01-01T15:00:00Z",
+                    "end": "2026-01-01T16:01:00Z",
+                },
+                "output": "future task result",
+                "error": "future task error",
+            },
+        },
+        {
+            "type": "tool",
+            "tool": "question",
+            "state": {
+                "status": "completed",
+                "time": {
+                    "start": "2026-01-01T15:30:00Z",
+                    "end": "2026-01-01T16:01:00Z",
+                },
+                "metadata": {"answers": ["future answer"]},
+                "input": {"questions": ["Continue?"]},
+            },
+        },
+    ]
+    activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T14:00:00Z")
+
+    assert "Incomplete task." in activity
+    assert "future text" not in activity
+    assert "future task result" not in activity
+    assert "future task error" not in activity
+    assert "future answer" not in activity
 
 
 def test_opencode_tool_whitelist_and_path_compaction(tmp_path: Path) -> None:
