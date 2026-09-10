@@ -197,6 +197,29 @@ def test_empty_extraction_publishes_complete_markdown_only_output(
     assert "No gaps are available." in index
 
 
+def test_empty_removed_run_directory_does_not_block_context_generation(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive"
+    stale_run = archive / "runs" / "removed-run" / "snapshots"
+    stale_run.mkdir(parents=True)
+
+    output = tmp_path / "output"
+    generate_context(archive, _request(), output)
+
+    assert _files(output) == {"index.md"}
+
+
+def test_nonempty_unregistered_run_directory_still_fails(tmp_path: Path) -> None:
+    archive = tmp_path / "archive"
+    invalid_run = archive / "runs" / "invalid-run"
+    (invalid_run / "snapshots").mkdir(parents=True)
+    (invalid_run / "unregistered.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ContextError, match="unregistered entries"):
+        load_archive(archive)
+
+
 def test_opencode_renderer_is_whitelisted_and_omits_tool_output(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
