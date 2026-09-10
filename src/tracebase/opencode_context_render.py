@@ -36,15 +36,30 @@ def _session_context(item: ContextItem) -> dict[str, str]:
     for snapshot in reversed(item.snapshots):
         metadata = snapshot.manifest.get("metadata")
         session = metadata.get("session") if isinstance(metadata, dict) else None
-        if not isinstance(session, dict):
-            continue
-        for key, output_key in (
-            ("directory", "working_directory"),
-            ("worktree", "main_worktree_directory"),
-        ):
-            candidate = session.get(key)
-            if isinstance(candidate, str) and candidate and output_key not in context:
-                context[output_key] = candidate
+        if isinstance(session, dict):
+            candidate = session.get("directory")
+            if (
+                isinstance(candidate, str)
+                and candidate
+                and "working_directory" not in context
+            ):
+                context["working_directory"] = candidate
+        project = metadata.get("project") if isinstance(metadata, dict) else None
+        if project is None:
+            raw_project = snapshot.evidence.get("project.json")
+            if raw_project is not None:
+                try:
+                    project = json.loads(raw_project)
+                except json.JSONDecodeError:
+                    project = None
+        if isinstance(project, dict):
+            candidate = project.get("worktree")
+            if (
+                isinstance(candidate, str)
+                and candidate
+                and "main_worktree_directory" not in context
+            ):
+                context["main_worktree_directory"] = candidate
     return context
 
 

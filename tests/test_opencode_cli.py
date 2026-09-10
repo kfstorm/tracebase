@@ -35,6 +35,9 @@ class TestOpenCodeCollectionCli:
         discovery: Path | None = None,
         large_export: Path | None = None,
         malformed_export: str = "",
+        projects: Path | None = FIXTURES / "projects.json",
+        fail_projects: bool = False,
+        project_count: Path | None = None,
         cwd: Path = PROJECT_ROOT,
     ) -> subprocess.CompletedProcess[str]:
         from_text = "2026-01-01T00:00:00+00:00"
@@ -51,6 +54,9 @@ class TestOpenCodeCollectionCli:
             "TRACEBASE_LARGE_EXPORT": str(large_export or ""),
             "TRACEBASE_MALFORMED_EXPORT": malformed_export,
             "TRACEBASE_NEXT_CURSOR": next_cursor,
+            "TRACEBASE_PROJECTS": str(projects or ""),
+            "TRACEBASE_FAIL_PROJECTS": "1" if fail_projects else "",
+            "TRACEBASE_PROJECT_COUNT": str(project_count or ""),
             "TRACEBASE_EXPECTED_START": str(
                 int(datetime.fromisoformat(from_text).timestamp() * 1000)
             ),
@@ -105,6 +111,19 @@ elif arguments == [
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urlparse(self.path)
+            if parsed.path == "/project":
+                if os.environ["TRACEBASE_PROJECT_COUNT"]:
+                    count_path = Path(os.environ["TRACEBASE_PROJECT_COUNT"])
+                    count = int(count_path.read_text() or "0")
+                    count_path.write_text(str(count + 1))
+                if os.environ["TRACEBASE_FAIL_PROJECTS"]:
+                    self.send_response(503)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(Path(os.environ["TRACEBASE_PROJECTS"]).read_bytes())
+                return
             expected = {
                 "start": [os.environ["TRACEBASE_EXPECTED_START"]],
                 "cursor": [os.environ["TRACEBASE_EXPECTED_CURSOR"]],
@@ -223,6 +242,18 @@ else:
             assert metadata["session"]["directory"] == "/gamma"
             assert metadata["session"]["parentID"] == "overlaps-start"
             assert metadata["session"]["time"]["archived"] == 1767228400000
+            assert json.loads((snapshot / "project.json").read_text()) == {
+                "id": "gamma",
+                "worktree": "/primary/gamma",
+            }
+            assert "sandboxes" not in json.loads(
+                (snapshot / "project.json").read_text()
+            )
+            assert json.loads((snapshot / "session.json").read_text())["info"] == {
+                "id": "session/unsafe:1",
+                "projectID": "gamma",
+                "directory": "/temporary/gamma",
+            }
 
     def test_collects_complete_large_export_when_cli_writes_to_pipe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -247,6 +278,149 @@ else:
             published = next((root / "archive" / "runs").iterdir())
             snapshot = next(published.glob("snapshots/session/*"))
             assert (snapshot / "session.json").read_bytes() == large_export.read_bytes()
+
+    def test_project_lookup_uses_export_info_and_preserves_distinct_directories(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            discovery = root / "sessions.json"
+            discovery.write_text(
+                '[{"id":"session/unsafe:1","projectID":"wrong",'
+                '"directory":"/wrong","time":{"created":1767225600000,'
+                '"updated":1767225600000}}]',
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                root / "archive",
+                self.make_fake_opencode(root),
+                discovery=discovery,
+            )
+
+            assert result.returncode == 0
+            snapshot = next((root / "archive" / "runs").glob("*/snapshots/session/*"))
+            assert json.loads((snapshot / "project.json").read_text()) == {
+                "id": "gamma",
+                "worktree": "/primary/gamma",
+            }
+            assert (
+                json.loads((snapshot / "snapshot.json").read_text())["metadata"][
+                    "session"
+                ]["directory"]
+                == "/wrong"
+            )
+            assert (
+                json.loads((snapshot / "session.json").read_text())["info"]["directory"]
+                == "/temporary/gamma"
+            )
+
+    def test_missing_project_keeps_session_and_records_acquisition_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            projects = root / "projects.json"
+            projects.write_text(
+                '[{"id":"other","worktree":"/primary/other"}]', encoding="utf-8"
+            )
+            discovery = root / "sessions.json"
+            discovery.write_text(
+                '[{"id":"session/unsafe:1","time":{"created":1767225600000,'
+                '"updated":1767225600000}}]',
+                encoding="utf-8",
+            )
+            result = self.run_cli(
+                root / "archive",
+                self.make_fake_opencode(root),
+                projects=projects,
+                discovery=discovery,
+            )
+
+            assert result.returncode == 0
+            published = next((root / "archive" / "runs").iterdir())
+            snapshot = (
+                published / "snapshots" / "session" / encode_path_id("session/unsafe:1")
+            )
+            assert (snapshot / "session.json").read_bytes() == (
+                FIXTURES / "session-unsafe-1.json"
+            ).read_bytes()
+            assert not (snapshot / "project.json").exists()
+            metadata = json.loads((snapshot / "snapshot.json").read_text())["metadata"]
+            assert metadata["acquisition_gaps"] == [
+                {
+                    "kind": "missing-project",
+                    "session_id": "session/unsafe:1",
+                    "project_id": "gamma",
+                }
+            ]
+            assert json.loads((published / "run.json").read_text())["coverage"][
+                "project_lookup"
+            ]["gaps"] == [
+                {
+                    "kind": "missing-project",
+                    "session_id": "session/unsafe:1",
+                    "project_id": "gamma",
+                }
+            ]
+
+    def test_project_api_failure_keeps_session_and_records_acquisition_gap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            discovery = root / "sessions.json"
+            discovery.write_text(
+                '[{"id":"session/unsafe:1","time":{"created":1767225600000,'
+                '"updated":1767225600000}}]',
+                encoding="utf-8",
+            )
+            result = self.run_cli(
+                root / "archive",
+                self.make_fake_opencode(root),
+                discovery=discovery,
+                fail_projects=True,
+            )
+
+            assert result.returncode == 0
+            published = next((root / "archive" / "runs").iterdir())
+            snapshot = next(published.glob("snapshots/session/*"))
+            assert (snapshot / "session.json").read_bytes() == (
+                FIXTURES / "session-unsafe-1.json"
+            ).read_bytes()
+            assert not (snapshot / "project.json").exists()
+            gaps = json.loads((published / "run.json").read_text())["coverage"][
+                "project_lookup"
+            ]["gaps"]
+            assert gaps == [
+                {"kind": "project-lookup-failed", "endpoint": "/project"},
+            ]
+            assert json.loads((snapshot / "snapshot.json").read_text())["metadata"][
+                "acquisition_gaps"
+            ] == [
+                {
+                    "kind": "project-lookup-failed",
+                    "endpoint": "/project",
+                    "session_id": "session/unsafe:1",
+                    "project_id": "gamma",
+                }
+            ]
+
+    def test_project_endpoint_is_requested_once_per_collection_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            count = root / "project-count"
+            count.write_text("0")
+            result = self.run_cli(
+                root / "archive",
+                self.make_fake_opencode(root),
+                project_count=count,
+            )
+
+            assert result.returncode == 0
+            assert count.read_text() == "1"
+            run_manifest = json.loads(
+                (next((root / "archive" / "runs").iterdir()) / "run.json").read_text()
+            )
+            assert run_manifest["coverage"]["project_lookup"]["request_count"] == 1
 
     def test_collects_with_relative_archive_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

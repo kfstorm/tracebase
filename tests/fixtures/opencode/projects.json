@@ -1,0 +1,5 @@
+[
+  {"id": "alpha", "worktree": "/primary/alpha", "sandboxes": ["/secret/alpha"]},
+  {"id": "beta", "worktree": "/primary/beta"},
+  {"id": "gamma", "worktree": "/primary/gamma", "sandboxes": ["/secret/gamma"]}
+]
