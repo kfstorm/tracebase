@@ -996,6 +996,126 @@ def test_opencode_compaction_and_synthetic_text_are_not_rendered_or_counted(
         assert f"background-{index}" in background
 
 
+def test_opencode_mixed_synthetic_text_keeps_real_text_and_selection(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    activity = opencode_activity(
+        archive,
+        tmp_path,
+        [
+            {"type": "text", "text": "real user request"},
+            {
+                "type": "text",
+                "text": "synthetic tool description",
+                "synthetic": True,
+            },
+            {"type": "compaction", "text": "compaction part description"},
+        ],
+        "2026-01-01T01:00:00Z",
+    )
+
+    assert "real user request" in activity
+    assert "synthetic tool description" not in activity
+    assert "compaction part description" not in activity
+    assert "Trace work" in (tmp_path / "output" / "index.md").read_text()
+
+
+def test_opencode_mixed_compaction_continuation_keeps_real_text(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    activity = opencode_activity(
+        archive,
+        tmp_path,
+        [
+            {"type": "text", "text": "real review result"},
+            {
+                "type": "text",
+                "text": "synthetic failure description",
+                "metadata": {"compaction_continue": True},
+            },
+        ],
+        "2026-01-01T01:00:00Z",
+    )
+
+    assert "real review result" in activity
+    assert "synthetic failure description" not in activity
+
+
+@pytest.mark.parametrize(
+    "supporting_part",
+    [
+        {"type": "text", "text": "synthetic-only", "synthetic": True},
+        {
+            "type": "text",
+            "text": "continuation-only",
+            "metadata": {"compaction_continue": True},
+        },
+    ],
+)
+def test_opencode_pure_supporting_message_is_not_selected(
+    tmp_path: Path, supporting_part: dict[str, object]
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[message("supporting", "2026-01-01T01:00:00Z", [supporting_part])],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    assert not list(output.rglob("overview.md"))
+    assert not list(output.rglob("activity.md"))
+    assert not list(output.rglob("background.md"))
+
+
+def test_opencode_pure_supporting_message_does_not_consume_background_user_limit(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    messages = [
+        message(
+            f"background-{index}",
+            f"2025-12-31T0{index}:00:00Z",
+            [{"type": "text", "text": f"background-{index}"}],
+        )
+        for index in range(1, 4)
+    ]
+    messages.extend(
+        [
+            message(
+                "synthetic",
+                "2025-12-31T04:00:00Z",
+                [{"type": "text", "text": "synthetic-only", "synthetic": True}],
+            ),
+            message(
+                "current",
+                "2026-01-01T01:00:00Z",
+                [{"type": "text", "text": "current work"}],
+            ),
+        ]
+    )
+    publish_opencode(archive, session("root", messages=messages), "run")
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    background = text(output, "background.md")
+    for index in range(1, 4):
+        assert f"background-{index}" in background
+    assert "synthetic-only" not in background
+
+
 def test_opencode_non_compaction_assistant_keeps_dsml_like_text(
     tmp_path: Path,
 ) -> None:
