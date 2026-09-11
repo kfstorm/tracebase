@@ -172,6 +172,22 @@ def _timestamp(value: Any) -> datetime:
     return parsed
 
 
+def _session_header(value: dict[str, Any]) -> dict[str, Any]:
+    """Keep only session identity and display metadata after parsing."""
+    header: dict[str, Any] = {}
+    for key in ("id", "directory", "parentID"):
+        if key in value:
+            header[key] = value[key]
+    info = value.get("info")
+    if isinstance(info, dict):
+        header["info"] = {
+            key: info[key]
+            for key in ("id", "title", "directory", "parentID")
+            if key in info
+        }
+    return header
+
+
 def _json(snapshot: PublishedSnapshot) -> dict[str, Any]:
     try:
         value = json.loads(snapshot.evidence["session.json"])
@@ -360,31 +376,8 @@ def project_opencode(  # noqa: PLR0915
     if not snapshots:
         raise ArchiveError("OpenCode session has no snapshot")
     source_id = snapshots[0].manifest["source_id"]
-    session: dict[str, Any] = {"value": _json(snapshots[-1]), "representations": []}
-    latest_info = session["value"].get("info")
-    latest_info = latest_info if isinstance(latest_info, dict) else {}
-    directory = latest_info.get("directory", session["value"].get("directory"))
-    if not isinstance(directory, str) or not directory:
-        for snapshot in reversed(snapshots):
-            metadata = snapshot.manifest.get("metadata")
-            session_metadata = (
-                metadata.get("session") if isinstance(metadata, dict) else None
-            )
-            candidate = (
-                session_metadata.get("directory")
-                if isinstance(session_metadata, dict)
-                else None
-            )
-            if isinstance(candidate, str) and candidate:
-                directory = candidate
-                break
-    if isinstance(directory, str) and directory:
-        session["working_directory"] = directory
-    project_directory = _project_worktree(snapshots)
-    if project_directory is None and isinstance(directory, str) and directory:
-        project_directory = directory
-    if project_directory is not None:
-        session["project_directory"] = project_directory
+    session: dict[str, Any] = {"value": {}, "representations": []}
+    latest_header: dict[str, Any] = {}
     messages_by_id: dict[str, dict[str, Any]] = {}
     gaps: list[dict[str, str]] = []
     for snapshot in snapshots:
@@ -397,13 +390,7 @@ def project_opencode(  # noqa: PLR0915
             value is not None and value != source_id for value in (payload_id, info_id)
         ):
             raise ArchiveError("OpenCode session payload identity was invalid")
-        session["representations"].append(
-            {
-                "run_id": snapshot.run["run_id"],
-                "observation_window": snapshot.manifest["observation_window"],
-                "value": payload,
-            }
-        )
+        latest_header = _session_header(payload)
         raw_messages = payload.get("messages")
         if not isinstance(raw_messages, list):
             raise ArchiveError("OpenCode session payload is invalid")
@@ -420,15 +407,7 @@ def project_opencode(  # noqa: PLR0915
                 "id": message_id,
                 "created": message_time.isoformat(),
                 "role": message.get("role", info.get("role")),
-                "value": message,
                 "temporal_roles": _point_roles(message_time, start, end),
-                "representations": [
-                    {
-                        "run_id": snapshot.run["run_id"],
-                        "observation_window": snapshot.manifest["observation_window"],
-                        "value": message,
-                    }
-                ],
             }
             parts = message.get("parts", ())
             if not isinstance(parts, list):
@@ -461,16 +440,8 @@ def project_opencode(  # noqa: PLR0915
                             if part_interval is not None
                             else ("observed_state",)
                         ),
-                        "representations": [],
                         "intervals": [],
                     },
-                )
-                part_record["representations"].append(
-                    {
-                        "run_id": snapshot.run["run_id"],
-                        "observation_window": snapshot.manifest["observation_window"],
-                        "value": part,
-                    }
                 )
                 if part_interval is not None:
                     part_record["intervals"].append(part_interval)
@@ -486,7 +457,6 @@ def project_opencode(  # noqa: PLR0915
             if prior is None:
                 messages_by_id[message_id] = record
             else:
-                prior["representations"].extend(record["representations"])
                 prior["_supporting"] = prior["_supporting"] or record["_supporting"]
                 if prior["_supporting"]:
                     prior["temporal_roles"] = ("observed_state",)
@@ -497,7 +467,6 @@ def project_opencode(  # noqa: PLR0915
                         prior.setdefault("parts", []).append(part)
                     else:
                         prior_part["value"] = part["value"]
-                        prior_part["representations"].extend(part["representations"])
                         prior_part["intervals"].extend(part["intervals"])
                         if "_start_time" in part:
                             prior_part["_start_time"] = part["_start_time"]
@@ -509,6 +478,32 @@ def project_opencode(  # noqa: PLR0915
                             prior_part.pop("end", None)
                             prior_part["completion"] = part["completion"]
                         _refresh_part_roles(prior_part, start, end)
+    latest_value = latest_header
+    session["value"] = latest_value
+    latest_info = latest_value.get("info")
+    latest_info = latest_info if isinstance(latest_info, dict) else {}
+    directory = latest_info.get("directory", latest_value.get("directory"))
+    if not isinstance(directory, str) or not directory:
+        for snapshot in reversed(snapshots):
+            metadata = snapshot.manifest.get("metadata")
+            session_metadata = (
+                metadata.get("session") if isinstance(metadata, dict) else None
+            )
+            candidate = (
+                session_metadata.get("directory")
+                if isinstance(session_metadata, dict)
+                else None
+            )
+            if isinstance(candidate, str) and candidate:
+                directory = candidate
+                break
+    if isinstance(directory, str) and directory:
+        session["working_directory"] = directory
+    project_directory = _project_worktree(snapshots)
+    if project_directory is None and isinstance(directory, str) and directory:
+        project_directory = directory
+    if project_directory is not None:
+        session["project_directory"] = project_directory
     messages = list(messages_by_id.values())
     messages.sort(key=lambda message: (message["_created_time"], message["id"]))
     for message in messages:
@@ -553,6 +548,8 @@ def project_opencode(  # noqa: PLR0915
         )
         for message in messages
     )
+    if not selected:
+        messages = []
     for message in messages:
         message.pop("_supporting", None)
     return OpenCodeProjection(
