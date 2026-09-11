@@ -101,6 +101,8 @@ def _render_messages(
     lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
     messages: list[tuple[dict[str, Any], str, list[str]]] = []
     for message in projection.messages:
+        if message.get("_supporting_message") is True:
+            continue
         role = message.get("role")
         role = role.lower() if isinstance(role, str) else ""
         if role not in {"user", "assistant"}:
@@ -159,6 +161,16 @@ def render_opencode(
     files: dict[str, list[str]] = {"overview.md": overview}
     activity = _render_messages(item, result, "activity")
     background = _render_messages(item, result, "background")
+    if not activity:
+        overview.extend(
+            [
+                "## Context limitations",
+                "",
+                "No in-range User or Assistant work text is retained for this session; "
+                "it was selected by in-range non-text activity.",
+                "",
+            ]
+        )
     if activity:
         files["activity.md"] = activity
     if background:

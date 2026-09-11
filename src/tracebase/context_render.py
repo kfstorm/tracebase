@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import tempfile
 from datetime import datetime
@@ -10,28 +9,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .context import ContextError, ContextExtractionResult, ContextItem
-
-_OPENCODE_GAP_FIELDS: dict[str, tuple[str, ...]] = {
-    "malformed-session-parent": ("session_id",),
-    "missing-session-parent": ("session_id", "parent_id"),
-    "cyclic-session-parent": ("session_id", "parent_id"),
-    "malformed-task-child": ("session_id",),
-    "missing-task-child": ("session_id", "child_id"),
-    "unknown-completion": ("message_id", "part_id"),
-    "no_in_range_messages": ("reason",),
-}
-
-
-def public_gap(gap: dict[str, Any]) -> dict[str, str]:
-    """Select stable, useful fields for one OpenCode gap."""
-    kind = gap.get("kind")
-    kind = kind if isinstance(kind, str) else "unknown"
-    public = {"kind": kind}
-    for field in _OPENCODE_GAP_FIELDS.get(kind, ()):
-        value = gap.get(field)
-        if isinstance(value, str):
-            public[field] = value
-    return public
 
 
 def write_markdown(path: Path, lines: list[str]) -> None:
@@ -53,15 +30,6 @@ def format_timestamp(value: Any, timezone: Any) -> str | None:
     if parsed is None:
         return None
     return parsed.astimezone(timezone).strftime("%Y-%m-%d %H:%M")
-
-
-def _root_gaps(items: tuple[ContextItem, ...]) -> list[dict[str, str]]:
-    gaps: list[dict[str, str]] = []
-    for item in items:
-        if item.opencode is None:
-            continue
-        gaps.extend(public_gap(gap) for gap in item.opencode.gaps)
-    return sorted(gaps, key=lambda entry: json.dumps(entry, sort_keys=True))
 
 
 def _render_item(
@@ -199,10 +167,6 @@ def _render_index(
                 f"- **{span} - {title}** ({_link_list([path for path, _ in files])})"
             )
         lines.append("")
-    gaps = _root_gaps(result.items)
-    if gaps:
-        lines.extend(["", "## Gaps", ""])
-        lines.extend(f"- `{gap['kind']}`" for gap in gaps)
     write_markdown(staging / "index.md", lines)
 
 
