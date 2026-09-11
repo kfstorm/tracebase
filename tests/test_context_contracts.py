@@ -54,6 +54,24 @@ def message(
     return {"id": message_id, "created": created, "role": role, "parts": parts or []}
 
 
+def append_user_assistant_turn(messages: list[dict[str, object]], index: int) -> None:
+    messages.extend(
+        [
+            message(
+                f"user-{index}",
+                f"2025-12-31T0{index}:00:00Z",
+                [{"type": "text", "text": f"user-{index}"}],
+            ),
+            message(
+                f"assistant-{index}",
+                f"2025-12-31T0{index}:30:00Z",
+                [{"type": "text", "text": f"assistant-{index}"}],
+                role="assistant",
+            ),
+        ]
+    )
+
+
 def session(
     session_id: str,
     *,
@@ -211,6 +229,46 @@ def opencode_activity(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     return text(output, "activity.md")
+
+
+def opencode_background(
+    archive: Archive, tmp_path: Path, messages: list[dict[str, object]]
+) -> str:
+    publish_opencode(archive, session("root", messages=messages), "run")
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    return text(output, "background.md")
+
+
+def publish_user_text_pair(archive: Archive, value: str) -> None:
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "earlier",
+                    "2025-12-31T01:00:00Z",
+                    [{"type": "text", "text": value}],
+                ),
+                message(
+                    "current",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": value}],
+                ),
+            ],
+        ),
+        "run",
+    )
+
+
+def assert_outputs_equal(one: Path, two: Path) -> None:
+    assert files(one) == files(two)
+    assert b"".join(
+        path.read_bytes() for path in sorted(one.rglob("*")) if path.is_file()
+    ) == b"".join(
+        path.read_bytes() for path in sorted(two.rglob("*")) if path.is_file()
+    )
 
 
 def github_output(
@@ -906,7 +964,7 @@ def test_opencode_without_project_json_falls_back_to_session_directory(
     assert "Working directory:" not in overview
 
 
-def test_opencode_child_sessions_are_not_independent_documents(tmp_path: Path) -> None:
+def test_opencode_context_output_is_root_session_only(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     publish_opencode(
@@ -927,64 +985,29 @@ def test_opencode_child_sessions_are_not_independent_documents(tmp_path: Path) -
     assert len(list(output.rglob("overview.md"))) == 1
 
 
-def test_task_output_question_and_error_projection(tmp_path: Path) -> None:
+def test_opencode_keeps_text_and_drops_task_question_and_other_tools(
+    tmp_path: Path,
+) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     parts = [
-        {
-            "type": "tool",
-            "tool": "task",
-            "description": "inspect",
-            "state": {
-                "status": "completed",
-                "time": {
-                    "start": "2026-01-01T01:00:00Z",
-                    "end": "2026-01-01T01:01:00Z",
-                },
-                "output": (
-                    '<task id="ses_child" state="completed">'
-                    "<task_result>parent result</task_result></task>"
-                ),
-                "sessionId": "child",
-            },
-        },
-        {
-            "type": "tool",
-            "tool": "question",
-            "state": {
-                "status": "completed",
-                "time": {
-                    "start": "2026-01-01T02:00:00Z",
-                    "end": "2026-01-01T02:01:00Z",
-                },
-                "input": {"questions": ["Continue?"]},
-                "metadata": {"answers": ["yes"]},
-            },
-        },
-        {
-            "type": "tool",
-            "tool": "read",
-            "state": {
-                "status": "error",
-                "time": {
-                    "start": "2026-01-01T03:00:00Z",
-                    "end": "2026-01-01T03:01:00Z",
-                },
-                "input": {"path": "secret"},
-                "error": "read failed",
-            },
-        },
+        {"type": "text", "text": "kept user text"},
+        {"type": "tool", "tool": "task"},
+        {"type": "tool", "tool": "question"},
+        {"type": "tool", "tool": "bash"},
+        {"type": "tool", "tool": "edit"},
+        {"type": "tool", "tool": "write"},
+        {"type": "tool", "tool": "unknown"},
     ]
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T00:30:00Z")
-    assert "parent result" in activity
-    assert "task_result" not in activity
-    assert "ses_child" not in activity
-    assert "Continue?" in activity and "yes" in activity
-    assert "read failed" in activity and "secret" not in activity
-    assert "sessionId" not in activity
+    assert "kept user text" in activity
+    assert "Delegated task" not in activity
+    assert "Question" not in activity
+    assert "bash" not in activity
+    assert "unknown" not in activity
 
 
-def test_task_completed_after_cutoff_is_incomplete_without_future_output(
+def test_opencode_tool_only_background_has_no_rendered_document(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -1008,9 +1031,7 @@ def test_task_completed_after_cutoff_is_incomplete_without_future_output(
     )
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    activity = text(output, "activity.md")
-    assert "Incomplete task." in activity
-    assert "future result" not in activity
+    assert not list(output.rglob("activity.md"))
 
 
 def test_unknown_task_end_is_not_active_on_later_request_day(tmp_path: Path) -> None:
@@ -1042,7 +1063,7 @@ def test_unknown_task_end_is_not_active_on_later_request_day(tmp_path: Path) -> 
     assert not list(output.rglob("activity.md"))
 
 
-def test_historical_backfill_uses_native_completion_for_outcomes(
+def test_historical_tool_outcomes_are_not_rendered(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -1112,17 +1133,16 @@ def test_historical_backfill_uses_native_completion_for_outcomes(
         ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T16:00:00Z"),
         output,
     )
-    activity = text(output, "activity.md")
-    assert "historical result" in activity
-    assert "yes" in activity
-    assert "historical error" in activity
-    assert "post-cutoff result" not in activity
+    assert not list(output.rglob("activity.md"))
 
 
-def test_opencode_cutoff_hides_later_text_answers_and_errors(tmp_path: Path) -> None:
+def test_opencode_cutoff_hides_later_text_when_tools_are_removed(
+    tmp_path: Path,
+) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     parts = [
+        {"type": "text", "text": "retained text"},
         {
             "type": "text",
             "text": "future text",
@@ -1157,17 +1177,56 @@ def test_opencode_cutoff_hides_later_text_answers_and_errors(tmp_path: Path) -> 
     ]
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T14:00:00Z")
 
-    assert "Incomplete task." in activity
+    assert "retained text" in activity
     assert "future text" not in activity
     assert "future task result" not in activity
     assert "future task error" not in activity
     assert "future answer" not in activity
 
 
-def test_opencode_tool_whitelist_and_path_compaction(tmp_path: Path) -> None:
+def test_opencode_in_range_tool_keeps_earlier_text_in_background(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    tool = {
+        "type": "tool",
+        "tool": "bash",
+        "state": {
+            "status": "completed",
+            "time": {
+                "start": "2025-12-31T17:00:00Z",
+                "end": "2025-12-31T17:01:00Z",
+            },
+        },
+    }
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "earlier-text",
+                    "2025-12-31T10:00:00Z",
+                    [{"type": "text", "text": "earlier text"}, tool],
+                )
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert "earlier text" in text(output, "background.md")
+    assert not list(output.rglob("activity.md"))
+    assert "01:00" in (output / "index.md").read_text()
+
+
+def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     parts = [
+        {"type": "text", "text": "text remains"},
         {
             "type": "tool",
             "tool": "apply_patch",
@@ -1240,11 +1299,10 @@ def test_opencode_tool_whitelist_and_path_compaction(tmp_path: Path) -> None:
         },
     ]
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T00:30:00Z")
-    assert "src/foo.py" in activity and "src/bar.py" in activity
-    assert "@@ ignored hunk" not in activity
-    assert "old secret" not in activity and "body secret" not in activity
-    assert "pytest" in activity and "timeout" not in activity
-    assert "/tmp/elsewhere" in activity
+    assert "text remains" in activity
+    assert "src/foo.py" not in activity and "src/bar.py" not in activity
+    assert "pytest" not in activity
+    assert "/tmp/elsewhere" not in activity
     assert "hidden" not in activity
 
 
@@ -1264,13 +1322,236 @@ def test_opencode_equal_workdir_is_omitted_and_relative_paths_are_normalized(
     }
     publish_opencode(
         archive,
-        session("root", messages=[message("m", "2026-01-01T00:30:00Z", [part])]),
+        session(
+            "root",
+            messages=[
+                message(
+                    "m",
+                    "2026-01-01T00:30:00Z",
+                    [{"type": "text", "text": "text remains"}, part],
+                )
+            ],
+        ),
         "run",
     )
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     activity = text(output, "activity.md")
+    assert "text remains" in activity
     assert "Workdir" not in activity
+
+
+def test_opencode_background_window_keeps_latest_three_users_and_assistants(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    messages: list[dict[str, object]] = []
+    for index in range(1, 5):
+        append_user_assistant_turn(messages, index)
+        if index == 2:
+            messages.extend(
+                [
+                    message(
+                        "tool-only-user",
+                        "2025-12-31T02:45:00Z",
+                        [
+                            {
+                                "type": "tool",
+                                "tool": "bash",
+                                "state": {
+                                    "status": "completed",
+                                    "time": {
+                                        "start": "2025-12-31T02:45:00Z",
+                                        "end": "2025-12-31T02:46:00Z",
+                                    },
+                                },
+                            }
+                        ],
+                    ),
+                    message("empty-user", "2025-12-31T02:47:00Z"),
+                ]
+            )
+    messages.append(
+        message(
+            "current",
+            "2026-01-01T01:00:00Z",
+            [{"type": "text", "text": "current work"}],
+        )
+    )
+    background = opencode_background(archive, tmp_path, messages)
+    assert "user-1" not in background
+    assert "assistant-1" not in background
+    for index in (2, 3, 4):
+        assert f"user-{index}" in background
+        assert f"assistant-{index}" in background
+
+
+def test_opencode_background_without_user_turns_is_retained(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "assistant-only",
+                    "2025-12-31T01:00:00Z",
+                    [{"type": "text", "text": "assistant-only background"}],
+                    role="assistant",
+                ),
+                message(
+                    "current",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": "current work"}],
+                ),
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert "assistant-only background" in text(output, "background.md")
+
+
+@pytest.mark.parametrize("user_count", [1, 3, 4])
+def test_opencode_background_window_starts_at_latest_user_window(
+    tmp_path: Path, user_count: int
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    messages: list[dict[str, object]] = [
+        message(
+            "assistant-prefix",
+            "2025-12-31T00:30:00Z",
+            [{"type": "text", "text": "assistant-only prefix"}],
+            role="assistant",
+        )
+    ]
+    for index in range(1, user_count + 1):
+        append_user_assistant_turn(messages, index)
+    messages.append(
+        message(
+            "current",
+            "2026-01-01T01:00:00Z",
+            [{"type": "text", "text": "current work"}],
+        )
+    )
+    background = opencode_background(archive, tmp_path, messages)
+    assert "assistant-only prefix" not in background
+    first_retained = max(1, user_count - 2)
+    for index in range(1, user_count + 1):
+        if index < first_retained:
+            assert f"user-{index}" not in background
+            assert f"assistant-{index}" not in background
+        else:
+            assert f"user-{index}" in background
+            assert f"assistant-{index}" in background
+
+
+def test_opencode_repeated_long_user_text_remains_in_each_output(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    repeated = ("Repeated context paragraph. " * 9) + "Repeated context paragraph."
+    publish_user_text_pair(archive, repeated)
+
+    one, two = tmp_path / "one", tmp_path / "two"
+    generate_context(archive.root, request(), one)
+    generate_context(archive.root, request(), two)
+    assert not list(one.rglob("repeated-user-text.md"))
+    assert repeated in text(one, "activity.md")
+    assert repeated in text(one, "background.md")
+    assert_outputs_equal(one, two)
+
+
+def test_opencode_repeated_user_text_is_rendered_without_shared_file(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    repeated = "short repeated text"
+    publish_user_text_pair(archive, repeated)
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert repeated in text(output, "activity.md")
+    assert repeated in text(output, "background.md")
+
+
+def test_opencode_filtered_user_text_is_not_rendered_in_background(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    repeated = "filtered user text. " * 12
+    messages = [
+        message(
+            "filtered-old",
+            "2025-12-31T01:00:00Z",
+            [{"type": "text", "text": repeated}],
+        )
+    ]
+    messages.extend(
+        [
+            message(
+                f"background-{index}",
+                f"2025-12-31T0{index}:00:00Z",
+                [{"type": "text", "text": f"background-{index}"}],
+            )
+            for index in range(2, 5)
+        ]
+    )
+    messages.append(
+        message(
+            "current",
+            "2026-01-01T01:00:00Z",
+            [{"type": "text", "text": repeated}],
+        )
+    )
+    publish_opencode(archive, session("root", messages=messages), "run")
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert repeated in text(output, "activity.md")
+    assert repeated not in text(output, "background.md")
+
+
+def test_opencode_user_markdown_is_not_reparsed_or_stripped(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    special = (
+        "**User**\n\n"
+        "```markdown\n"
+        "**Assistant**\n\n"
+        "fenced line with trailing spaces  \n"
+        "```\n\n"
+        "ordinary paragraph with trailing spaces  \n"
+        + ("long content " * 20)
+        + "final trailing spaces  "
+    )
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "current",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": special}],
+                )
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    activity = next(output.rglob("activity.md")).read_bytes()
+    assert activity.count(special.encode("utf-8")) == 1
 
 
 def test_deterministic_output_and_raw_archive_unchanged(tmp_path: Path) -> None:
@@ -1293,12 +1574,7 @@ def test_deterministic_output_and_raw_archive_unchanged(tmp_path: Path) -> None:
         if path.is_file()
     }
     assert before == after
-    assert files(one) == files(two)
-    assert b"".join(
-        path.read_bytes() for path in sorted(one.rglob("*")) if path.is_file()
-    ) == b"".join(
-        path.read_bytes() for path in sorted(two.rglob("*")) if path.is_file()
-    )
+    assert_outputs_equal(one, two)
 
 
 def test_publication_errors_leave_no_partial_output(

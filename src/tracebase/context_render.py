@@ -34,13 +34,6 @@ def public_gap(gap: dict[str, Any]) -> dict[str, str]:
     return public
 
 
-def fenced(value: str, language: str) -> list[str]:
-    fence = "```"
-    while fence in value:
-        fence += "`"
-    return [f"{fence}{language}", value, fence]
-
-
 def write_markdown(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
@@ -76,25 +69,23 @@ def _render_item(
 ) -> list[tuple[str, str]]:
     item_root = staging.joinpath(*PurePosixPath(item.path).parts)
     item_root.mkdir(parents=True, exist_ok=True)
-    files: dict[str, list[str] | bytes] = {}
     if item.github is not None:
         from .github_context_render import render_github  # noqa: PLC0415
 
         files = render_github(item, result)
+        for name, content in files.items():
+            if isinstance(content, bytes):
+                (item_root / name).write_bytes(content)
+            else:
+                write_markdown(item_root / name, content)
+        names = list(files)
     elif item.opencode is not None:
         from .opencode_context_render import render_opencode  # noqa: PLC0415
 
-        files.update(render_opencode(item, result))
+        names = render_opencode(item, result, item_root)
     else:
         raise ContextError("context item has no source projection")
-    rendered: list[tuple[str, str]] = []
-    for name, content in files.items():
-        if isinstance(content, bytes):
-            (item_root / name).write_bytes(content)
-        else:
-            write_markdown(item_root / name, content)
-        rendered.append((f"{item.path}/{name}", name))
-    return rendered
+    return [(f"{item.path}/{name}", name) for name in names]
 
 
 def _link_list(paths: list[str]) -> str:
@@ -242,9 +233,10 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
             raise ContextError("context output publication failed") from None
         assert staging is not None
         try:
-            rendered = [
-                (item, _render_item(staging, item, result)) for item in result.items
-            ]
+            rendered: list[tuple[ContextItem, list[tuple[str, str]]]] = []
+            for item in result.items:
+                item_rendered = _render_item(staging, item, result)
+                rendered.append((item, item_rendered))
             _render_index(staging, result, rendered)
         except ContextError:
             raise
