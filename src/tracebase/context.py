@@ -237,8 +237,8 @@ def extract_context(
         if opencode is not None:
             opencode_projections[key] = opencode
         all_items.append(ContextItem(ordered, "", github, opencode))
-    # Child sessions are evidence consumed by a root task, not independent
-    # user-facing documents. The parent task output is the semantic boundary.
+    # Child sessions remain archive evidence but are intentionally excluded from
+    # Context Output; the public document scope is root sessions only.
     all_items = [
         replace(
             item,

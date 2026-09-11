@@ -139,8 +139,8 @@ def _render_messages(
 
 
 def render_opencode(
-    item: ContextItem, result: ContextExtractionResult
-) -> dict[str, list[str]]:
+    item: ContextItem, result: ContextExtractionResult, output: Path
+) -> list[str]:
     assert item.opencode is not None
     projection = item.opencode
     value = projection.session.get("value")
@@ -163,7 +163,9 @@ def render_opencode(
         files["activity.md"] = activity
     if background:
         files["background.md"] = background
-    return files
+    for name, lines in files.items():
+        write_opencode_markdown(output / name, lines)
+    return list(files)
 
 
 def write_opencode_markdown(path: Path, lines: list[str]) -> None:

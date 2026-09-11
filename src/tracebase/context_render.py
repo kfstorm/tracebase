@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any
 
 from .context import ContextError, ContextExtractionResult, ContextItem
 
@@ -66,26 +66,26 @@ def _root_gaps(items: tuple[ContextItem, ...]) -> list[dict[str, str]]:
 
 def _render_item(
     staging: Path, item: ContextItem, result: ContextExtractionResult
-) -> tuple[
-    list[tuple[str, str]],
-    dict[str, list[str] | bytes],
-    Path,
-]:
+) -> list[tuple[str, str]]:
     item_root = staging.joinpath(*PurePosixPath(item.path).parts)
     item_root.mkdir(parents=True, exist_ok=True)
-    files: dict[str, list[str] | bytes] = {}
     if item.github is not None:
         from .github_context_render import render_github  # noqa: PLC0415
 
         files = render_github(item, result)
+        for name, content in files.items():
+            if isinstance(content, bytes):
+                (item_root / name).write_bytes(content)
+            else:
+                write_markdown(item_root / name, content)
+        names = list(files)
     elif item.opencode is not None:
         from .opencode_context_render import render_opencode  # noqa: PLC0415
 
-        files = cast(dict[str, list[str] | bytes], render_opencode(item, result))
+        names = render_opencode(item, result, item_root)
     else:
         raise ContextError("context item has no source projection")
-    rendered = [(f"{item.path}/{name}", name) for name in files]
-    return rendered, files, item_root
+    return [(f"{item.path}/{name}", name) for name in names]
 
 
 def _link_list(paths: list[str]) -> str:
@@ -235,20 +235,7 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
         try:
             rendered: list[tuple[ContextItem, list[tuple[str, str]]]] = []
             for item in result.items:
-                item_rendered, item_files, item_root = _render_item(
-                    staging, item, result
-                )
-                for name, content in item_files.items():
-                    if isinstance(content, bytes):
-                        (item_root / name).write_bytes(content)
-                    elif item.opencode is not None:
-                        from .opencode_context_render import (  # noqa: PLC0415
-                            write_opencode_markdown,
-                        )
-
-                        write_opencode_markdown(item_root / name, content)
-                    else:
-                        write_markdown(item_root / name, content)
+                item_rendered = _render_item(staging, item, result)
                 rendered.append((item, item_rendered))
             _render_index(staging, result, rendered)
         except ContextError:

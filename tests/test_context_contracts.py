@@ -964,7 +964,7 @@ def test_opencode_without_project_json_falls_back_to_session_directory(
     assert "Working directory:" not in overview
 
 
-def test_opencode_child_sessions_are_not_independent_documents(tmp_path: Path) -> None:
+def test_opencode_context_output_is_root_session_only(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     publish_opencode(
