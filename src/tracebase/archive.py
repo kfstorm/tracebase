@@ -9,6 +9,7 @@ import secrets
 import shutil
 import time
 import uuid
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -215,7 +216,7 @@ class PublishedSnapshot:
 
     run: dict[str, Any]
     manifest: dict[str, Any]
-    evidence: dict[str, bytes]
+    evidence: Mapping[str, bytes]
     root: Path
 
 
@@ -225,6 +226,28 @@ class PublishedRun:
 
     manifest: dict[str, Any]
     snapshots: tuple[PublishedSnapshot, ...]
+
+
+class _EvidenceStore(Mapping[str, bytes]):
+    """Read validated evidence files on demand without retaining their bytes."""
+
+    def __init__(self, root: Path, paths: tuple[str, ...]):
+        self._root = root
+        self._paths = paths
+
+    def __getitem__(self, path: str) -> bytes:
+        if path not in self._paths:
+            raise KeyError(path)
+        try:
+            return self._root.joinpath(*PurePosixPath(path).parts).read_bytes()
+        except OSError:
+            raise ArchiveError("declared evidence file is unreadable") from None
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._paths)
+
+    def __len__(self) -> int:
+        return len(self._paths)
 
 
 def _read_published_object(path: Path, label: str) -> dict[str, Any]:
@@ -380,16 +403,13 @@ def _load_published_snapshot(
         raise ArchiveError("snapshot manifest identity is inconsistent")
     _parse_observation_window(manifest.get("observation_window"))
     declared = _normalize_evidence_files(manifest.get("evidence_files"))
-    evidence: dict[str, bytes] = {}
+    evidence_paths: list[str] = []
     for descriptor in declared:
         evidence_path = root.joinpath(*PurePosixPath(descriptor["path"]).parts)
         _ensure_inside(evidence_path, root)
         if not _is_regular_file(evidence_path):
             raise ArchiveError("declared evidence file is missing or not regular")
-        try:
-            evidence[descriptor["path"]] = evidence_path.read_bytes()
-        except OSError:
-            raise ArchiveError("declared evidence file is unreadable") from None
+        evidence_paths.append(descriptor["path"])
     actual: set[str] = set()
     for child in root.rglob("*"):
         _ensure_inside(child, root)
@@ -398,9 +418,11 @@ def _load_published_snapshot(
         if not _is_regular_file(child):
             raise ArchiveError("snapshot contains a non-regular evidence entry")
         actual.add(child.relative_to(root).as_posix())
-    if actual != set(evidence):
+    if actual != set(evidence_paths):
         raise ArchiveError("snapshot evidence files do not match its manifest")
-    return PublishedSnapshot(run, manifest, evidence, root)
+    return PublishedSnapshot(
+        run, manifest, _EvidenceStore(root, tuple(evidence_paths)), root
+    )
 
 
 def load_published_archive(root: str | Path) -> tuple[PublishedRun, ...]:

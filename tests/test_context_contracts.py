@@ -244,6 +244,33 @@ def test_empty_output_has_only_useful_index_without_front_matter(
     assert "coverage" not in index.lower()
 
 
+def test_archive_evidence_is_read_only_when_accessed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session("root", messages=[message("m", "2026-01-01T01:00:00Z")]),
+        "run",
+    )
+
+    read_paths: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def read_bytes(path: Path) -> bytes:
+        read_paths.append(path)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    runs = load_archive(archive.root)
+
+    assert read_paths == []
+    snapshot = runs[0].snapshots[0]
+    assert snapshot.evidence["session.json"]
+    assert read_paths == [snapshot.root / "session.json"]
+
+
 def test_empty_removed_run_directory_is_tolerated(tmp_path: Path) -> None:
     archive = tmp_path / "archive"
     (archive / "runs" / "removed-run" / "snapshots").mkdir(parents=True)
