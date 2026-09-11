@@ -34,13 +34,6 @@ def public_gap(gap: dict[str, Any]) -> dict[str, str]:
     return public
 
 
-def fenced(value: str, language: str) -> list[str]:
-    fence = "```"
-    while fence in value:
-        fence += "`"
-    return [f"{fence}{language}", value, fence]
-
-
 def write_markdown(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
@@ -245,6 +238,12 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
             rendered = [
                 (item, _render_item(staging, item, result)) for item in result.items
             ]
+            if any(item.opencode is not None for item, _ in rendered):
+                from .opencode_context_render import (  # noqa: PLC0415
+                    deduplicate_opencode_user_text,
+                )
+
+                deduplicate_opencode_user_text(staging)
             _render_index(staging, result, rendered)
         except ContextError:
             raise

@@ -2,30 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
-from .context_render import fenced, format_timestamp
+from .context_render import format_timestamp
 
-_LOW_VALUE_TOOLS = {
-    "read",
-    "grep",
-    "glob",
-    "skill",
-    "todowrite",
-    "webfetch",
-    "websearch",
-    "openchamber",
-    "openchamber_web",
-}
-_PATCH_MARKER = re.compile(
-    r"^\*\*\* (Add File|Update File|Delete File|Move to):\s*(.+?)\s*$"
+_MESSAGE_HEADER = re.compile(
+    r"^\*\*(User|Assistant)(?: · \d{4}-\d{2}-\d{2} \d{2}:\d{2})?\*\*$"
 )
-_EMPTY_DOCUMENT_LINES = 2
+_BACKGROUND_USER_TURN_LIMIT = 3
+_MINIMUM_RENDERED_LINES = 2
+_MINIMUM_DUPLICATE_OCCURRENCES = 2
+_REPEATED_TEXT_DIGEST_LENGTH = 16
+_REPEATED_TEXT_MINIMUM_BYTES = 200
 
 
 def _session_context(item: ContextItem) -> dict[str, str]:
@@ -83,143 +76,7 @@ def _part_value(part: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else part
 
 
-def _effective_part(part: dict[str, Any], end: datetime) -> dict[str, Any]:
-    # Historical backfills can observe a completed source record after the
-    # requested interval. Its native completion time, not observation time,
-    # determines whether the outcome is safe to expose.
-    if _completed_before_cutoff(part, end):
-        return part
-    value = _part_value(part)
-    safe_state = _state(part).copy()
-    safe_state.pop("output", None)
-    safe_state.pop("error", None)
-    metadata = safe_state.get("metadata")
-    if isinstance(metadata, dict):
-        safe_state["metadata"] = {
-            key: value for key, value in metadata.items() if key != "answers"
-        }
-    safe_state["status"] = "running"
-    time_data = safe_state.get("time")
-    if isinstance(time_data, dict):
-        safe_state["time"] = {
-            key: value for key, value in time_data.items() if key != "end"
-        }
-    return {**part, "value": {**value, "state": safe_state}}
-
-
-def _state(part: dict[str, Any]) -> dict[str, Any]:
-    state = _part_value(part).get("state")
-    return state if isinstance(state, dict) else {}
-
-
-def _tool_name(part: dict[str, Any]) -> str:
-    value = _part_value(part)
-    tool = value.get("tool", part.get("type"))
-    return tool if isinstance(tool, str) else "unknown"
-
-
-def _tool_input(part: dict[str, Any]) -> Any:
-    value = _part_value(part)
-    state = _state(part)
-    return state.get("input", value.get("input"))
-
-
-def _error(part: dict[str, Any]) -> str | None:
-    state = _state(part)
-    status = state.get("status")
-    error = state.get("error", _part_value(part).get("error"))
-    if status == "error" or error is not None:
-        if isinstance(error, str):
-            return error
-        return json.dumps(error, ensure_ascii=False, sort_keys=True)
-    return None
-
-
-def _path(value: Any, directory: str) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        candidate = Path(value)
-        root = Path(directory)
-        if candidate.is_absolute():
-            try:
-                relative = candidate.resolve(strict=False).relative_to(
-                    root.resolve(strict=False)
-                )
-            except ValueError:
-                return value
-            return f"./{relative.as_posix()}"
-    except ValueError:
-        return value
-    return value
-
-
-def _workdir(value: Any, directory: str) -> str | None:
-    if isinstance(value, str) and value == directory:
-        return None
-    rendered = _path(value, directory)
-    return None if rendered in {None, ".", directory} else rendered
-
-
-def _patch_paths(patch: Any) -> list[str]:
-    if not isinstance(patch, str):
-        return []
-    paths: list[str] = []
-    for line in patch.splitlines():
-        match = _PATCH_MARKER.match(line)
-        if match is not None and match.group(2) not in paths:
-            paths.append(match.group(2))
-    return paths
-
-
-def _question_text(value: Any) -> Any:
-    if isinstance(value, dict):
-        return value.get("questions", value.get("question"))
-    return value
-
-
-def _answers(part: dict[str, Any]) -> Any:
-    metadata = _state(part).get("metadata")
-    return metadata.get("answers") if isinstance(metadata, dict) else None
-
-
-def _task_output(part: dict[str, Any]) -> Any:
-    output = _state(part).get("output")
-    if not isinstance(output, str):
-        return output
-    match = re.fullmatch(
-        r"<task\b[^>]*>\s*<task_result>\s*(.*?)\s*</task_result>\s*</task>\s*",
-        output,
-        flags=re.DOTALL,
-    )
-    return match.group(1) if match is not None else output
-
-
-def _task_description(part: dict[str, Any]) -> str | None:
-    value = _part_value(part)
-    description = value.get("description")
-    return description if isinstance(description, str) and description else None
-
-
-def _completed_before_cutoff(part: dict[str, Any], end: datetime) -> bool:
-    value = part.get("end")
-    if not isinstance(value, str):
-        state = _state(part)
-        time_data = state.get("time")
-        time_data = time_data if isinstance(time_data, dict) else {}
-        value = time_data.get("end", state.get("end", state.get("completed")))
-    if not isinstance(value, str):
-        return False
-    try:
-        completed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return completed < end
-
-
-def _message_bucket(
-    message: dict[str, Any], start: datetime, end: datetime
-) -> str | None:
+def _message_bucket(message: dict[str, Any]) -> str | None:
     roles = message.get("temporal_roles", ())
     parts = message.get("parts", ())
     if any(
@@ -257,120 +114,6 @@ def _header(role: str, timestamp: str | None) -> str:
     return f"**{role}{f' · {timestamp}' if timestamp else ''}**"
 
 
-def _render_error(lines: list[str], tool: str, error: str) -> None:
-    lines.extend([f"### {tool} failed", "", error, ""])
-
-
-def _render_tool(  # noqa: PLR0911, PLR0915
-    lines: list[str],
-    part: dict[str, Any],
-    directory: str,
-    timezone: tzinfo,
-    end: datetime,
-) -> None:
-    part = _effective_part(part, end)
-    tool = _tool_name(part)
-    error = _error(part)
-    if error is not None and not _completed_before_cutoff(part, end):
-        error = None
-    if error is not None:
-        _render_error(lines, tool, error)
-        return
-    state = _state(part)
-    if tool == "task":
-        description = _task_description(part)
-        lines.extend(
-            [f"### Delegated task{f': {description}' if description else ''}", ""]
-        )
-        status = state.get("status")
-        completed_before_cutoff = _completed_before_cutoff(part, end)
-        if status in {"running", "pending"} or not completed_before_cutoff:
-            lines.extend(["Incomplete task.", ""])
-        output = _task_output(part) if completed_before_cutoff else None
-        if output is not None:
-            rendered = (
-                output
-                if isinstance(output, str)
-                else json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True)
-            )
-            lines.extend(
-                [
-                    "Result:",
-                    "",
-                    *fenced(rendered, "text" if isinstance(output, str) else "json"),
-                    "",
-                ]
-            )
-        return
-    if tool == "question":
-        questions = _question_text(_tool_input(part))
-        lines.extend(["### Question", ""])
-        if questions is not None:
-            rendered = (
-                questions
-                if isinstance(questions, str)
-                else json.dumps(questions, ensure_ascii=False, indent=2, sort_keys=True)
-            )
-            lines.extend(
-                fenced(rendered, "text" if isinstance(questions, str) else "json")
-            )
-            lines.append("")
-        answers = _answers(part) if _completed_before_cutoff(part, end) else None
-        if answers is not None:
-            rendered = (
-                answers
-                if isinstance(answers, str)
-                else json.dumps(answers, ensure_ascii=False, indent=2, sort_keys=True)
-            )
-            lines.extend(
-                [
-                    "Human answer:",
-                    "",
-                    *fenced(rendered, "text" if isinstance(answers, str) else "json"),
-                    "",
-                ]
-            )
-        return
-    tool_input = _tool_input(part)
-    if tool == "apply_patch":
-        paths = _patch_paths(
-            tool_input.get("patchText") if isinstance(tool_input, dict) else None
-        )
-        if paths:
-            lines.extend(
-                [
-                    "### Changed files",
-                    "",
-                    *[f"- {_path(path, directory)}" for path in paths],
-                    "",
-                ]
-            )
-        return
-    if tool in {"edit", "write"}:
-        file_path = tool_input.get("filePath") if isinstance(tool_input, dict) else None
-        file_path = file_path or (
-            tool_input.get("path") if isinstance(tool_input, dict) else None
-        )
-        rendered_path = _path(file_path, directory)
-        if rendered_path:
-            lines.extend([f"### {tool}", "", f"File: `{rendered_path}`", ""])
-        return
-    if tool == "bash":
-        command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        workdir = tool_input.get("workdir") if isinstance(tool_input, dict) else None
-        lines.extend(["### bash", ""])
-        if isinstance(command, str):
-            lines.extend(fenced(command, "bash"))
-        rendered_workdir = _workdir(workdir, directory)
-        if rendered_workdir:
-            lines.extend(["", f"Workdir: `{rendered_workdir}`"])
-        lines.append("")
-        return
-    if tool in _LOW_VALUE_TOOLS:
-        return
-    # Unknown successful tools are intentionally omitted.
-
-
 def _render_messages(
     item: ContextItem, result: ContextExtractionResult, bucket: str
 ) -> list[str]:
@@ -378,44 +121,54 @@ def _render_messages(
     projection = item.opencode
     timezone = result.request.start.tzinfo
     assert timezone is not None
-    directory = _session_context(item).get("working_directory", ".")
     lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
+    messages: list[tuple[dict[str, Any], str, list[str]]] = []
     for message in projection.messages:
-        message_bucket = _message_bucket(
-            message, result.request.start, result.request.end
-        )
-        if message_bucket != bucket:
+        message_bucket = _message_bucket(message)
+        role = message.get("role")
+        role = role.lower() if isinstance(role, str) else ""
+        if message_bucket != bucket or role not in {"user", "assistant"}:
             continue
-        role = (
-            message.get("role") if isinstance(message.get("role"), str) else "message"
-        )
-        timestamp = format_timestamp(message.get("created"), timezone)
-        lines.extend([_header(str(role), timestamp), ""])
+        texts: list[str] = []
         for part in message.get("parts", ()):
             if (
                 not isinstance(part, dict)
                 or _part_bucket(part, message_bucket) != bucket
+                or part.get("type") != "text"
             ):
                 continue
-            part_type = part.get("type")
-            effective_part = _effective_part(part, result.request.end)
-            value = _part_value(effective_part)
-            if part_type == "text":
-                text = value.get("text", part.get("text"))
-                if isinstance(text, str) and text:
-                    lines.extend([text, ""])
-            elif (
-                part_type in {"tool", "task", "question"}
-                or _tool_name(part) == "question"
-            ):
-                _render_tool(
-                    lines, effective_part, directory, timezone, result.request.end
-                )
-            elif part_type == "compaction" or value.get("synthetic") is True:
-                lines.extend(
-                    ["Supporting context retained from an earlier compaction.", ""]
-                )
-    return [] if lines[-1] == "" and len(lines) == _EMPTY_DOCUMENT_LINES else lines
+            value = _part_value(part)
+            text = value.get("text", part.get("text"))
+            if isinstance(text, str) and text:
+                texts.append(text)
+        messages.append((message, role, texts))
+
+    if bucket == "background":
+        user_positions = [
+            index for index, (_, role, _) in enumerate(messages) if role == "user"
+        ]
+        if len(user_positions) > _BACKGROUND_USER_TURN_LIMIT:
+            retained_users = set(user_positions[-_BACKGROUND_USER_TURN_LIMIT:])
+            retained: list[tuple[dict[str, Any], str, list[str]]] = []
+            retain_assistant = False
+            for index, entry in enumerate(messages):
+                _, role, _ = entry
+                if role == "user":
+                    retain_assistant = index in retained_users
+                if index in retained_users or (
+                    role == "assistant" and retain_assistant
+                ):
+                    retained.append(entry)
+            messages = retained
+
+    for message, role, texts in messages:
+        if not texts:
+            continue
+        timestamp = format_timestamp(message.get("created"), timezone)
+        lines.extend([_header(str(role), timestamp), ""])
+        for text in texts:
+            lines.extend([text, ""])
+    return lines if len(lines) > _MINIMUM_RENDERED_LINES else []
 
 
 def render_opencode(
@@ -444,3 +197,79 @@ def render_opencode(
     if background:
         files["background.md"] = background
     return files
+
+
+def _paragraphs(lines: list[str]) -> list[tuple[int, int, str]]:
+    paragraphs: list[tuple[int, int, str]] = []
+    section_start: int | None = None
+    for index, line in enumerate([*lines, ""]):
+        match = _MESSAGE_HEADER.fullmatch(line)
+        if match is not None:
+            section_start = index + 1 if match.group(1) == "User" else None
+            continue
+        if section_start is None:
+            continue
+        if line.strip():
+            continue
+        if section_start < index:
+            paragraph_lines = lines[section_start:index]
+            canonical = "\n".join(line.rstrip() for line in paragraph_lines)
+            paragraphs.append((section_start, index, canonical))
+        section_start = index + 1
+    return paragraphs
+
+
+def deduplicate_opencode_user_text(staging: Path) -> None:
+    """Share repeated long User paragraphs across rendered OpenCode files."""
+    occurrences: dict[str, list[tuple[Path, int, int, str]]] = {}
+    for path in sorted((staging / "opencode").rglob("*.md")):
+        if path.name not in {"activity.md", "background.md"}:
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for start, end, canonical in _paragraphs(lines):
+            if len(canonical.encode("utf-8")) < _REPEATED_TEXT_MINIMUM_BYTES:
+                continue
+            occurrences.setdefault(canonical, []).append(
+                (path, start, end, "\n".join(lines[start:end]))
+            )
+    repeated = {
+        text: entries
+        for text, entries in occurrences.items()
+        if len(entries) >= _MINIMUM_DUPLICATE_OCCURRENCES
+    }
+    if not repeated:
+        return
+
+    shared_lines = ["# Repeated User Text", ""]
+    digests: dict[str, str] = {}
+    for canonical in sorted(repeated):
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[
+            :_REPEATED_TEXT_DIGEST_LENGTH
+        ]
+        digests[canonical] = digest
+        shared_lines.extend([f"## sha256-{digest}", ""])
+        shared_lines.extend(repeated[canonical][0][3].splitlines())
+        shared_lines.append("")
+
+    shared = staging / "opencode" / "_shared" / "repeated-user-text.md"
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    shared.write_text("\n".join(shared_lines).rstrip() + "\n", encoding="utf-8")
+
+    for path in sorted(
+        {entry[0] for entries in repeated.values() for entry in entries}
+    ):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        replacements: list[tuple[int, int, str]] = []
+        for start, end, canonical in _paragraphs(lines):
+            if canonical not in repeated:
+                continue
+            relative = path.relative_to(staging / "opencode")
+            prefix = "../" * len(relative.parent.parts)
+            reference = (
+                f"[repeated User text]({prefix}_shared/repeated-user-text.md"
+                f"#sha256-{digests[canonical]})"
+            )
+            replacements.append((start, end, reference))
+        for start, end, replacement in reversed(replacements):
+            lines[start:end] = [replacement]
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")

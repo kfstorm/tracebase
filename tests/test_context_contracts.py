@@ -213,6 +213,37 @@ def opencode_activity(
     return text(output, "activity.md")
 
 
+def publish_user_text_pair(archive: Archive, value: str) -> None:
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "earlier",
+                    "2025-12-31T01:00:00Z",
+                    [{"type": "text", "text": value}],
+                ),
+                message(
+                    "current",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": value}],
+                ),
+            ],
+        ),
+        "run",
+    )
+
+
+def assert_outputs_equal(one: Path, two: Path) -> None:
+    assert files(one) == files(two)
+    assert b"".join(
+        path.read_bytes() for path in sorted(one.rglob("*")) if path.is_file()
+    ) == b"".join(
+        path.read_bytes() for path in sorted(two.rglob("*")) if path.is_file()
+    )
+
+
 def github_output(
     archive: Archive, tmp_path: Path, evidence: dict[str, object | str]
 ) -> Path:
@@ -927,64 +958,29 @@ def test_opencode_child_sessions_are_not_independent_documents(tmp_path: Path) -
     assert len(list(output.rglob("overview.md"))) == 1
 
 
-def test_task_output_question_and_error_projection(tmp_path: Path) -> None:
+def test_opencode_keeps_text_and_drops_task_question_and_other_tools(
+    tmp_path: Path,
+) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     parts = [
-        {
-            "type": "tool",
-            "tool": "task",
-            "description": "inspect",
-            "state": {
-                "status": "completed",
-                "time": {
-                    "start": "2026-01-01T01:00:00Z",
-                    "end": "2026-01-01T01:01:00Z",
-                },
-                "output": (
-                    '<task id="ses_child" state="completed">'
-                    "<task_result>parent result</task_result></task>"
-                ),
-                "sessionId": "child",
-            },
-        },
-        {
-            "type": "tool",
-            "tool": "question",
-            "state": {
-                "status": "completed",
-                "time": {
-                    "start": "2026-01-01T02:00:00Z",
-                    "end": "2026-01-01T02:01:00Z",
-                },
-                "input": {"questions": ["Continue?"]},
-                "metadata": {"answers": ["yes"]},
-            },
-        },
-        {
-            "type": "tool",
-            "tool": "read",
-            "state": {
-                "status": "error",
-                "time": {
-                    "start": "2026-01-01T03:00:00Z",
-                    "end": "2026-01-01T03:01:00Z",
-                },
-                "input": {"path": "secret"},
-                "error": "read failed",
-            },
-        },
+        {"type": "text", "text": "kept user text"},
+        {"type": "tool", "tool": "task"},
+        {"type": "tool", "tool": "question"},
+        {"type": "tool", "tool": "bash"},
+        {"type": "tool", "tool": "edit"},
+        {"type": "tool", "tool": "write"},
+        {"type": "tool", "tool": "unknown"},
     ]
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T00:30:00Z")
-    assert "parent result" in activity
-    assert "task_result" not in activity
-    assert "ses_child" not in activity
-    assert "Continue?" in activity and "yes" in activity
-    assert "read failed" in activity and "secret" not in activity
-    assert "sessionId" not in activity
+    assert "kept user text" in activity
+    assert "Delegated task" not in activity
+    assert "Question" not in activity
+    assert "bash" not in activity
+    assert "unknown" not in activity
 
 
-def test_task_completed_after_cutoff_is_incomplete_without_future_output(
+def test_opencode_tool_only_background_has_no_rendered_document(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -1008,9 +1004,7 @@ def test_task_completed_after_cutoff_is_incomplete_without_future_output(
     )
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    activity = text(output, "activity.md")
-    assert "Incomplete task." in activity
-    assert "future result" not in activity
+    assert not list(output.rglob("activity.md"))
 
 
 def test_unknown_task_end_is_not_active_on_later_request_day(tmp_path: Path) -> None:
@@ -1042,7 +1036,7 @@ def test_unknown_task_end_is_not_active_on_later_request_day(tmp_path: Path) -> 
     assert not list(output.rglob("activity.md"))
 
 
-def test_historical_backfill_uses_native_completion_for_outcomes(
+def test_historical_tool_outcomes_are_not_rendered(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -1112,17 +1106,16 @@ def test_historical_backfill_uses_native_completion_for_outcomes(
         ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-01T16:00:00Z"),
         output,
     )
-    activity = text(output, "activity.md")
-    assert "historical result" in activity
-    assert "yes" in activity
-    assert "historical error" in activity
-    assert "post-cutoff result" not in activity
+    assert not list(output.rglob("activity.md"))
 
 
-def test_opencode_cutoff_hides_later_text_answers_and_errors(tmp_path: Path) -> None:
+def test_opencode_cutoff_hides_later_text_when_tools_are_removed(
+    tmp_path: Path,
+) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     parts = [
+        {"type": "text", "text": "retained text"},
         {
             "type": "text",
             "text": "future text",
@@ -1157,17 +1150,18 @@ def test_opencode_cutoff_hides_later_text_answers_and_errors(tmp_path: Path) -> 
     ]
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T14:00:00Z")
 
-    assert "Incomplete task." in activity
+    assert "retained text" in activity
     assert "future text" not in activity
     assert "future task result" not in activity
     assert "future task error" not in activity
     assert "future answer" not in activity
 
 
-def test_opencode_tool_whitelist_and_path_compaction(tmp_path: Path) -> None:
+def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     parts = [
+        {"type": "text", "text": "text remains"},
         {
             "type": "tool",
             "tool": "apply_patch",
@@ -1240,11 +1234,10 @@ def test_opencode_tool_whitelist_and_path_compaction(tmp_path: Path) -> None:
         },
     ]
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T00:30:00Z")
-    assert "src/foo.py" in activity and "src/bar.py" in activity
-    assert "@@ ignored hunk" not in activity
-    assert "old secret" not in activity and "body secret" not in activity
-    assert "pytest" in activity and "timeout" not in activity
-    assert "/tmp/elsewhere" in activity
+    assert "text remains" in activity
+    assert "src/foo.py" not in activity and "src/bar.py" not in activity
+    assert "pytest" not in activity
+    assert "/tmp/elsewhere" not in activity
     assert "hidden" not in activity
 
 
@@ -1264,13 +1257,132 @@ def test_opencode_equal_workdir_is_omitted_and_relative_paths_are_normalized(
     }
     publish_opencode(
         archive,
-        session("root", messages=[message("m", "2026-01-01T00:30:00Z", [part])]),
+        session(
+            "root",
+            messages=[
+                message(
+                    "m",
+                    "2026-01-01T00:30:00Z",
+                    [{"type": "text", "text": "text remains"}, part],
+                )
+            ],
+        ),
         "run",
     )
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     activity = text(output, "activity.md")
+    assert "text remains" in activity
     assert "Workdir" not in activity
+
+
+def test_opencode_background_window_keeps_latest_three_users_and_assistants(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    messages: list[dict[str, object]] = []
+    for index in range(1, 6):
+        messages.extend(
+            [
+                message(
+                    f"user-{index}",
+                    f"2025-12-31T0{index}:00:00Z",
+                    [{"type": "text", "text": f"user-{index}"}],
+                ),
+                message(
+                    f"assistant-{index}",
+                    f"2025-12-31T0{index}:30:00Z",
+                    [{"type": "text", "text": f"assistant-{index}"}],
+                    role="assistant",
+                ),
+            ]
+        )
+    messages.append(
+        message(
+            "current",
+            "2026-01-01T01:00:00Z",
+            [{"type": "text", "text": "current work"}],
+        )
+    )
+    publish_opencode(archive, session("root", messages=messages), "run")
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    background = text(output, "background.md")
+    for index in (1, 2):
+        assert f"user-{index}" not in background
+        assert f"assistant-{index}" not in background
+    for index in (3, 4, 5):
+        assert f"user-{index}" in background
+        assert f"assistant-{index}" in background
+
+
+def test_opencode_background_without_user_turns_is_retained(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "assistant-only",
+                    "2025-12-31T01:00:00Z",
+                    [{"type": "text", "text": "assistant-only background"}],
+                    role="assistant",
+                ),
+                message(
+                    "current",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": "current work"}],
+                ),
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert "assistant-only background" in text(output, "background.md")
+
+
+def test_opencode_repeated_long_user_text_uses_shared_file_and_stable_hash(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    repeated = ("Repeated context paragraph. " * 9) + "Repeated context paragraph."
+    publish_user_text_pair(archive, repeated)
+
+    one, two = tmp_path / "one", tmp_path / "two"
+    generate_context(archive.root, request(), one)
+    generate_context(archive.root, request(), two)
+    shared = one / "opencode" / "_shared" / "repeated-user-text.md"
+    assert shared.exists()
+    digest = hashlib.sha256(repeated.encode("utf-8")).hexdigest()[:16]
+    assert shared.read_text().count(repeated) == 1
+    assert f"sha256-{digest}" in shared.read_text()
+    assert text(one, "activity.md").count(f"#sha256-{digest}") == 1
+    assert text(one, "background.md").count(f"#sha256-{digest}") == 1
+    assert repeated not in text(one, "activity.md")
+    assert repeated not in text(one, "background.md")
+    assert_outputs_equal(one, two)
+
+
+def test_opencode_repeated_user_text_below_threshold_is_not_shared(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    repeated = "short repeated text"
+    publish_user_text_pair(archive, repeated)
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert not (output / "opencode" / "_shared" / "repeated-user-text.md").exists()
+    assert repeated in text(output, "activity.md")
+    assert repeated in text(output, "background.md")
 
 
 def test_deterministic_output_and_raw_archive_unchanged(tmp_path: Path) -> None:
@@ -1293,12 +1405,7 @@ def test_deterministic_output_and_raw_archive_unchanged(tmp_path: Path) -> None:
         if path.is_file()
     }
     assert before == after
-    assert files(one) == files(two)
-    assert b"".join(
-        path.read_bytes() for path in sorted(one.rglob("*")) if path.is_file()
-    ) == b"".join(
-        path.read_bytes() for path in sorted(two.rglob("*")) if path.is_file()
-    )
+    assert_outputs_equal(one, two)
 
 
 def test_publication_errors_leave_no_partial_output(
