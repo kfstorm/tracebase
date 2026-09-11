@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,7 +17,6 @@ class OpenCodeProjection:
     selected: bool
     session: dict[str, Any]
     messages: tuple[dict[str, Any], ...]
-    gaps: tuple[dict[str, str], ...]
 
     @property
     def session_id(self) -> str:
@@ -38,121 +37,6 @@ class OpenCodeProjection:
         if parent is None:
             parent = value.get("parentID")
         return parent if isinstance(parent, str) else None
-
-    @property
-    def parent_value(self) -> Any:
-        value = self.session.get("value")
-        value = value if isinstance(value, dict) else {}
-        info = value.get("info")
-        parent = info.get("parentID") if isinstance(info, dict) else None
-        return parent if parent is not None else value.get("parentID")
-
-    @property
-    def task_child_references(self) -> tuple[dict[str, str], ...]:
-        references: list[dict[str, str]] = []
-        for message in self.messages:
-            for part in message.get("parts", ()):
-                if not _part_is_task(part):
-                    continue
-                if "in_range_work" not in part.get("temporal_roles", ()):
-                    continue
-                value = part.get("value")
-                value = value if isinstance(value, dict) else {}
-                state = value.get("state")
-                metadata = state.get("metadata") if isinstance(state, dict) else None
-                if not isinstance(metadata, dict):
-                    continue
-                parent_id = metadata.get("parentSessionId")
-                if parent_id != self.session_id:
-                    continue
-                child_id = metadata.get("sessionId")
-                if isinstance(child_id, str) and child_id:
-                    references.append({"child_id": child_id})
-                else:
-                    references.append({"malformed": "true"})
-        return tuple(references)
-
-
-def resolve_opencode_context(
-    projections: tuple[OpenCodeProjection, ...],
-) -> tuple[OpenCodeProjection, ...]:
-    """Expand selected OpenCode sessions through their native session graph."""
-    by_session_id = {projection.session_id: projection for projection in projections}
-    selected_ids = {
-        projection.session_id for projection in projections if projection.selected
-    }
-    graph_gaps: dict[str, list[dict[str, str]]] = {}
-
-    for selected_id in selected_ids:
-        current_id = selected_id
-        current_projection = by_session_id[selected_id]
-        parent_value = current_projection.parent_value
-        parent_id = current_projection.parent_id
-        seen: set[str] = set()
-        if parent_value is not None and not isinstance(parent_value, str):
-            graph_gaps.setdefault(current_id, []).append(
-                {
-                    "kind": "malformed-session-parent",
-                    "session_id": current_projection.session_id,
-                }
-            )
-        while isinstance(parent_id, str) and parent_id not in seen:
-            seen.add(parent_id)
-            parent = by_session_id.get(parent_id)
-            if parent is None:
-                graph_gaps.setdefault(current_id, []).append(
-                    {
-                        "kind": "missing-session-parent",
-                        "session_id": current_projection.session_id,
-                        "parent_id": parent_id,
-                    }
-                )
-                break
-            current_id = parent_id
-            current_projection = parent
-            parent_value = current_projection.parent_value
-            if parent_value is not None and not isinstance(parent_value, str):
-                graph_gaps.setdefault(current_id, []).append(
-                    {
-                        "kind": "malformed-session-parent",
-                        "session_id": current_projection.session_id,
-                    }
-                )
-                break
-            parent_id = current_projection.parent_id
-        if isinstance(parent_id, str) and parent_id in seen:
-            graph_gaps.setdefault(current_id, []).append(
-                {
-                    "kind": "cyclic-session-parent",
-                    "session_id": current_projection.session_id,
-                    "parent_id": parent_id,
-                }
-            )
-
-        for reference in by_session_id[selected_id].task_child_references:
-            if "malformed" in reference:
-                graph_gaps.setdefault(selected_id, []).append(
-                    {"kind": "malformed-task-child", "session_id": selected_id}
-                )
-                continue
-            child_id = reference["child_id"]
-            if child_id not in by_session_id:
-                graph_gaps.setdefault(selected_id, []).append(
-                    {
-                        "kind": "missing-task-child",
-                        "session_id": selected_id,
-                        "child_id": child_id,
-                    }
-                )
-
-    resolved: list[OpenCodeProjection] = []
-    for original in projections:
-        gaps = original.gaps + tuple(graph_gaps.get(original.session_id, ()))
-        resolved_projection = original
-        if gaps:
-            resolved_projection = replace(original, gaps=gaps)
-        resolved.append(resolved_projection)
-    return tuple(resolved)
 
 
 def _timestamp(value: Any) -> datetime:
@@ -379,7 +263,6 @@ def project_opencode(  # noqa: PLR0915
     session: dict[str, Any] = {"value": {}, "representations": []}
     latest_header: dict[str, Any] = {}
     messages_by_id: dict[str, dict[str, Any]] = {}
-    gaps: list[dict[str, str]] = []
     for snapshot in snapshots:
         payload = _json(snapshot)
         info = payload.get("info")
@@ -416,7 +299,7 @@ def project_opencode(  # noqa: PLR0915
                 raise ArchiveError("OpenCode message payload is invalid")
             supporting_message = _supporting_message(message, parts)
             record["_created_time"] = message_time
-            record["_supporting"] = supporting_message
+            record["_supporting_message"] = supporting_message
             if supporting_message:
                 record["temporal_roles"] = ("observed_state",)
             parts_by_id: dict[str, dict[str, Any]] = {}
@@ -457,8 +340,10 @@ def project_opencode(  # noqa: PLR0915
             if prior is None:
                 messages_by_id[message_id] = record
             else:
-                prior["_supporting"] = prior["_supporting"] or record["_supporting"]
-                if prior["_supporting"]:
+                prior["_supporting_message"] = (
+                    prior["_supporting_message"] or record["_supporting_message"]
+                )
+                if prior["_supporting_message"]:
                     prior["temporal_roles"] = ("observed_state",)
                 prior_parts = {part["id"]: part for part in prior.get("parts", ())}
                 for part in record.get("parts", ()):
@@ -516,32 +401,16 @@ def project_opencode(  # noqa: PLR0915
         )
         for part in message.get("parts", ()):
             _refresh_part_roles(part, start, end)
-            if part.get("completion") == "unknown":
-                gaps.append(
-                    {
-                        "kind": "unknown-completion",
-                        "message_id": message["id"],
-                        "part_id": part["id"],
-                    }
-                )
             part.pop("intervals", None)
             part.pop("_start_time", None)
         message.pop("_created_time", None)
-    if not any(
-        (not record["_supporting"] and "in_range_work" in record["temporal_roles"])
-        or any(
-            not record["_supporting"]
-            and _part_is_work(part)
-            and "in_range_work" in part["temporal_roles"]
-            for part in record.get("parts", ())
-        )
-        for record in messages
-    ):
-        gaps.append({"kind": "no_in_range_messages", "reason": "bounded_range"})
     selected = any(
-        (not message["_supporting"] and "in_range_work" in message["temporal_roles"])
+        (
+            not message["_supporting_message"]
+            and "in_range_work" in message["temporal_roles"]
+        )
         or any(
-            not message["_supporting"]
+            not message["_supporting_message"]
             and _part_is_work(part)
             and "in_range_work" in part["temporal_roles"]
             for part in message.get("parts", ())
@@ -550,11 +419,8 @@ def project_opencode(  # noqa: PLR0915
     )
     if not selected:
         messages = []
-    for message in messages:
-        message.pop("_supporting", None)
     return OpenCodeProjection(
         selected,
         session,
         tuple(messages),
-        tuple(gaps),
     )

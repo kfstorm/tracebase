@@ -15,6 +15,7 @@ from tracebase.archive import (
 from tracebase.context import (
     ContextError,
     ContextRequest,
+    extract_context,
     generate_context,
     load_archive,
 )
@@ -856,6 +857,270 @@ def test_opencode_root_session_uses_title_directory_and_compact_activity(
     assert "Message" not in activity
     assert "m" not in activity
     assert "2026-01-01 00:30" in activity
+    assert "Context limitations" not in text(output, "overview.md")
+
+
+def test_opencode_index_has_no_public_gap_section_or_obsolete_gap_kinds(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "current",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": "work"}],
+                )
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    index = (output / "index.md").read_text()
+
+    assert "## Gaps" not in index
+    for kind in (
+        "malformed-session-parent",
+        "missing-session-parent",
+        "cyclic-session-parent",
+        "malformed-task-child",
+        "missing-task-child",
+        "unknown-completion",
+        "no_in_range_messages",
+    ):
+        assert kind not in index
+
+
+def test_opencode_compaction_and_synthetic_text_are_not_rendered_or_counted(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    compaction_text = "compaction transcript <｜DSML｜tool_call> must stay out"
+    synthetic_text = "synthetic continuation must stay out"
+    compaction = message(
+        "compaction",
+        "2026-01-01T00:10:00Z",
+        [{"type": "text", "text": compaction_text}],
+        role="assistant",
+    )
+    compaction["info"] = {"mode": "compaction"}
+    synthetic = message(
+        "synthetic",
+        "2025-12-31T00:30:00Z",
+        [{"type": "text", "text": synthetic_text, "synthetic": True}],
+    )
+    summary_text = "summary transcript must stay out"
+    summary = message(
+        "summary",
+        "2026-01-01T00:11:00Z",
+        [{"type": "text", "text": summary_text}],
+        role="assistant",
+    )
+    summary["info"] = {"summary": True}
+    agent_text = "agent transcript must stay out"
+    agent = message(
+        "agent",
+        "2026-01-01T00:12:00Z",
+        [{"type": "text", "text": agent_text}],
+        role="assistant",
+    )
+    agent["info"] = {"agent": "compaction"}
+    continuation_text = "continuation transcript must stay out"
+    continuation = message(
+        "continuation",
+        "2026-01-01T00:13:00Z",
+        [
+            {
+                "type": "text",
+                "text": continuation_text,
+                "metadata": {"compaction_continue": True},
+            }
+        ],
+    )
+    compaction_part_text = "compaction part transcript must stay out"
+    compaction_part = message(
+        "compaction-part",
+        "2026-01-01T00:14:00Z",
+        [{"type": "compaction", "text": compaction_part_text}],
+        role="assistant",
+    )
+    hidden_texts = (
+        compaction_text,
+        synthetic_text,
+        summary_text,
+        agent_text,
+        continuation_text,
+        compaction_part_text,
+    )
+    messages: list[dict[str, object]] = [
+        compaction,
+        synthetic,
+        summary,
+        agent,
+        continuation,
+        compaction_part,
+        *(
+            message(
+                f"background-{index}",
+                f"2025-12-31T0{index}:00:00Z",
+                [{"type": "text", "text": f"background-{index}"}],
+            )
+            for index in range(1, 4)
+        ),
+    ]
+    messages.append(
+        message(
+            "current",
+            "2026-01-01T01:00:00Z",
+            [{"type": "text", "text": "current work"}],
+        )
+    )
+    publish_opencode(archive, session("root", messages=messages), "run")
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    activity = text(output, "activity.md")
+    background = text(output, "background.md")
+
+    assert "current work" in activity
+    for hidden_text in hidden_texts:
+        assert hidden_text not in activity and hidden_text not in background
+    for index in range(1, 4):
+        assert f"background-{index}" in background
+
+
+def test_opencode_non_compaction_assistant_keeps_dsml_like_text(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    assistant_text = "normal assistant <｜DSML｜tool_call> text"
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "assistant",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": assistant_text}],
+                    role="assistant",
+                )
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    activity = text(output, "activity.md")
+    assert "**Assistant" in activity
+    assert assistant_text in activity
+
+
+def test_opencode_non_text_selection_has_local_context_limitation(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    tool = {
+        "type": "tool",
+        "tool": "bash",
+        "state": {
+            "status": "completed",
+            "time": {
+                "start": "2026-01-01T01:00:00Z",
+                "end": "2026-01-01T01:01:00Z",
+            },
+        },
+    }
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[message("tool", "2025-12-31T10:00:00Z", [tool])],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    overview = text(output, "overview.md")
+    assert (
+        "## Context limitations\n\n"
+        "No in-range User or Assistant work text is retained for this session; "
+        "it was selected by in-range non-text activity."
+    ) in overview
+    assert not list(output.rglob("activity.md"))
+    assert "## Gaps" not in (output / "index.md").read_text()
+
+
+def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    running_tool = {
+        "id": "bash",
+        "type": "tool",
+        "tool": "bash",
+        "state": {
+            "status": "running",
+            "time": {"start": "2026-01-01T01:00:00Z"},
+        },
+    }
+    publish_opencode(
+        archive,
+        session(
+            "root", messages=[message("tool", "2026-01-01T01:00:00Z", [running_tool])]
+        ),
+        "before-completion",
+        from_text="2025-12-30T00:00:00+00:00",
+        to_text="2026-01-01T00:00:00+00:00",
+    )
+
+    before = extract_context(request(), load_archive(archive.root))
+    before_part = before.items[0].opencode.messages[0]["parts"][0]
+    assert before_part["completion"] == "unknown"
+
+    completed_tool = {
+        **running_tool,
+        "state": {
+            "status": "completed",
+            "time": {
+                "start": "2026-01-01T01:00:00Z",
+                "end": "2026-01-01T01:01:00Z",
+            },
+        },
+    }
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[message("tool", "2026-01-01T01:00:00Z", [completed_tool])],
+        ),
+        "after-completion",
+        from_text="2026-01-02T00:00:00+00:00",
+        to_text="2026-01-03T00:00:00+00:00",
+    )
+
+    after = extract_context(request(), load_archive(archive.root))
+    after_part = after.items[0].opencode.messages[0]["parts"][0]
+    assert after_part["end"] == "2026-01-01T01:01:00+00:00"
+    assert "completion" not in after_part
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert "## Gaps" not in (output / "index.md").read_text()
 
 
 def test_opencode_groups_by_project_worktree_and_shows_distinct_workdirs(
