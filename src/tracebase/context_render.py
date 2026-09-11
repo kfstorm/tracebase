@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 from .context import ContextError, ContextExtractionResult, ContextItem
 
@@ -66,10 +66,16 @@ def _root_gaps(items: tuple[ContextItem, ...]) -> list[dict[str, str]]:
 
 def _render_item(
     staging: Path, item: ContextItem, result: ContextExtractionResult
-) -> list[tuple[str, str]]:
+) -> tuple[
+    list[tuple[str, str]],
+    dict[str, list[str] | bytes],
+    Path,
+    Any | None,
+]:
     item_root = staging.joinpath(*PurePosixPath(item.path).parts)
     item_root.mkdir(parents=True, exist_ok=True)
     files: dict[str, list[str] | bytes] = {}
+    opencode_render: Any | None = None
     if item.github is not None:
         from .github_context_render import render_github  # noqa: PLC0415
 
@@ -77,17 +83,12 @@ def _render_item(
     elif item.opencode is not None:
         from .opencode_context_render import render_opencode  # noqa: PLC0415
 
-        files.update(render_opencode(item, result))
+        opencode_render = render_opencode(item, result)
+        files = cast(dict[str, list[str] | bytes], opencode_render.files)
     else:
         raise ContextError("context item has no source projection")
-    rendered: list[tuple[str, str]] = []
-    for name, content in files.items():
-        if isinstance(content, bytes):
-            (item_root / name).write_bytes(content)
-        else:
-            write_markdown(item_root / name, content)
-        rendered.append((f"{item.path}/{name}", name))
-    return rendered
+    rendered = [(f"{item.path}/{name}", name) for name in files]
+    return rendered, files, item_root, opencode_render
 
 
 def _link_list(paths: list[str]) -> str:
@@ -235,15 +236,51 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
             raise ContextError("context output publication failed") from None
         assert staging is not None
         try:
-            rendered = [
-                (item, _render_item(staging, item, result)) for item in result.items
+            prepared: list[
+                tuple[
+                    ContextItem,
+                    list[tuple[str, str]],
+                    dict[str, list[str] | bytes],
+                    Path,
+                    Any | None,
+                ]
+            ] = []
+            for item in result.items:
+                item_rendered, item_files, item_root, opencode_render = _render_item(
+                    staging, item, result
+                )
+                prepared.append(
+                    (item, item_rendered, item_files, item_root, opencode_render)
+                )
+            opencode_renders = [
+                prepared_item[4]
+                for prepared_item in prepared
+                if prepared_item[4] is not None
             ]
-            if any(item.opencode is not None for item, _ in rendered):
+            if opencode_renders:
                 from .opencode_context_render import (  # noqa: PLC0415
+                    OpenCodeRender,
                     deduplicate_opencode_user_text,
+                    write_opencode_markdown,
                 )
 
-                deduplicate_opencode_user_text(staging)
+                deduplicate_opencode_user_text(
+                    staging,
+                    [
+                        render
+                        for render in opencode_renders
+                        if isinstance(render, OpenCodeRender)
+                    ],
+                )
+            rendered = [(item, item_rendered) for item, item_rendered, *_ in prepared]
+            for _item, _, files, item_root, opencode_render in prepared:
+                for name, content in files.items():
+                    if isinstance(content, bytes):
+                        (item_root / name).write_bytes(content)
+                    elif opencode_render is not None:
+                        write_opencode_markdown(item_root / name, content)
+                    else:
+                        write_markdown(item_root / name, content)
             _render_index(staging, result, rendered)
         except ContextError:
             raise

@@ -1385,6 +1385,41 @@ def test_opencode_repeated_user_text_below_threshold_is_not_shared(
     assert repeated in text(output, "background.md")
 
 
+def test_opencode_user_markdown_is_not_reparsed_or_stripped(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    special = (
+        "**User**\n\n"
+        "```markdown\n"
+        "**Assistant**\n\n"
+        "fenced line with trailing spaces  \n"
+        "```\n\n"
+        "ordinary paragraph with trailing spaces  \n"
+        + ("long content " * 20)
+        + "final trailing spaces  "
+    )
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "current",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": special}],
+                )
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    activity = next(output.rglob("activity.md")).read_bytes()
+    assert activity.count(special.encode("utf-8")) == 1
+    assert not (output / "opencode" / "_shared" / "repeated-user-text.md").exists()
+
+
 def test_deterministic_output_and_raw_archive_unchanged(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
