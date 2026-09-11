@@ -54,6 +54,24 @@ def message(
     return {"id": message_id, "created": created, "role": role, "parts": parts or []}
 
 
+def append_user_assistant_turn(messages: list[dict[str, object]], index: int) -> None:
+    messages.extend(
+        [
+            message(
+                f"user-{index}",
+                f"2025-12-31T0{index}:00:00Z",
+                [{"type": "text", "text": f"user-{index}"}],
+            ),
+            message(
+                f"assistant-{index}",
+                f"2025-12-31T0{index}:30:00Z",
+                [{"type": "text", "text": f"assistant-{index}"}],
+                role="assistant",
+            ),
+        ]
+    )
+
+
 def session(
     session_id: str,
     *,
@@ -211,6 +229,15 @@ def opencode_activity(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     return text(output, "activity.md")
+
+
+def opencode_background(
+    archive: Archive, tmp_path: Path, messages: list[dict[str, object]]
+) -> str:
+    publish_opencode(archive, session("root", messages=messages), "run")
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    return text(output, "background.md")
 
 
 def publish_user_text_pair(archive: Archive, value: str) -> None:
@@ -1321,21 +1348,7 @@ def test_opencode_background_window_keeps_latest_three_users_and_assistants(
     archive.root.mkdir()
     messages: list[dict[str, object]] = []
     for index in range(1, 5):
-        messages.extend(
-            [
-                message(
-                    f"user-{index}",
-                    f"2025-12-31T0{index}:00:00Z",
-                    [{"type": "text", "text": f"user-{index}"}],
-                ),
-                message(
-                    f"assistant-{index}",
-                    f"2025-12-31T0{index}:30:00Z",
-                    [{"type": "text", "text": f"assistant-{index}"}],
-                    role="assistant",
-                ),
-            ]
-        )
+        append_user_assistant_turn(messages, index)
         if index == 2:
             messages.extend(
                 [
@@ -1366,11 +1379,7 @@ def test_opencode_background_window_keeps_latest_three_users_and_assistants(
             [{"type": "text", "text": "current work"}],
         )
     )
-    publish_opencode(archive, session("root", messages=messages), "run")
-
-    output = tmp_path / "output"
-    generate_context(archive.root, request(), output)
-    background = text(output, "background.md")
+    background = opencode_background(archive, tmp_path, messages)
     assert "user-1" not in background
     assert "assistant-1" not in background
     for index in (2, 3, 4):
@@ -1407,7 +1416,42 @@ def test_opencode_background_without_user_turns_is_retained(tmp_path: Path) -> N
     assert "assistant-only background" in text(output, "background.md")
 
 
-def test_opencode_repeated_long_user_text_uses_shared_file_and_stable_hash(
+@pytest.mark.parametrize("user_count", [1, 3, 4])
+def test_opencode_background_window_starts_at_latest_user_window(
+    tmp_path: Path, user_count: int
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    messages: list[dict[str, object]] = [
+        message(
+            "assistant-prefix",
+            "2025-12-31T00:30:00Z",
+            [{"type": "text", "text": "assistant-only prefix"}],
+            role="assistant",
+        )
+    ]
+    for index in range(1, user_count + 1):
+        append_user_assistant_turn(messages, index)
+    messages.append(
+        message(
+            "current",
+            "2026-01-01T01:00:00Z",
+            [{"type": "text", "text": "current work"}],
+        )
+    )
+    background = opencode_background(archive, tmp_path, messages)
+    assert "assistant-only prefix" not in background
+    first_retained = max(1, user_count - 2)
+    for index in range(1, user_count + 1):
+        if index < first_retained:
+            assert f"user-{index}" not in background
+            assert f"assistant-{index}" not in background
+        else:
+            assert f"user-{index}" in background
+            assert f"assistant-{index}" in background
+
+
+def test_opencode_repeated_long_user_text_remains_in_each_output(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -1418,19 +1462,13 @@ def test_opencode_repeated_long_user_text_uses_shared_file_and_stable_hash(
     one, two = tmp_path / "one", tmp_path / "two"
     generate_context(archive.root, request(), one)
     generate_context(archive.root, request(), two)
-    shared = one / "opencode" / "_shared" / "repeated-user-text.md"
-    assert shared.exists()
-    digest = hashlib.sha256(repeated.encode("utf-8")).hexdigest()[:16]
-    assert shared.read_text().count(repeated) == 1
-    assert f"sha256-{digest}" in shared.read_text()
-    assert text(one, "activity.md").count(f"#sha256-{digest}") == 1
-    assert text(one, "background.md").count(f"#sha256-{digest}") == 1
-    assert repeated not in text(one, "activity.md")
-    assert repeated not in text(one, "background.md")
+    assert not list(one.rglob("repeated-user-text.md"))
+    assert repeated in text(one, "activity.md")
+    assert repeated in text(one, "background.md")
     assert_outputs_equal(one, two)
 
 
-def test_opencode_repeated_user_text_below_threshold_is_not_shared(
+def test_opencode_repeated_user_text_is_rendered_without_shared_file(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -1440,12 +1478,13 @@ def test_opencode_repeated_user_text_below_threshold_is_not_shared(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert not (output / "opencode" / "_shared" / "repeated-user-text.md").exists()
     assert repeated in text(output, "activity.md")
     assert repeated in text(output, "background.md")
 
 
-def test_opencode_filtered_user_text_does_not_trigger_dedup(tmp_path: Path) -> None:
+def test_opencode_filtered_user_text_is_not_rendered_in_background(
+    tmp_path: Path,
+) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     repeated = "filtered user text. " * 12
@@ -1479,7 +1518,6 @@ def test_opencode_filtered_user_text_does_not_trigger_dedup(tmp_path: Path) -> N
     generate_context(archive.root, request(), output)
     assert repeated in text(output, "activity.md")
     assert repeated not in text(output, "background.md")
-    assert not (output / "opencode" / "_shared" / "repeated-user-text.md").exists()
 
 
 def test_opencode_user_markdown_is_not_reparsed_or_stripped(tmp_path: Path) -> None:
@@ -1514,7 +1552,6 @@ def test_opencode_user_markdown_is_not_reparsed_or_stripped(tmp_path: Path) -> N
     generate_context(archive.root, request(), output)
     activity = next(output.rglob("activity.md")).read_bytes()
     assert activity.count(special.encode("utf-8")) == 1
-    assert not (output / "opencode" / "_shared" / "repeated-user-text.md").exists()
 
 
 def test_deterministic_output_and_raw_archive_unchanged(tmp_path: Path) -> None:

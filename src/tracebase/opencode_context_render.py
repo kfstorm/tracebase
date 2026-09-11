@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
@@ -13,23 +11,6 @@ from .context_render import format_timestamp
 
 _BACKGROUND_USER_TURN_LIMIT = 3
 _MINIMUM_RENDERED_LINES = 2
-_MINIMUM_DUPLICATE_OCCURRENCES = 2
-_REPEATED_TEXT_DIGEST_LENGTH = 16
-_REPEATED_TEXT_MINIMUM_BYTES = 200
-
-
-@dataclass(frozen=True, slots=True)
-class UserTextOccurrence:
-    file_name: str
-    line_index: int
-    text: str
-
-
-@dataclass(slots=True)
-class OpenCodeRender:
-    item_path: str
-    files: dict[str, list[str]]
-    user_text_occurrences: tuple[UserTextOccurrence, ...]
 
 
 def _session_context(item: ContextItem) -> dict[str, str]:
@@ -112,13 +93,12 @@ def _header(role: str, timestamp: str | None) -> str:
 
 def _render_messages(
     item: ContextItem, result: ContextExtractionResult, bucket: str
-) -> tuple[list[str], list[UserTextOccurrence]]:
+) -> list[str]:
     assert item.opencode is not None
     projection = item.opencode
     timezone = result.request.start.tzinfo
     assert timezone is not None
     lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
-    occurrences: list[UserTextOccurrence] = []
     messages: list[tuple[dict[str, Any], str, list[str]]] = []
     for message in projection.messages:
         role = message.get("role")
@@ -144,33 +124,23 @@ def _render_messages(
         user_positions = [
             index for index, (_, role, _) in enumerate(messages) if role == "user"
         ]
-        if len(user_positions) > _BACKGROUND_USER_TURN_LIMIT:
-            retained_users = set(user_positions[-_BACKGROUND_USER_TURN_LIMIT:])
-            retained: list[tuple[dict[str, Any], str, list[str]]] = []
-            retain_assistant = False
-            for index, entry in enumerate(messages):
-                _, role, _ = entry
-                if role == "user":
-                    retain_assistant = index in retained_users
-                if index in retained_users or (
-                    role == "assistant" and retain_assistant
-                ):
-                    retained.append(entry)
-            messages = retained
+        if user_positions:
+            first_retained = user_positions[
+                max(0, len(user_positions) - _BACKGROUND_USER_TURN_LIMIT)
+            ]
+            messages = messages[first_retained:]
 
     for message, role, texts in messages:
         timestamp = format_timestamp(message.get("created"), timezone)
         lines.extend([_header(str(role), timestamp), ""])
         for text in texts:
-            if role == "user":
-                occurrences.append(UserTextOccurrence(f"{bucket}.md", len(lines), text))
             lines.extend([text, ""])
-    return (lines if len(lines) > _MINIMUM_RENDERED_LINES else []), occurrences
+    return lines if len(lines) > _MINIMUM_RENDERED_LINES else []
 
 
 def render_opencode(
     item: ContextItem, result: ContextExtractionResult
-) -> OpenCodeRender:
+) -> dict[str, list[str]]:
     assert item.opencode is not None
     projection = item.opencode
     value = projection.session.get("value")
@@ -187,69 +157,16 @@ def render_opencode(
         overview.append(f"Working directory: `{directory}`")
     overview.append("")
     files: dict[str, list[str]] = {"overview.md": overview}
-    activity, activity_occurrences = _render_messages(item, result, "activity")
-    background, background_occurrences = _render_messages(item, result, "background")
+    activity = _render_messages(item, result, "activity")
+    background = _render_messages(item, result, "background")
     if activity:
         files["activity.md"] = activity
     if background:
         files["background.md"] = background
-    return OpenCodeRender(
-        item.path,
-        files,
-        tuple(activity_occurrences + background_occurrences),
-    )
-
-
-def _canonical_text(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return files
 
 
 def write_opencode_markdown(path: Path, lines: list[str]) -> None:
     """Write OpenCode text without changing Markdown trailing spaces."""
     content_lines = lines[:-1] if lines and lines[-1] == "" else lines
     path.write_text("\n".join(content_lines) + "\n", encoding="utf-8")
-
-
-def deduplicate_opencode_user_text(
-    staging: Path, renders: list[OpenCodeRender]
-) -> None:
-    """Share repeated long User text blocks from structured OpenCode output."""
-    occurrences: dict[str, list[tuple[OpenCodeRender, UserTextOccurrence]]] = {}
-    for render in sorted(renders, key=lambda value: value.item_path):
-        for occurrence in render.user_text_occurrences:
-            canonical = _canonical_text(occurrence.text)
-            if len(canonical.encode("utf-8")) >= _REPEATED_TEXT_MINIMUM_BYTES:
-                occurrences.setdefault(canonical, []).append((render, occurrence))
-    repeated = {
-        text: entries
-        for text, entries in occurrences.items()
-        if len(entries) >= _MINIMUM_DUPLICATE_OCCURRENCES
-    }
-    if not repeated:
-        return
-
-    digests = {
-        canonical: hashlib.sha256(canonical.encode("utf-8")).hexdigest()[
-            :_REPEATED_TEXT_DIGEST_LENGTH
-        ]
-        for canonical in sorted(repeated)
-    }
-    shared_text = "# Repeated User Text\n\n"
-    for canonical in sorted(repeated):
-        original = repeated[canonical][0][1].text
-        shared_text += f"## sha256-{digests[canonical]}\n\n{original}\n\n"
-    shared = staging / "opencode" / "_shared" / "repeated-user-text.md"
-    shared.parent.mkdir(parents=True, exist_ok=True)
-    shared.write_text(shared_text, encoding="utf-8")
-
-    for render in renders:
-        relative_item = PurePosixPath(render.item_path).relative_to("opencode")
-        prefix = "../" * len(relative_item.parts)
-        for occurrence in render.user_text_occurrences:
-            canonical = _canonical_text(occurrence.text)
-            if canonical not in repeated:
-                continue
-            render.files[occurrence.file_name][occurrence.line_index] = (
-                f"[repeated User text]({prefix}_shared/repeated-user-text.md"
-                f"#sha256-{digests[canonical]})"
-            )
