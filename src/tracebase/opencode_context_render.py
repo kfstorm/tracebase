@@ -87,37 +87,22 @@ def _part_value(part: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else part
 
 
-def _message_bucket(message: dict[str, Any]) -> str | None:
-    roles = message.get("temporal_roles", ())
-    parts = message.get("parts", ())
-    if any(
-        "in_range_work" in part.get("temporal_roles", ())
-        for part in parts
-        if isinstance(part, dict)
-    ):
-        return "activity"
-    if any(
-        "earlier_background" in part.get("temporal_roles", ())
-        for part in parts
-        if isinstance(part, dict)
-    ):
-        return "background"
-    if "in_range_work" in roles:
-        return "activity"
-    if "earlier_background" in roles:
-        return "background"
-    return None
-
-
-def _part_bucket(part: dict[str, Any], message_bucket: str | None) -> str | None:
+def _part_bucket(part: dict[str, Any], message: dict[str, Any]) -> str | None:
     roles = part.get("temporal_roles", ())
+    bucket: str | None = None
     if "later_progression" in roles:
-        return None
+        return bucket
     if "in_range_work" in roles:
-        return "activity"
-    if "earlier_background" in roles:
-        return "background"
-    return message_bucket if part.get("type") == "text" else None
+        bucket = "activity"
+    elif "earlier_background" in roles:
+        bucket = "background"
+    elif part.get("type") == "text":
+        message_roles = message.get("temporal_roles", ())
+        if "in_range_work" in message_roles:
+            bucket = "activity"
+        elif "earlier_background" in message_roles:
+            bucket = "background"
+    return bucket
 
 
 def _header(role: str, timestamp: str | None) -> str:
@@ -136,16 +121,15 @@ def _render_messages(
     occurrences: list[UserTextOccurrence] = []
     messages: list[tuple[dict[str, Any], str, list[str]]] = []
     for message in projection.messages:
-        message_bucket = _message_bucket(message)
         role = message.get("role")
         role = role.lower() if isinstance(role, str) else ""
-        if message_bucket != bucket or role not in {"user", "assistant"}:
+        if role not in {"user", "assistant"}:
             continue
         texts: list[str] = []
         for part in message.get("parts", ()):
             if (
                 not isinstance(part, dict)
-                or _part_bucket(part, message_bucket) != bucket
+                or _part_bucket(part, message) != bucket
                 or part.get("type") != "text"
             ):
                 continue
@@ -153,7 +137,8 @@ def _render_messages(
             text = value.get("text", part.get("text"))
             if isinstance(text, str) and text:
                 texts.append(text)
-        messages.append((message, role, texts))
+        if texts:
+            messages.append((message, role, texts))
 
     if bucket == "background":
         user_positions = [
@@ -174,8 +159,6 @@ def _render_messages(
             messages = retained
 
     for message, role, texts in messages:
-        if not texts:
-            continue
         timestamp = format_timestamp(message.get("created"), timezone)
         lines.extend([_header(str(role), timestamp), ""])
         for text in texts:

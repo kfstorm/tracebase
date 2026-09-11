@@ -1157,6 +1157,44 @@ def test_opencode_cutoff_hides_later_text_when_tools_are_removed(
     assert "future answer" not in activity
 
 
+def test_opencode_in_range_tool_keeps_earlier_text_in_background(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    tool = {
+        "type": "tool",
+        "tool": "bash",
+        "state": {
+            "status": "completed",
+            "time": {
+                "start": "2025-12-31T17:00:00Z",
+                "end": "2025-12-31T17:01:00Z",
+            },
+        },
+    }
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message(
+                    "earlier-text",
+                    "2025-12-31T10:00:00Z",
+                    [{"type": "text", "text": "earlier text"}, tool],
+                )
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert "earlier text" in text(output, "background.md")
+    assert not list(output.rglob("activity.md"))
+    assert "01:00" in (output / "index.md").read_text()
+
+
 def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
@@ -1282,7 +1320,7 @@ def test_opencode_background_window_keeps_latest_three_users_and_assistants(
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     messages: list[dict[str, object]] = []
-    for index in range(1, 6):
+    for index in range(1, 5):
         messages.extend(
             [
                 message(
@@ -1298,6 +1336,29 @@ def test_opencode_background_window_keeps_latest_three_users_and_assistants(
                 ),
             ]
         )
+        if index == 2:
+            messages.extend(
+                [
+                    message(
+                        "tool-only-user",
+                        "2025-12-31T02:45:00Z",
+                        [
+                            {
+                                "type": "tool",
+                                "tool": "bash",
+                                "state": {
+                                    "status": "completed",
+                                    "time": {
+                                        "start": "2025-12-31T02:45:00Z",
+                                        "end": "2025-12-31T02:46:00Z",
+                                    },
+                                },
+                            }
+                        ],
+                    ),
+                    message("empty-user", "2025-12-31T02:47:00Z"),
+                ]
+            )
     messages.append(
         message(
             "current",
@@ -1310,10 +1371,9 @@ def test_opencode_background_window_keeps_latest_three_users_and_assistants(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     background = text(output, "background.md")
-    for index in (1, 2):
-        assert f"user-{index}" not in background
-        assert f"assistant-{index}" not in background
-    for index in (3, 4, 5):
+    assert "user-1" not in background
+    assert "assistant-1" not in background
+    for index in (2, 3, 4):
         assert f"user-{index}" in background
         assert f"assistant-{index}" in background
 
@@ -1383,6 +1443,43 @@ def test_opencode_repeated_user_text_below_threshold_is_not_shared(
     assert not (output / "opencode" / "_shared" / "repeated-user-text.md").exists()
     assert repeated in text(output, "activity.md")
     assert repeated in text(output, "background.md")
+
+
+def test_opencode_filtered_user_text_does_not_trigger_dedup(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    repeated = "filtered user text. " * 12
+    messages = [
+        message(
+            "filtered-old",
+            "2025-12-31T01:00:00Z",
+            [{"type": "text", "text": repeated}],
+        )
+    ]
+    messages.extend(
+        [
+            message(
+                f"background-{index}",
+                f"2025-12-31T0{index}:00:00Z",
+                [{"type": "text", "text": f"background-{index}"}],
+            )
+            for index in range(2, 5)
+        ]
+    )
+    messages.append(
+        message(
+            "current",
+            "2026-01-01T01:00:00Z",
+            [{"type": "text", "text": repeated}],
+        )
+    )
+    publish_opencode(archive, session("root", messages=messages), "run")
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    assert repeated in text(output, "activity.md")
+    assert repeated not in text(output, "background.md")
+    assert not (output / "opencode" / "_shared" / "repeated-user-text.md").exists()
 
 
 def test_opencode_user_markdown_is_not_reparsed_or_stripped(tmp_path: Path) -> None:
