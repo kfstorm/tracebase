@@ -114,22 +114,23 @@ def _created(value: dict[str, Any]) -> datetime:
     raise ArchiveError("OpenCode message payload is invalid")
 
 
-def _supporting_message(message: dict[str, Any], parts: list[dict[str, Any]]) -> bool:
+def _supporting_message(message: dict[str, Any]) -> bool:
     info = message.get("info")
-    if isinstance(info, dict) and (
+    return isinstance(info, dict) and (
         info.get("mode") == "compaction"
         or info.get("summary") is True
         or info.get("agent") == "compaction"
-    ):
-        return True
-    return any(
-        part.get("type") == "compaction"
-        or part.get("synthetic") is True
-        or (
-            isinstance(part.get("metadata"), dict)
-            and part["metadata"].get("compaction_continue") is True
-        )
-        for part in parts
+    )
+
+
+def _part_is_supporting(part: dict[str, Any]) -> bool:
+    value = part.get("value")
+    value = value if isinstance(value, dict) else part
+    metadata = value.get("metadata")
+    return (
+        value.get("type") == "compaction"
+        or value.get("synthetic") is True
+        or (isinstance(metadata, dict) and metadata.get("compaction_continue") is True)
     )
 
 
@@ -212,8 +213,7 @@ def _refresh_part_roles(part: dict[str, Any], start: datetime, end: datetime) ->
 
 
 def _part_is_work(part: dict[str, Any]) -> bool:
-    part_type = part.get("type")
-    return not isinstance(part_type, str) or part_type != "compaction"
+    return not _part_is_supporting(part)
 
 
 def _part_is_task(part: dict[str, Any]) -> bool:
@@ -297,7 +297,7 @@ def project_opencode(  # noqa: PLR0915
                 raise ArchiveError("OpenCode message payload is invalid")
             if not all(isinstance(part, dict) for part in parts):
                 raise ArchiveError("OpenCode message payload is invalid")
-            supporting_message = _supporting_message(message, parts)
+            supporting_message = _supporting_message(message)
             record["_created_time"] = message_time
             record["_supporting_message"] = supporting_message
             if supporting_message:
@@ -399,6 +399,12 @@ def project_opencode(  # noqa: PLR0915
                 tool["id"],
             )
         )
+        parts = message.get("parts", [])
+        if not message["_supporting_message"] and parts:
+            retained_parts = [part for part in parts if _part_is_work(part)]
+            message["parts"] = retained_parts
+            if not retained_parts:
+                message["temporal_roles"] = ("observed_state",)
         for part in message.get("parts", ()):
             _refresh_part_roles(part, start, end)
             part.pop("intervals", None)
