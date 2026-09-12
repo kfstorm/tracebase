@@ -449,7 +449,7 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
             [
                 "",
                 "Mutable fields may include later-observed changes and are not "
-                "guaranteed to equal the exact state at the request cutoff.",
+                "guaranteed to equal the exact state at the request end.",
             ]
         )
     diff_record = next(

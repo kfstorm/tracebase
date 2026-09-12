@@ -147,10 +147,10 @@ def select_observation(
     if not snapshots:
         raise ContextError("logical object has no snapshot")
     ordered = sorted(snapshots, key=_observation_sort_key)
-    future = [
+    at_or_after_request_end = [
         snapshot for snapshot in ordered if _observation_window(snapshot)[1] >= end
     ]
-    return future[0] if future else ordered[-1]
+    return at_or_after_request_end[0] if at_or_after_request_end else ordered[-1]
 
 
 def _safe_component(value: str) -> str:
