@@ -211,6 +211,7 @@ def test_failure_with_debug_retains_available_artifacts(tmp_path: Path) -> None:
     assert not output.exists()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "work/shards/repo.md").is_file()
+    assert (debug / "results/summary.md").read_text() == "# Work summary\n"
     assert json.loads((debug / "manifest.json").read_text())["status"] == "failed"
     assert len(runner.calls) == 2
 

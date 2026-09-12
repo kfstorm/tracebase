@@ -235,7 +235,7 @@ def _publish_debug(
             "secrets.json",
             ".opencode-data",
         )
-        for name in ("context", "work", "runtime"):
+        for name in ("context", "work", "runtime", "results"):
             source = run / name
             if source.is_dir():
                 shutil.copytree(source, staging / name, ignore=excluded)
