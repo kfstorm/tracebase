@@ -27,6 +27,17 @@ def _auth_path() -> Path:
     return Path(data_home or (Path.home() / ".local/share")) / "opencode/auth.json"
 
 
+def prepare_config(stage_model: str) -> str:
+    """Build the OpenCode configuration without reading host state."""
+    config: dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "model": stage_model,
+        "small_model": stage_model,
+        "subagent_depth": 1,
+    }
+    return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+
+
 def prepare_state(state_dir: Path, stage_model: str) -> str:
     """Copy host authentication into a fresh run-local OpenCode state."""
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -43,10 +54,4 @@ def prepare_state(state_dir: Path, stage_model: str) -> str:
     )
     isolated_auth.chmod(0o600)
 
-    config: dict[str, Any] = {
-        "$schema": "https://opencode.ai/config.json",
-        "model": stage_model,
-        "small_model": stage_model,
-        "subagent_depth": 1,
-    }
-    return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+    return prepare_config(stage_model)

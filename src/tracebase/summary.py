@@ -15,7 +15,7 @@ from typing import Any, Protocol
 
 from .context import ContextRequest, generate_context
 from .summary_container import ContainerMounts, ContainerRunner, ensure_image
-from .summary_opencode import prepare_state
+from .summary_opencode import prepare_config, prepare_state
 from .summary_shards import inspect_shards
 
 IMAGE = "tracebase-opencode:1.18.29"
@@ -290,13 +290,15 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         task = work / "TASK.md"
         task.write_bytes(prompt.read_bytes())
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
-        config = prepare_state(state, request.model)
         dockerfile = Path(__file__).parent / "container/Dockerfile"
         if runner is None:
+            config = prepare_state(state, request.model)
             ensure_image(IMAGE, dockerfile)
             runner = ContainerRunner(
                 IMAGE, ContainerMounts(context, work, results, state, task=task)
             )
+        else:
+            config = prepare_config(request.model)
         provenance["opencode_version"] = runner.run(
             ["--pure", "--version"], config
         ).stdout.strip()
