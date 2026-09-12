@@ -68,31 +68,26 @@ class FakeRunner:
             return subprocess.CompletedProcess(
                 arguments, 0, '{"sessionID":"root"}\n', ""
             )
-        if "db" in arguments:
-            return subprocess.CompletedProcess(
-                arguments,
-                0,
-                json.dumps([{"id": "root", "parent_id": None}]),
-                "",
-            )
-        exported = {"info": {"id": "root"}, "messages": []}
-        return subprocess.CompletedProcess(arguments, 0, json.dumps(exported), "")
+        raise AssertionError(f"unexpected runner call: {arguments}")
 
 
 def context(tmp_path: Path) -> Path:
     result = tmp_path / "context"
     result.mkdir()
     (result / "index.md").write_text(
-        "# Context Output\n\nRequested interval: exact\n", encoding="utf-8"
+        "# Context Output\n\n"
+        "Requested interval: `2026-01-01T01:00:00+01:00 <= t < "
+        "2026-01-01T03:00:00+01:00`\n",
+        encoding="utf-8",
     )
     return result
 
 
-def bind_runner_to_staging(runner: FakeRunner, parent: Path, name: str) -> None:
+def bind_runner_to_staging(runner: FakeRunner, parent: Path) -> None:
     original_run = runner.run
 
     def run(arguments: list[str], config: str, stdout_path: Path | None = None):
-        candidates = list(parent.glob(f".{name}.*"))
+        candidates = list(parent.glob(".summary-run.*"))
         if candidates:
             runner.output = candidates[0]
         return original_run(arguments, config, stdout_path)
@@ -107,12 +102,13 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     output = tmp_path / "summary"
     runner = FakeRunner(output.parent / f".{output.name}.unused")
 
-    bind_runner_to_staging(runner, tmp_path, output.name)
+    bind_runner_to_staging(runner, tmp_path)
     published = summarize(
         SummaryRequest(source, "openai/model", "high", output), runner
     )
 
     assert published == output
+    assert {path.name for path in output.iterdir()} == {"summary.md", "manifest.json"}
     assert (output / "summary.md").read_text() == "# Work summary\n"
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["model"] == "openai/model"
@@ -120,35 +116,103 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     assert manifest["opencode_version"] == "1.18.29"
     assert manifest["task_sha256"]
     assert manifest["context_input"] == fingerprint_context(source)
-    assert manifest["shards"]["completed"] == 1
+    assert manifest["requested_interval"] == {
+        "from": "2026-01-01T01:00:00+01:00",
+        "to": "2026-01-01T03:00:00+01:00",
+    }
+    assert "shards" not in manifest
+    assert "metrics" not in manifest
+    assert "canonical_result_recovery" not in manifest
+    assert len(runner.calls) == 2
 
 
 def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
     runner = FakeRunner(tmp_path, recover=True)
-    bind_runner_to_staging(runner, tmp_path, output.name)
-    summarize(SummaryRequest(source, "model", None, output), runner)
+    bind_runner_to_staging(runner, tmp_path)
+    debug = tmp_path / "debug"
+    summarize(SummaryRequest(source, "model", None, output, debug_output=debug), runner)
 
     recovery_calls = [call for call in runner.calls if "--session" in call]
     assert len(recovery_calls) == 1
     assert recovery_calls[0][recovery_calls[0].index("--session") + 1] == "root"
-    assert (
-        json.loads((output / "manifest.json").read_text())["canonical_result_recovery"]
-        is True
-    )
+    assert (debug / "runtime/root-recovery.json").is_file()
+    assert len(runner.calls) == 3
 
 
 def test_incomplete_shards_publish_nothing(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
     runner = FakeRunner(tmp_path, incomplete=True)
-    bind_runner_to_staging(runner, tmp_path, output.name)
+    bind_runner_to_staging(runner, tmp_path)
     with pytest.raises(SummaryError, match="shard protocol"):
         summarize(SummaryRequest(source, "model", None, output), runner)
 
     assert not output.exists()
     assert not list(tmp_path.glob(".summary.*"))
+
+
+def test_debug_retains_existing_runtime_artifacts_without_extra_calls(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    debug = tmp_path / "debug"
+    runner = FakeRunner(tmp_path)
+    bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output, debug_output=debug), runner)
+
+    assert (debug / "context/index.md").is_file()
+    assert (debug / "work/TASK.md").is_file()
+    assert (debug / "work/NOTES.md").is_file()
+    assert (debug / "work/shards/repo.md").is_file()
+    assert (debug / "runtime/stdout.jsonl").is_file()
+    assert (debug / "runtime/stderr.log").is_file()
+    assert not (debug / ".opencode-data").exists()
+    assert not list(debug.rglob("auth.json"))
+    assert len(runner.calls) == 2
+
+
+def test_debug_excludes_credentials_written_to_work(tmp_path: Path) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    debug = tmp_path / "debug"
+    runner = FakeRunner(tmp_path)
+    original_run = runner.run
+
+    def run(arguments: list[str], config: str, stdout_path: Path | None = None):
+        result = original_run(arguments, config, stdout_path)
+        if "run" in arguments:
+            (runner.output / "work/auth.json").write_text("secret", encoding="utf-8")
+        return result
+
+    runner.run = run  # type: ignore[method-assign]
+    bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output, debug_output=debug), runner)
+
+    assert not list(debug.rglob("auth.json"))
+
+
+def test_failure_with_debug_retains_available_artifacts(tmp_path: Path) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    debug = tmp_path / "debug"
+    runner = FakeRunner(tmp_path, incomplete=True)
+    bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="shard protocol"):
+        summarize(
+            SummaryRequest(source, "model", None, output, debug_output=debug), runner
+        )
+
+    assert not output.exists()
+    assert (debug / "runtime/stdout.jsonl").is_file()
+    assert (debug / "work/shards/repo.md").is_file()
+    assert json.loads((debug / "manifest.json").read_text())["status"] == "failed"
+    assert len(runner.calls) == 2
 
 
 def test_summary_rejects_output_inside_context(tmp_path: Path) -> None:
@@ -191,6 +255,24 @@ def test_archive_mode_retains_explicit_context_when_summary_fails(
         )
 
     assert (retained / "index.md").read_text() == "valid Context"
+
+
+def test_archive_mode_rejects_outputs_overlapping_archive(tmp_path: Path) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    request = ContextRequest.parse(
+        "2026-01-01T01:00:00+01:00", "2026-01-01T03:00:00+01:00"
+    )
+
+    with pytest.raises(SummaryError, match="Raw Archive"):
+        summarize_archive(
+            archive,
+            archive / "context",
+            request,
+            "model",
+            None,
+            tmp_path / "summary",
+        )
 
 
 def test_shard_validation_rejects_retry_above_one(tmp_path: Path) -> None:

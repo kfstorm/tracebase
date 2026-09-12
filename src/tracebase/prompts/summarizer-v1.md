@@ -19,7 +19,7 @@ to resist compaction, verify facts, reconcile time, and support diagnosis. Do
 not mechanically copy this evidence detail into the final summary.
 
 The directory available to you at `/context` contains the complete Context
-Output for this evaluation case.
+Output for the requested interval.
 
 Explore it as needed. Start from index.md and inspect source-specific views
 when useful. You may use multiple tool calls and organize your investigation
@@ -134,7 +134,7 @@ Record continuation status in NOTES, including relevant unread portions and
 whether they could affect a conclusion, so compaction cannot cause the same
 partial read to be treated as complete evidence again.
 
-When a state changed during the day, normally write only the final state. Briefly
+When a state changed during the requested interval, normally write only the final state. Briefly
 mention the reversal or change in approach only when that process itself matters
 to understanding the work.
 
@@ -160,7 +160,7 @@ sessions only when the evidence establishes that relationship; do not infer a
 relationship merely from the same repository, directory, session vicinity, or
 time period. Conversely, do not force unrelated work in one repository into a
 single workstream. Unrelated repositories, projects, sessions, and workstreams
-are still legitimate daily work when their `in_range_work` is materially
+are still legitimate work when their `in_range_work` is materially
 meaningful.
 
 For the final artifact, coverage means covering materially meaningful work, not
@@ -176,13 +176,13 @@ understanding why the work was done.
 Meaningful does not automatically mean major. All materially meaningful workstreams
 must remain covered, but reserve an independent major-work subsection for work
 that is materially important, complex, decision-heavy, consequential, or clearly
-valuable for explaining the day's main results. Put medium or simple work in the
+valuable for explaining the requested interval's main results. Put medium or simple work in the
 other-work section, or compress it into a larger major workstream only when the
 evidence clearly establishes that it belongs to that larger objective. Do not
 merge work merely because it came from the same repository. Do not use session
 count, Context size, number of files, commit count, PR or Issue count, tool-call
 count, or amount of evidence as a proxy for whether work is major. The final
-summary's structure and space should make the day's most important work visibly
+summary's structure and space should make the most important work visibly
 more prominent without omitting a distinct materially meaningful workstream;
 even a compressed workstream must remain present, at least in one sentence.
 
@@ -201,7 +201,7 @@ reader's understanding of the goal, decision, result, or risk. Do not create a
 flat action-by-action transcript or give trivial activity equal weight with
 important work.
 
-The final summary's purpose is to produce a durable, human-readable daily work
+The final summary's purpose is to produce a durable, human-readable work
 summary for the author's future self and an engineering manager. The reader
 should quickly understand what mattered, why it mattered, what was difficult or
 noteworthy, and where the work ended up. Prioritize goals, impact, difficulty,
@@ -303,5 +303,5 @@ a chronological order.
 
 Write the final deliverable to `/results/summary.md`. Chat text is not the
 canonical result. The result file must be complete and non-empty before you
-finish. Do not critique Tracebase or the evaluation procedure in the summary
+finish. Do not critique Tracebase or the summarization procedure in the summary
 itself.

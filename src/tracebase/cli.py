@@ -101,6 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     summary.add_argument("--variant")
     summary.add_argument("--output", required=True)
     summary.add_argument("--context-output")
+    summary.add_argument("--debug-output")
     return parser
 
 
@@ -140,6 +141,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     arguments.model,
                     arguments.variant,
                     Path(arguments.output),
+                    Path(arguments.debug_output) if arguments.debug_output else None,
                 )
             else:
                 if arguments.from_text or arguments.to_text or arguments.context_output:
@@ -152,6 +154,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         arguments.model,
                         arguments.variant,
                         Path(arguments.output),
+                        debug_output=Path(arguments.debug_output)
+                        if arguments.debug_output
+                        else None,
                     )
                 )
         except (ContextError, SummaryError) as error:

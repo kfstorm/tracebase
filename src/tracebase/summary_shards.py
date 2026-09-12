@@ -19,20 +19,7 @@ _SHARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 class ShardObservability:
     """Terminal shard counts and protocol errors recorded by the harness."""
 
-    shard_count: int
-    completed: int
-    retried: int
-    failed: int
     errors: tuple[str, ...]
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "shard_count": self.shard_count,
-            "completed": self.completed,
-            "retried": self.retried,
-            "failed": self.failed,
-            "protocol_errors": list(self.errors),
-        }
 
 
 def _status_data(notes: str) -> Any:
@@ -53,33 +40,27 @@ def inspect_shards(
     try:
         notes = notes_path.read_text(encoding="utf-8")
     except OSError, UnicodeError:
-        return ShardObservability(0, 0, 0, 1, (f"could not read {notes_path}",))
+        return ShardObservability((f"could not read {notes_path}",))
 
     try:
         data = _status_data(notes)
     except ValueError as error:
-        return ShardObservability(0, 0, 0, 1, (str(error),))
+        return ShardObservability((str(error),))
     if not isinstance(data, dict) or not isinstance(data.get("shards"), list):
-        return ShardObservability(0, 0, 0, 1, ("SHARD_STATUS.shards must be a list",))
+        return ShardObservability(("SHARD_STATUS.shards must be a list",))
     if context_dir is not None and not data["shards"]:
         try:
             has_context = any(path.is_file() for path in context_dir.rglob("*"))
         except OSError:
             has_context = True
         if has_context:
-            return ShardObservability(
-                0, 0, 0, 1, ("non-empty Context has no declared shards",)
-            )
+            return ShardObservability(("non-empty Context has no declared shards",))
 
     errors: list[str] = []
     seen: set[str] = set()
-    completed = 0
-    retried = 0
-    failed = 0
     for item in data["shards"]:
         if not isinstance(item, dict):
             errors.append("each shard status must be an object")
-            failed += 1
             continue
         shard_id = item.get("id")
         status = item.get("status")
@@ -87,51 +68,31 @@ def inspect_shards(
         report = item.get("report")
         if not isinstance(shard_id, str) or _SHARD_ID.fullmatch(shard_id) is None:
             errors.append("shard id is invalid")
-            failed += 1
             continue
         if shard_id in seen:
             errors.append(f"shard {shard_id!r} is declared more than once")
-            failed += 1
             continue
         seen.add(shard_id)
-        entry_failed = False
         if not isinstance(retry_count, int) or isinstance(retry_count, bool):
             errors.append(f"shard {shard_id!r} retry_count is invalid")
-            entry_failed = True
         elif retry_count < 0 or retry_count > 1:
             errors.append(f"shard {shard_id!r} was retried more than once")
-            entry_failed = True
-        elif retry_count:
-            retried += 1
         if status == "failed":
             errors.append(f"shard {shard_id!r} reported failure")
-            entry_failed = True
         elif status != "complete":
             errors.append(f"shard {shard_id!r} is not in a terminal state")
-            entry_failed = True
 
         expected_report = f"/work/shards/{shard_id}.md"
         if report != expected_report:
             errors.append(f"shard {shard_id!r} has a non-canonical report path")
-            entry_failed = True
         else:
             report_path = work_dir / "shards" / f"{shard_id}.md"
             if report_path.is_symlink() or not report_path.is_file():
                 errors.append(f"shard {shard_id!r} canonical report is missing")
-                entry_failed = True
             else:
                 try:
                     if not report_path.read_text(encoding="utf-8").strip():
                         errors.append(f"shard {shard_id!r} canonical report is empty")
-                        entry_failed = True
                 except OSError, UnicodeError:
                     errors.append(f"shard {shard_id!r} canonical report cannot be read")
-                    entry_failed = True
-        if status == "complete" and not entry_failed:
-            completed += 1
-        if entry_failed:
-            failed += 1
-
-    return ShardObservability(
-        len(data["shards"]), completed, retried, failed, tuple(errors)
-    )
+    return ShardObservability(tuple(errors))
