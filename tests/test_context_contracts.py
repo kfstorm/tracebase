@@ -308,7 +308,7 @@ def github_output(
     return output
 
 
-def test_selection_chooses_first_observation_after_context_cutoff(
+def test_selection_chooses_first_observation_at_or_after_request_end(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -365,7 +365,9 @@ def test_selection_chooses_first_observation_after_context_cutoff(
     assert [message["id"] for message in item.opencode.messages] == ["first future"]
 
 
-def test_selection_chooses_latest_observation_before_cutoff(tmp_path: Path) -> None:
+def test_selection_chooses_latest_observation_before_request_end(
+    tmp_path: Path,
+) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     for run_id, marker, from_text, to_text, observed_to in (
@@ -403,7 +405,7 @@ def test_selection_chooses_latest_observation_before_cutoff(tmp_path: Path) -> N
     assert result.items[0].source.run["run_id"] == "latest"
 
 
-def test_selection_chooses_earliest_observation_for_historical_cutoff(
+def test_selection_chooses_earliest_observation_for_historical_request_end(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -1456,7 +1458,7 @@ def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
     assert "## Gaps" not in (output / "index.md").read_text()
 
 
-def test_opencode_does_not_merge_a_later_observation_into_selected_state(
+def test_opencode_does_not_merge_a_later_observation(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -1558,7 +1560,9 @@ def test_github_does_not_merge_later_body_comment_or_diff(
     activity = text(output, "activity.md")
     diff = text(output, "diff.patch")
     assert "selected" in overview and "old body" in overview
-    assert "later" not in overview and "later body" not in overview
+    assert "# example/project PR #1 — later" not in overview
+    assert "later body" not in overview
+    assert "Mutable fields may include" in overview
     assert "old comment" in activity and "later comment" not in activity
     assert diff == "old diff\n"
 

@@ -112,6 +112,16 @@ def _event_bucket(value: dict[str, Any], start: datetime, end: datetime) -> str 
     return None
 
 
+def _selected_observation_is_after_request_end(
+    item: ContextItem, result: ContextExtractionResult
+) -> bool:
+    window = item.snapshot.manifest.get("observation_window")
+    observed_end = (
+        parse_timestamp(window.get("to")) if isinstance(window, dict) else None
+    )
+    return observed_end is not None and observed_end > result.request.end
+
+
 def _location(value: dict[str, Any]) -> str | None:
     path = value.get("path")
     line = value.get("line", value.get("original_line"))
@@ -434,6 +444,14 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
     body = value.get("body")
     if isinstance(body, str) and body:
         lines.extend(["", "## Description", "", body, ""])
+    if _selected_observation_is_after_request_end(item, result):
+        lines.extend(
+            [
+                "",
+                "Mutable fields may include later-observed changes and are not "
+                "guaranteed to equal the exact state at the request cutoff.",
+            ]
+        )
     diff_record = next(
         (
             record
