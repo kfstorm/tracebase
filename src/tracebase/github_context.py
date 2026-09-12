@@ -243,81 +243,77 @@ def project_github(  # noqa: PLR0915
         tracked_login = None
     paged_thread_comments: list[tuple[str, list[dict[str, Any]]]] = []
 
-    def process_snapshot(snapshot: PublishedSnapshot) -> None:  # noqa: PLR0915
-        nonlocal number, repository, title
-        inline_nodes_by_rest_id: dict[int, str] = {}
-        inline_replies: list[tuple[int, str]] = []
-        issue = _json(snapshot, "issue.json")
-        if not isinstance(issue, dict) or issue.get("node_id") != source_id:
-            raise ArchiveError("GitHub Item evidence identity was invalid")
-        repository_value = issue.get("repository_url")
-        if isinstance(repository_value, str) and repository_value:
-            repository = (
-                repository_value.removeprefix("https://api.github.com/repos/")
-                .removeprefix("https://github.com/")
-                .strip("/")
-            )
-        if isinstance(issue.get("number"), int):
-            number = issue["number"]
-        if isinstance(issue.get("title"), str):
-            title = issue["title"]
-        _add_record(
-            records,
-            _record(object_kind, source_id, issue, "issue.json", snapshot),
+    inline_nodes_by_rest_id: dict[int, str] = {}
+    inline_replies: list[tuple[int, str]] = []
+    snapshot = selected_snapshot
+    issue = _json(snapshot, "issue.json")
+    if not isinstance(issue, dict) or issue.get("node_id") != source_id:
+        raise ArchiveError("GitHub Item evidence identity was invalid")
+    repository_value = issue.get("repository_url")
+    if isinstance(repository_value, str) and repository_value:
+        repository = (
+            repository_value.removeprefix("https://api.github.com/repos/")
+            .removeprefix("https://github.com/")
+            .strip("/")
         )
-        for path in sorted(
-            name for name in snapshot.evidence if name.startswith("comments.")
-        ):
-            for value in _list(snapshot, path):
-                if isinstance(value.get("id"), int):
-                    comment_id = str(value["id"])
-                    _add_record(
-                        records,
-                        _record(
-                            "ordinary-comment",
-                            comment_id,
-                            value,
-                            path,
-                            snapshot,
-                        ),
-                    )
-                    node_id = value.get("node_id")
-                    if isinstance(node_id, str):
-                        records.setdefault(
-                            ("ordinary-comment-alias", node_id),
-                            {"kind": "ordinary-comment-alias", "native_id": node_id},
-                        )["canonical_id"] = comment_id
-        for path in sorted(
-            name for name in snapshot.evidence if name.startswith("timeline.")
-        ):
-            for value in _list(snapshot, path):
-                identifier = value.get("node_id", value.get("id"))
-                if isinstance(identifier, (str, int)):
-                    kind = "timeline"
-                    if value.get("event") == "commented":
-                        kind = "ordinary-comment"
-                        alias = value.get("node_id")
-                        if isinstance(alias, str):
-                            alias_record = records.get(
-                                ("ordinary-comment-alias", alias)
-                            )
-                            identifier = (
-                                alias_record.get("canonical_id")
-                                if alias_record is not None
-                                else alias
-                            )
-                        elif isinstance(value.get("id"), int):
-                            identifier = value["id"]
-                    elif value.get("event") == "reviewed" and isinstance(
-                        value.get("id"), int
-                    ):
-                        kind, identifier = "review", value["id"]
-                    _add_record(
-                        records,
-                        _record(kind, str(identifier), value, path, snapshot),
-                    )
-        if object_kind != "pull-request":
-            return
+    if isinstance(issue.get("number"), int):
+        number = issue["number"]
+    if isinstance(issue.get("title"), str):
+        title = issue["title"]
+    _add_record(
+        records,
+        _record(object_kind, source_id, issue, "issue.json", snapshot),
+    )
+    for path in sorted(
+        name for name in snapshot.evidence if name.startswith("comments.")
+    ):
+        for value in _list(snapshot, path):
+            if isinstance(value.get("id"), int):
+                comment_id = str(value["id"])
+                _add_record(
+                    records,
+                    _record(
+                        "ordinary-comment",
+                        comment_id,
+                        value,
+                        path,
+                        snapshot,
+                    ),
+                )
+                node_id = value.get("node_id")
+                if isinstance(node_id, str):
+                    records.setdefault(
+                        ("ordinary-comment-alias", node_id),
+                        {"kind": "ordinary-comment-alias", "native_id": node_id},
+                    )["canonical_id"] = comment_id
+    for path in sorted(
+        name for name in snapshot.evidence if name.startswith("timeline.")
+    ):
+        for value in _list(snapshot, path):
+            identifier = value.get("node_id", value.get("id"))
+            if isinstance(identifier, (str, int)):
+                kind = "timeline"
+                if value.get("event") == "commented":
+                    kind = "ordinary-comment"
+                    alias = value.get("node_id")
+                    if isinstance(alias, str):
+                        alias_record = records.get(("ordinary-comment-alias", alias))
+                        identifier = (
+                            alias_record.get("canonical_id")
+                            if alias_record is not None
+                            else alias
+                        )
+                    elif isinstance(value.get("id"), int):
+                        identifier = value["id"]
+                elif value.get("event") == "reviewed" and isinstance(
+                    value.get("id"), int
+                ):
+                    kind, identifier = "review", value["id"]
+                _add_record(
+                    records,
+                    _record(kind, str(identifier), value, path, snapshot),
+                )
+    if object_kind == "pull-request":
         pull = _json(snapshot, "pull-request.json")
         if not isinstance(pull, dict) or pull.get("node_id") != source_id:
             raise ArchiveError("GitHub Pull Request evidence identity was invalid")
@@ -435,7 +431,6 @@ def project_github(  # noqa: PLR0915
                 },
             )
 
-    process_snapshot(selected_snapshot)
     for thread_id, nodes in paged_thread_comments:
         record = records.get(("review-thread", thread_id))
         if record is None:
