@@ -359,8 +359,7 @@ def test_selection_chooses_first_observation_at_or_after_request_end(
 
     result = extract_context(request(), load_archive(archive.root))
     item = result.items[0]
-    assert item.source.run["run_id"] == "first-future"
-    assert item.snapshot is item.source
+    assert item.snapshot.run["run_id"] == "first-future"
     assert item.opencode is not None
     assert [message["id"] for message in item.opencode.messages] == ["first future"]
 
@@ -402,7 +401,7 @@ def test_selection_chooses_latest_observation_before_request_end(
         )
 
     result = extract_context(request(), load_archive(archive.root))
-    assert result.items[0].source.run["run_id"] == "latest"
+    assert result.items[0].snapshot.run["run_id"] == "latest"
 
 
 def test_selection_chooses_earliest_observation_for_historical_request_end(
@@ -441,7 +440,7 @@ def test_selection_chooses_earliest_observation_for_historical_request_end(
 
     historical = ContextRequest.parse("2025-12-31T00:00:00Z", "2026-01-01T00:00:00Z")
     result = extract_context(historical, load_archive(archive.root))
-    assert result.items[0].source.run["run_id"] == "aug-20"
+    assert result.items[0].snapshot.run["run_id"] == "aug-20"
 
 
 def test_selection_uses_observation_window_not_collection_range(tmp_path: Path) -> None:
@@ -471,7 +470,7 @@ def test_selection_uses_observation_window_not_collection_range(tmp_path: Path) 
     )
 
     result = extract_context(request(), load_archive(archive.root))
-    assert result.items[0].source.run["run_id"] == "second"
+    assert result.items[0].snapshot.run["run_id"] == "second"
 
 
 def test_selection_contract_is_shared_by_github_and_opencode(
@@ -543,7 +542,7 @@ def test_selection_contract_is_shared_by_github_and_opencode(
 
     result = extract_context(request(), load_archive(archive.root))
     selected = {
-        item.source.manifest["source_kind"]: item.source.run["run_id"]
+        item.snapshot.manifest["source_kind"]: item.snapshot.run["run_id"]
         for item in result.items
     }
     assert selected == {"github": "github-new", "opencode": "opencode-new"}
@@ -1502,7 +1501,7 @@ def test_opencode_does_not_merge_a_later_observation(
     )
 
     result = extract_context(request(), load_archive(archive.root))
-    assert result.items[0].source.run["run_id"] == "selected"
+    assert result.items[0].snapshot.run["run_id"] == "selected"
     assert result.items[0].opencode is not None
     messages = result.items[0].opencode.messages
     assert [value["id"] for value in messages] == ["turn"]

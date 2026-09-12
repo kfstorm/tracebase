@@ -2,62 +2,25 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
 from .context_render import format_timestamp
+from .opencode_context import OpenCodeProjection
 
 _BACKGROUND_USER_TURN_LIMIT = 3
 _MINIMUM_RENDERED_LINES = 2
 
 
-def _session_context(item: ContextItem) -> dict[str, str]:
-    projection = item.opencode
-    if projection is None:
-        return {}
-    value = projection.session.get("value")
-    value = value if isinstance(value, dict) else {}
-    info = value.get("info")
-    info = info if isinstance(info, dict) else {}
+def _session_context(projection: OpenCodeProjection) -> dict[str, str]:
     context: dict[str, str] = {}
-    for source in (info, value):
-        candidate = source.get("directory")
-        if isinstance(candidate, str) and candidate:
-            context["working_directory"] = candidate
-            break
-    snapshot = item.source
-    metadata = snapshot.manifest.get("metadata")
-    session = metadata.get("session") if isinstance(metadata, dict) else None
-    if isinstance(session, dict):
-        candidate = session.get("directory")
-        if (
-            isinstance(candidate, str)
-            and candidate
-            and "working_directory" not in context
-        ):
-            context["working_directory"] = candidate
-    project = None
-    raw_project = snapshot.evidence.get("project.json")
-    if raw_project is not None:
-        try:
-            project = json.loads(raw_project)
-        except UnicodeDecodeError, json.JSONDecodeError:
-            project = None
-    if isinstance(project, dict):
-        candidate = project.get("worktree")
-        if (
-            isinstance(candidate, str)
-            and candidate
-            and project.get("id") != "global"
-            and candidate != "/"
-            and "project_directory" not in context
-        ):
-            context["project_directory"] = candidate
-    session_project = projection.session.get("project_directory")
-    if isinstance(session_project, str) and session_project:
-        context["project_directory"] = session_project
+    working_directory = projection.session.get("working_directory")
+    if isinstance(working_directory, str) and working_directory:
+        context["working_directory"] = working_directory
+    project_directory = projection.session.get("project_directory")
+    if isinstance(project_directory, str) and project_directory:
+        context["project_directory"] = project_directory
     if "project_directory" not in context and "working_directory" in context:
         context["project_directory"] = context["working_directory"]
     return context
@@ -151,7 +114,7 @@ def render_opencode(
     info = info if isinstance(info, dict) else {}
     title = info.get("title")
     title = title if isinstance(title, str) and title else "Untitled session"
-    context = _session_context(item)
+    context = _session_context(projection)
     directory = context.get("working_directory", ".")
     project_directory = context.get("project_directory", directory)
     overview = [f"# {title}", "", f"Project directory: `{project_directory}`"]

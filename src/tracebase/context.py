@@ -80,10 +80,6 @@ class ContextItem:
     github: GitHubProjection | None = None
     opencode: OpenCodeProjection | None = None
 
-    @property
-    def source(self) -> PublishedSnapshot:
-        return self.snapshot
-
 
 @dataclass(frozen=True, slots=True)
 class ContextExtractionResult:
@@ -248,7 +244,6 @@ def extract_context(
             _validate_context_source(snapshot)
             grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
     all_items: list[ContextItem] = []
-    opencode_projections: dict[tuple[str, str, str, str], OpenCodeProjection] = {}
     for key, snapshots in sorted(grouped.items()):
         selected_snapshot = select_observation(tuple(snapshots), request.end)
         try:
@@ -264,18 +259,9 @@ def extract_context(
             )
         except ArchiveError as error:
             raise ContextError(str(error)) from None
-        if opencode is not None:
-            opencode_projections[key] = opencode
         all_items.append(ContextItem(selected_snapshot, "", github, opencode))
     # Child sessions remain archive evidence but are intentionally excluded from
     # Context Output; the public document scope is root sessions only.
-    all_items = [
-        replace(
-            item,
-            opencode=opencode_projections.get(_logical_key(item.source)),
-        )
-        for item in all_items
-    ]
     all_items = [
         item
         for item in all_items

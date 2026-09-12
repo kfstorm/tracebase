@@ -255,7 +255,7 @@ def project_opencode(  # noqa: PLR0915
 ) -> OpenCodeProjection:
     """Project messages as points and tool executions as intervals."""
     source_id = snapshot.manifest["source_id"]
-    session: dict[str, Any] = {"value": {}, "representations": []}
+    session: dict[str, Any] = {"value": {}}
     messages: list[dict[str, Any]] = []
     payload = _json(snapshot)
     info = payload.get("info")
