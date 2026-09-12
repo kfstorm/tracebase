@@ -17,6 +17,9 @@ tracebase = "tracebase:main"
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+include = ["src/tracebase/prompts/*.md", "src/tracebase/container/Dockerfile"]
+
 [dependency-groups]
 dev = [
     "mypy>=1.13.0",
@@ -82,6 +85,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["PLR2004"]
+"src/tracebase/cli.py" = ["PLR0911"]
+"src/tracebase/summary.py" = ["PLR0915"]
+"src/tracebase/summary_shards.py" = ["PLR0915"]
 
 [tool.ruff.format]
 quote-style = "double"
