@@ -627,6 +627,20 @@ def test_empty_removed_run_directory_is_tolerated(tmp_path: Path) -> None:
     assert files(output) == {"index.md"}
 
 
+def test_empty_published_run_without_snapshots_directory_is_tolerated(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    published = run(archive).publish({})
+    (published / "snapshots").rmdir()
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    assert files(output) == {"index.md"}
+
+
 def test_nonempty_unregistered_run_content_fails(tmp_path: Path) -> None:
     archive = tmp_path / "archive"
     invalid_run = archive / "runs" / "invalid-run"
