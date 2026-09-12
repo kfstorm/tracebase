@@ -27,34 +27,34 @@ def _session_context(item: ContextItem) -> dict[str, str]:
         if isinstance(candidate, str) and candidate:
             context["working_directory"] = candidate
             break
-    for snapshot in reversed(item.snapshots):
-        metadata = snapshot.manifest.get("metadata")
-        session = metadata.get("session") if isinstance(metadata, dict) else None
-        if isinstance(session, dict):
-            candidate = session.get("directory")
-            if (
-                isinstance(candidate, str)
-                and candidate
-                and "working_directory" not in context
-            ):
-                context["working_directory"] = candidate
-        project = None
-        raw_project = snapshot.evidence.get("project.json")
-        if raw_project is not None:
-            try:
-                project = json.loads(raw_project)
-            except UnicodeDecodeError, json.JSONDecodeError:
-                project = None
-        if isinstance(project, dict):
-            candidate = project.get("worktree")
-            if (
-                isinstance(candidate, str)
-                and candidate
-                and project.get("id") != "global"
-                and candidate != "/"
-                and "project_directory" not in context
-            ):
-                context["project_directory"] = candidate
+    snapshot = item.source
+    metadata = snapshot.manifest.get("metadata")
+    session = metadata.get("session") if isinstance(metadata, dict) else None
+    if isinstance(session, dict):
+        candidate = session.get("directory")
+        if (
+            isinstance(candidate, str)
+            and candidate
+            and "working_directory" not in context
+        ):
+            context["working_directory"] = candidate
+    project = None
+    raw_project = snapshot.evidence.get("project.json")
+    if raw_project is not None:
+        try:
+            project = json.loads(raw_project)
+        except UnicodeDecodeError, json.JSONDecodeError:
+            project = None
+    if isinstance(project, dict):
+        candidate = project.get("worktree")
+        if (
+            isinstance(candidate, str)
+            and candidate
+            and project.get("id") != "global"
+            and candidate != "/"
+            and "project_directory" not in context
+        ):
+            context["project_directory"] = candidate
     session_project = projection.session.get("project_directory")
     if isinstance(session_project, str) and session_project:
         context["project_directory"] = session_project

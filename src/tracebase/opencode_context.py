@@ -82,23 +82,20 @@ def _json(snapshot: PublishedSnapshot) -> dict[str, Any]:
     return value
 
 
-def _project_worktree(snapshots: tuple[PublishedSnapshot, ...]) -> str | None:
-    for snapshot in reversed(snapshots):
-        raw_project = snapshot.evidence.get("project.json")
-        if raw_project is None:
-            continue
-        try:
-            project = json.loads(raw_project)
-        except UnicodeDecodeError, json.JSONDecodeError:
-            continue
-        if not isinstance(project, dict):
-            continue
-        if project.get("id") == "global":
-            continue
-        worktree = project.get("worktree")
-        if isinstance(worktree, str) and worktree and worktree != "/":
-            return worktree
-    return None
+def _project_worktree(snapshot: PublishedSnapshot) -> str | None:
+    raw_project = snapshot.evidence.get("project.json")
+    if raw_project is None:
+        return None
+    try:
+        project = json.loads(raw_project)
+    except UnicodeDecodeError, json.JSONDecodeError:
+        return None
+    if not isinstance(project, dict) or project.get("id") == "global":
+        return None
+    worktree = project.get("worktree")
+    return (
+        worktree if isinstance(worktree, str) and worktree and worktree != "/" else None
+    )
 
 
 def _created(value: dict[str, Any]) -> datetime:
@@ -254,142 +251,108 @@ def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None
 
 
 def project_opencode(  # noqa: PLR0915
-    snapshots: tuple[PublishedSnapshot, ...], start: datetime, end: datetime
+    snapshot: PublishedSnapshot, start: datetime, end: datetime
 ) -> OpenCodeProjection:
     """Project messages as points and tool executions as intervals."""
-    if not snapshots:
-        raise ArchiveError("OpenCode session has no snapshot")
-    source_id = snapshots[0].manifest["source_id"]
+    source_id = snapshot.manifest["source_id"]
     session: dict[str, Any] = {"value": {}, "representations": []}
-    latest_header: dict[str, Any] = {}
-    messages_by_id: dict[str, dict[str, Any]] = {}
-    for snapshot in snapshots:
-        payload = _json(snapshot)
-        info = payload.get("info")
+    messages: list[dict[str, Any]] = []
+    payload = _json(snapshot)
+    info = payload.get("info")
+    info = info if isinstance(info, dict) else {}
+    payload_id = payload.get("id")
+    info_id = info.get("id")
+    if not any(value == source_id for value in (payload_id, info_id)) or any(
+        value is not None and value != source_id for value in (payload_id, info_id)
+    ):
+        raise ArchiveError("OpenCode session payload identity was invalid")
+    raw_messages = payload.get("messages")
+    if not isinstance(raw_messages, list):
+        raise ArchiveError("OpenCode session payload is invalid")
+    for message in raw_messages:
+        if not isinstance(message, dict):
+            raise ArchiveError("OpenCode message payload is invalid")
+        info = message.get("info")
         info = info if isinstance(info, dict) else {}
-        payload_id = payload.get("id")
-        info_id = info.get("id")
-        if not any(value == source_id for value in (payload_id, info_id)) or any(
-            value is not None and value != source_id for value in (payload_id, info_id)
-        ):
-            raise ArchiveError("OpenCode session payload identity was invalid")
-        latest_header = _session_header(payload)
-        raw_messages = payload.get("messages")
-        if not isinstance(raw_messages, list):
-            raise ArchiveError("OpenCode session payload is invalid")
-        for message in raw_messages:
-            if not isinstance(message, dict):
+        message_id = message.get("id", info.get("id"))
+        if not isinstance(message_id, str) or not message_id:
+            raise ArchiveError("OpenCode message payload is invalid")
+        message_time = _created(message)
+        record: dict[str, Any] = {
+            "id": message_id,
+            "created": message_time.isoformat(),
+            "role": message.get("role", info.get("role")),
+            "temporal_roles": _point_roles(message_time, start, end),
+        }
+        parts = message.get("parts", ())
+        if not isinstance(parts, list):
+            raise ArchiveError("OpenCode message payload is invalid")
+        if not all(isinstance(part, dict) for part in parts):
+            raise ArchiveError("OpenCode message payload is invalid")
+        supporting_message = _supporting_message(message)
+        record["_created_time"] = message_time
+        record["_supporting_message"] = supporting_message
+        if supporting_message:
+            record["temporal_roles"] = ("observed_state",)
+        parts_by_id: dict[str, dict[str, Any]] = {}
+        for part in parts:
+            if not isinstance(part, dict):
                 raise ArchiveError("OpenCode message payload is invalid")
-            info = message.get("info")
-            info = info if isinstance(info, dict) else {}
-            message_id = message.get("id", info.get("id"))
-            if not isinstance(message_id, str) or not message_id:
-                raise ArchiveError("OpenCode message payload is invalid")
-            message_time = _created(message)
-            record: dict[str, Any] = {
-                "id": message_id,
-                "created": message_time.isoformat(),
-                "role": message.get("role", info.get("role")),
-                "temporal_roles": _point_roles(message_time, start, end),
-            }
-            parts = message.get("parts", ())
-            if not isinstance(parts, list):
-                raise ArchiveError("OpenCode message payload is invalid")
-            if not all(isinstance(part, dict) for part in parts):
-                raise ArchiveError("OpenCode message payload is invalid")
-            supporting_message = _supporting_message(message)
-            record["_created_time"] = message_time
-            record["_supporting_message"] = supporting_message
-            if supporting_message:
-                record["temporal_roles"] = ("observed_state",)
-            parts_by_id: dict[str, dict[str, Any]] = {}
-            for part in parts:
-                if not isinstance(part, dict):
-                    raise ArchiveError("OpenCode message payload is invalid")
-                part_id = _part_id(part)
-                part_interval = (
-                    _tool_times(part)
-                    if part.get("type") == "tool" or _part_is_task(part)
-                    else _part_times(part)
-                )
-                part_record = parts_by_id.setdefault(
-                    part_id,
-                    {
-                        "id": part_id,
-                        "type": part.get("type"),
-                        "value": part,
-                        "temporal_roles": (
-                            _interval_roles(part_interval, start, end)
-                            if part_interval is not None
-                            else ("observed_state",)
-                        ),
-                        "intervals": [],
-                    },
-                )
-                if part_interval is not None:
-                    part_record["intervals"].append(part_interval)
-                    part_record["_start_time"] = part_interval[0]
-                    part_record["start"] = part_interval[0].isoformat()
-                    if part_interval[1] is not None:
-                        part_record["end"] = part_interval[1].isoformat()
-                    else:
-                        part_record["completion"] = "unknown"
-            if parts_by_id:
-                record["parts"] = list(parts_by_id.values())
-            prior = messages_by_id.get(message_id)
-            if prior is None:
-                messages_by_id[message_id] = record
-            else:
-                prior["_supporting_message"] = (
-                    prior["_supporting_message"] or record["_supporting_message"]
-                )
-                if prior["_supporting_message"]:
-                    prior["temporal_roles"] = ("observed_state",)
-                prior_parts = {part["id"]: part for part in prior.get("parts", ())}
-                for part in record.get("parts", ()):
-                    prior_part = prior_parts.get(part["id"])
-                    if prior_part is None:
-                        prior.setdefault("parts", []).append(part)
-                    else:
-                        prior_part["value"] = part["value"]
-                        prior_part["intervals"].extend(part["intervals"])
-                        if "_start_time" in part:
-                            prior_part["_start_time"] = part["_start_time"]
-                            prior_part["start"] = part["start"]
-                        if "end" in part:
-                            prior_part["end"] = part["end"]
-                            prior_part.pop("completion", None)
-                        elif "completion" in part:
-                            prior_part.pop("end", None)
-                            prior_part["completion"] = part["completion"]
-                        _refresh_part_roles(prior_part, start, end)
-    latest_value = latest_header
+            part_id = _part_id(part)
+            part_interval = (
+                _tool_times(part)
+                if part.get("type") == "tool" or _part_is_task(part)
+                else _part_times(part)
+            )
+            part_record = parts_by_id.setdefault(
+                part_id,
+                {
+                    "id": part_id,
+                    "type": part.get("type"),
+                    "value": part,
+                    "temporal_roles": (
+                        _interval_roles(part_interval, start, end)
+                        if part_interval is not None
+                        else ("observed_state",)
+                    ),
+                    "intervals": [],
+                },
+            )
+            if part_interval is not None:
+                part_record["intervals"].append(part_interval)
+                part_record["_start_time"] = part_interval[0]
+                part_record["start"] = part_interval[0].isoformat()
+                if part_interval[1] is not None:
+                    part_record["end"] = part_interval[1].isoformat()
+                else:
+                    part_record["completion"] = "unknown"
+        if parts_by_id:
+            record["parts"] = list(parts_by_id.values())
+        messages.append(record)
+    latest_value = _session_header(payload)
     session["value"] = latest_value
     latest_info = latest_value.get("info")
     latest_info = latest_info if isinstance(latest_info, dict) else {}
     directory = latest_info.get("directory", latest_value.get("directory"))
     if not isinstance(directory, str) or not directory:
-        for snapshot in reversed(snapshots):
-            metadata = snapshot.manifest.get("metadata")
-            session_metadata = (
-                metadata.get("session") if isinstance(metadata, dict) else None
-            )
-            candidate = (
-                session_metadata.get("directory")
-                if isinstance(session_metadata, dict)
-                else None
-            )
-            if isinstance(candidate, str) and candidate:
-                directory = candidate
-                break
+        metadata = snapshot.manifest.get("metadata")
+        session_metadata = (
+            metadata.get("session") if isinstance(metadata, dict) else None
+        )
+        candidate = (
+            session_metadata.get("directory")
+            if isinstance(session_metadata, dict)
+            else None
+        )
+        if isinstance(candidate, str) and candidate:
+            directory = candidate
     if isinstance(directory, str) and directory:
         session["working_directory"] = directory
-    project_directory = _project_worktree(snapshots)
+    project_directory = _project_worktree(snapshot)
     if project_directory is None and isinstance(directory, str) and directory:
         project_directory = directory
     if project_directory is not None:
         session["project_directory"] = project_directory
-    messages = list(messages_by_id.values())
     messages.sort(key=lambda message: (message["_created_time"], message["id"]))
     for message in messages:
         message.get("parts", []).sort(

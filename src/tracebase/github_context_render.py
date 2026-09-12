@@ -18,47 +18,21 @@ def _representations(record: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
 
-def _observation_end(representation: dict[str, Any]) -> datetime | None:
-    window = representation.get("observation_window")
-    if not isinstance(window, dict):
-        return None
-    return parse_timestamp(window.get("to"))
-
-
 def _representation_value(
-    record: dict[str, Any], end: datetime
+    record: dict[str, Any],
 ) -> dict[str, Any] | str | bytes | None:
-    value, _ = _representation_selection(record, end)
-    return value
-
-
-def _representation_selection(
-    record: dict[str, Any], end: datetime
-) -> tuple[dict[str, Any] | str | bytes | None, bool]:
     representations = _representations(record)
-    eligible = [
-        representation
-        for representation in representations
-        if (observed_end := _observation_end(representation)) is not None
-        and observed_end <= end
-    ]
-    candidates = eligible or representations
-    if not candidates:
-        return None, False
-    value = candidates[-1].get("value")
+    if not representations:
+        return None
+    value = representations[-1].get("value")
     selected = value if isinstance(value, (dict, str, bytes)) else None
-    later = not eligible and any(
-        (observed_end := _observation_end(representation)) is not None
-        and observed_end > end
-        for representation in representations
-    )
-    return selected, later
+    return selected
 
 
-def _value(record: dict[str, Any] | None, end: datetime) -> dict[str, Any] | str | None:
+def _value(record: dict[str, Any] | None) -> dict[str, Any] | str | None:
     if record is None:
         return None
-    value = _representation_value(record, end)
+    value = _representation_value(record)
     return value if isinstance(value, (dict, str)) else None
 
 
@@ -267,7 +241,7 @@ def _thread_entries(
     for record in records:
         if record.get("kind") != "inline-comment":
             continue
-        value = _value(record, end)
+        value = _value(record)
         if isinstance(value, dict):
             inline[str(record.get("native_id"))] = value
     entries: list[tuple[datetime, str, list[str]]] = []
@@ -275,7 +249,7 @@ def _thread_entries(
     earlier_thread_ids: set[str] = set()
     all_threaded_ids: set[str] = set()
     for thread_record in _record_by_kind(records, "review-thread"):
-        thread = _value(thread_record, end)
+        thread = _value(thread_record)
         if not isinstance(thread, dict):
             continue
         earlier, activity, _future = _thread_comments(thread, inline, start, end)
@@ -356,7 +330,7 @@ def _event_entries(  # noqa: PLR0915
             native_id = str(record.get("native_id"))
             if kind == "inline-comment" and native_id in all_threaded_ids:
                 continue
-            value = _value(record, end)
+            value = _value(record)
             if not isinstance(value, dict):
                 continue
             if _event_bucket(value, start, end) != bucket:
@@ -372,7 +346,7 @@ def _event_entries(  # noqa: PLR0915
             _comment(lines, value, timezone, projection.tracked_login)
             entries.append((event_time, native_id, lines))
         elif kind == "timeline":
-            value = _value(record, end)
+            value = _value(record)
             if not isinstance(value, dict):
                 continue
             label = _lifecycle(value, projection.tracked_login)
@@ -396,7 +370,7 @@ def _event_entries(  # noqa: PLR0915
                 )
             )
         elif kind == "review":
-            value = _value(record, end)
+            value = _value(record)
             if not isinstance(value, dict):
                 continue
             review_lines = _review_lines(value, timezone, projection.tracked_login)
@@ -430,7 +404,6 @@ def _activity(
 def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
     assert item.github is not None
     projection = item.github
-    end = result.request.end
     object_record = next(
         (
             record
@@ -439,11 +412,7 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
         ),
         None,
     )
-    value, object_used_later = (
-        _representation_selection(object_record, end)
-        if object_record is not None
-        else (None, False)
-    )
+    value = _representation_value(object_record) if object_record is not None else None
     value = value if isinstance(value, dict) else {}
     kind = (
         "PR"
@@ -473,19 +442,6 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
         ),
         None,
     )
-    _, diff_used_later = (
-        _representation_selection(diff_record, end)
-        if diff_record is not None
-        else (None, False)
-    )
-    if object_used_later or diff_used_later:
-        lines.extend(
-            [
-                "",
-                "Mutable fields may include later-observed changes and are not "
-                "guaranteed to equal the exact state at the request cutoff.",
-            ]
-        )
     if diff_record is not None:
         lines.extend(
             ["", "## Code changes", "", "Full diff: [diff.patch](diff.patch)", ""]
@@ -505,7 +461,7 @@ def _diff_content(item: ContextItem, result: ContextExtractionResult) -> bytes |
     )
     if record is None:
         return None
-    value = _representation_value(record, result.request.end)
+    value = _representation_value(record)
     if isinstance(value, bytes):
         return value
     return value.encode("utf-8") if isinstance(value, str) else None

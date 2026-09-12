@@ -224,18 +224,18 @@ def _record_sort_key(
 
 
 def project_github(  # noqa: PLR0915
-    snapshots: tuple[PublishedSnapshot, ...], start: datetime, end: datetime
+    selected_snapshot: PublishedSnapshot, start: datetime, end: datetime
 ) -> GitHubProjection:
     """Project archived GitHub payloads without inferring causal history."""
     records: dict[tuple[str, str], dict[str, Any]] = {}
     relations: set[tuple[str, str, str]] = set()
-    source_id = snapshots[0].manifest["source_id"]
-    object_kind = snapshots[0].manifest["object_kind"]
+    source_id = selected_snapshot.manifest["source_id"]
+    object_kind = selected_snapshot.manifest["object_kind"]
     repository = "unknown/unknown"
     number = 0
     title: str | None = None
-    effective_options = (
-        snapshots[0].run.get("collector", {}).get("effective_options", {})
+    effective_options = selected_snapshot.run.get("collector", {}).get(
+        "effective_options", {}
     )
     tracked_login = (
         effective_options.get("actor_login")
@@ -245,7 +245,7 @@ def project_github(  # noqa: PLR0915
     if not isinstance(tracked_login, str) or not tracked_login:
         tracked_login = None
     paged_thread_comments: list[tuple[int, str, list[dict[str, Any]]]] = []
-    for observation, snapshot in enumerate(snapshots, start=1):
+    for observation, snapshot in enumerate((selected_snapshot,), start=1):
         inline_nodes_by_rest_id: dict[int, str] = {}
         inline_replies: list[tuple[int, str]] = []
         issue = _json(snapshot, "issue.json")
