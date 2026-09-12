@@ -93,7 +93,6 @@ def _record(
     value: dict[str, Any],
     evidence_path: str,
     snapshot: PublishedSnapshot,
-    observation: int,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "kind": kind,
@@ -102,8 +101,6 @@ def _record(
             {
                 "evidence_path": evidence_path,
                 "run_id": snapshot.run["run_id"],
-                "observation": observation,
-                "observation_window": snapshot.manifest["observation_window"],
                 "value": value,
             }
         ],
@@ -244,8 +241,10 @@ def project_github(  # noqa: PLR0915
     )
     if not isinstance(tracked_login, str) or not tracked_login:
         tracked_login = None
-    paged_thread_comments: list[tuple[int, str, list[dict[str, Any]]]] = []
-    for observation, snapshot in enumerate((selected_snapshot,), start=1):
+    paged_thread_comments: list[tuple[str, list[dict[str, Any]]]] = []
+
+    def process_snapshot(snapshot: PublishedSnapshot) -> None:  # noqa: PLR0915
+        nonlocal number, repository, title
         inline_nodes_by_rest_id: dict[int, str] = {}
         inline_replies: list[tuple[int, str]] = []
         issue = _json(snapshot, "issue.json")
@@ -264,7 +263,7 @@ def project_github(  # noqa: PLR0915
             title = issue["title"]
         _add_record(
             records,
-            _record(object_kind, source_id, issue, "issue.json", snapshot, observation),
+            _record(object_kind, source_id, issue, "issue.json", snapshot),
         )
         for path in sorted(
             name for name in snapshot.evidence if name.startswith("comments.")
@@ -280,7 +279,6 @@ def project_github(  # noqa: PLR0915
                             value,
                             path,
                             snapshot,
-                            observation,
                         ),
                     )
                     node_id = value.get("node_id")
@@ -316,12 +314,10 @@ def project_github(  # noqa: PLR0915
                         kind, identifier = "review", value["id"]
                     _add_record(
                         records,
-                        _record(
-                            kind, str(identifier), value, path, snapshot, observation
-                        ),
+                        _record(kind, str(identifier), value, path, snapshot),
                     )
         if object_kind != "pull-request":
-            continue
+            return
         pull = _json(snapshot, "pull-request.json")
         if not isinstance(pull, dict) or pull.get("node_id") != source_id:
             raise ArchiveError("GitHub Pull Request evidence identity was invalid")
@@ -333,7 +329,6 @@ def project_github(  # noqa: PLR0915
                 pull,
                 "pull-request.json",
                 snapshot,
-                observation,
             ),
         )
         for path in sorted(
@@ -349,7 +344,6 @@ def project_github(  # noqa: PLR0915
                             value,
                             path,
                             snapshot,
-                            observation,
                         ),
                     )
         for path in sorted(
@@ -361,9 +355,7 @@ def project_github(  # noqa: PLR0915
                     raise ArchiveError("GitHub review-comment evidence was invalid")
                 _add_record(
                     records,
-                    _record(
-                        "inline-comment", node_id, value, path, snapshot, observation
-                    ),
+                    _record("inline-comment", node_id, value, path, snapshot),
                 )
                 if isinstance(value.get("id"), int):
                     inline_nodes_by_rest_id[value["id"]] = node_id
@@ -390,7 +382,6 @@ def project_github(  # noqa: PLR0915
                         thread,
                         path,
                         snapshot,
-                        observation,
                     ),
                 )
                 for comment in nodes:
@@ -418,7 +409,7 @@ def project_github(  # noqa: PLR0915
                 raise ArchiveError("GitHub review-thread comments were invalid")
             if not all(isinstance(comment, dict) for comment in nodes):
                 raise ArchiveError("GitHub review-thread comments were invalid")
-            paged_thread_comments.append((observation, thread_id, nodes))
+            paged_thread_comments.append((thread_id, nodes))
             for comment in nodes:
                 if not isinstance(comment.get("id"), str):
                     raise ArchiveError("GitHub review-thread comments were invalid")
@@ -438,22 +429,18 @@ def project_github(  # noqa: PLR0915
                         {
                             "evidence_path": "pull-request.diff",
                             "run_id": snapshot.run["run_id"],
-                            "observation": observation,
-                            "observation_window": snapshot.manifest[
-                                "observation_window"
-                            ],
                             "value": snapshot.evidence["pull-request.diff"],
                         }
                     ],
                 },
             )
-    for observation, thread_id, nodes in paged_thread_comments:
+
+    process_snapshot(selected_snapshot)
+    for thread_id, nodes in paged_thread_comments:
         record = records.get(("review-thread", thread_id))
         if record is None:
             continue
         for representation in reversed(record["representations"]):
-            if representation.get("observation") != observation:
-                continue
             value = representation.get("value")
             if isinstance(value, dict):
                 _merge_thread_comments(value, nodes)
