@@ -25,6 +25,7 @@ from .progress import (
     ProgressReporter,
     RichProgressSink,
 )
+from .summary import SummaryError, SummaryRequest, summarize, summarize_archive
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -90,6 +91,16 @@ def _parser() -> argparse.ArgumentParser:
     context.add_argument("--from", dest="from_text", required=True)
     context.add_argument("--to", dest="to_text", required=True)
     context.add_argument("--output", required=True)
+    summary = commands.add_parser("summary", add_help=True, allow_abbrev=False)
+    inputs = summary.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--archive")
+    inputs.add_argument("--context")
+    summary.add_argument("--from", dest="from_text")
+    summary.add_argument("--to", dest="to_text")
+    summary.add_argument("--model", required=True)
+    summary.add_argument("--variant")
+    summary.add_argument("--output", required=True)
+    summary.add_argument("--context-output")
     return parser
 
 
@@ -113,6 +124,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("context operation failed", file=sys.stderr)
             return 1
         print(f"context output published at {published}")
+        return 0
+    if arguments.command == "summary":
+        try:
+            if arguments.archive is not None:
+                if not arguments.from_text or not arguments.to_text:
+                    raise SummaryError("archive summary requires --from and --to")
+                request = ContextRequest.parse(arguments.from_text, arguments.to_text)
+                published = summarize_archive(
+                    Path(arguments.archive),
+                    Path(arguments.context_output)
+                    if arguments.context_output
+                    else None,
+                    request,
+                    arguments.model,
+                    arguments.variant,
+                    Path(arguments.output),
+                )
+            else:
+                if arguments.from_text or arguments.to_text or arguments.context_output:
+                    raise SummaryError(
+                        "--from, --to, and --context-output require --archive"
+                    )
+                published = summarize(
+                    SummaryRequest(
+                        Path(arguments.context),
+                        arguments.model,
+                        arguments.variant,
+                        Path(arguments.output),
+                    )
+                )
+        except (ContextError, SummaryError) as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        print(f"summary output published at {published}")
         return 0
     collection_range = CollectionRange.parse(arguments.from_text, arguments.to_text)
     archive = Archive(arguments.archive)
