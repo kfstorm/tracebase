@@ -75,14 +75,10 @@ class ContextRequest:
 
 @dataclass(frozen=True, slots=True)
 class ContextItem:
-    snapshots: tuple[PublishedSnapshot, ...]
+    snapshot: PublishedSnapshot
     path: str
     github: GitHubProjection | None = None
     opencode: OpenCodeProjection | None = None
-
-    @property
-    def source(self) -> PublishedSnapshot:
-        return self.snapshots[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,18 +105,48 @@ def _logical_key(snapshot: PublishedSnapshot) -> tuple[str, str, str, str]:
     )
 
 
-def _snapshot_sort_key(snapshot: PublishedSnapshot) -> tuple[datetime, datetime, str]:
-    collection_range = snapshot.run["collection_range"]
-
-    def parse(value: str) -> datetime:
+def _observation_window(snapshot: PublishedSnapshot) -> tuple[datetime, datetime]:
+    window = snapshot.manifest.get("observation_window")
+    if not isinstance(window, dict):
+        raise ContextError("snapshot observation window is invalid")
+    start_value = window.get("from")
+    end_value = window.get("to")
+    if not isinstance(start_value, str) or not isinstance(end_value, str):
+        raise ContextError("snapshot observation window is invalid")
+    parsed: list[datetime] = []
+    for value in (start_value, end_value):
         normalized = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
-        return datetime.fromisoformat(normalized)
+        try:
+            timestamp = datetime.fromisoformat(normalized)
+        except ValueError:
+            raise ContextError("snapshot observation window is invalid") from None
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ContextError("snapshot observation window is invalid")
+        parsed.append(timestamp)
+    start, end = parsed
+    if start >= end:
+        raise ContextError("snapshot observation window is invalid")
+    return start, end
 
-    return (
-        parse(collection_range["from"]),
-        parse(collection_range["to"]),
-        snapshot.run["run_id"],
-    )
+
+def _observation_sort_key(
+    snapshot: PublishedSnapshot,
+) -> tuple[datetime, datetime, str]:
+    start, end = _observation_window(snapshot)
+    return end, start, snapshot.run["run_id"]
+
+
+def select_observation(
+    snapshots: tuple[PublishedSnapshot, ...], end: datetime
+) -> PublishedSnapshot:
+    """Select one observation using only its manifest window and run identity."""
+    if not snapshots:
+        raise ContextError("logical object has no snapshot")
+    ordered = sorted(snapshots, key=_observation_sort_key)
+    at_or_after_request_end = [
+        snapshot for snapshot in ordered if _observation_window(snapshot)[1] >= end
+    ]
+    return at_or_after_request_end[0] if at_or_after_request_end else ordered[-1]
 
 
 def _safe_component(value: str) -> str:
@@ -218,34 +244,24 @@ def extract_context(
             _validate_context_source(snapshot)
             grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
     all_items: list[ContextItem] = []
-    opencode_projections: dict[tuple[str, str, str, str], OpenCodeProjection] = {}
     for key, snapshots in sorted(grouped.items()):
-        ordered = tuple(sorted(snapshots, key=_snapshot_sort_key))
+        selected_snapshot = select_observation(tuple(snapshots), request.end)
         try:
             github = (
-                project_github(ordered, request.start, request.end)
+                project_github(selected_snapshot, request.start, request.end)
                 if key[0] == "github"
                 else None
             )
             opencode = (
-                project_opencode(ordered, request.start, request.end)
+                project_opencode(selected_snapshot, request.start, request.end)
                 if key[0] == "opencode"
                 else None
             )
         except ArchiveError as error:
             raise ContextError(str(error)) from None
-        if opencode is not None:
-            opencode_projections[key] = opencode
-        all_items.append(ContextItem(ordered, "", github, opencode))
+        all_items.append(ContextItem(selected_snapshot, "", github, opencode))
     # Child sessions remain archive evidence but are intentionally excluded from
     # Context Output; the public document scope is root sessions only.
-    all_items = [
-        replace(
-            item,
-            opencode=opencode_projections.get(_logical_key(item.source)),
-        )
-        for item in all_items
-    ]
     all_items = [
         item
         for item in all_items

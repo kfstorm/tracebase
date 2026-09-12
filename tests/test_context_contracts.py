@@ -18,6 +18,7 @@ from tracebase.context import (
     extract_context,
     generate_context,
     load_archive,
+    select_observation,
 )
 
 
@@ -53,6 +54,18 @@ def message(
     role: str = "user",
 ) -> dict[str, object]:
     return {"id": message_id, "created": created, "role": role, "parts": parts or []}
+
+
+def bash_tool(end: str | None = None) -> dict[str, object]:
+    time_data: dict[str, str] = {"start": "2026-01-01T01:00:00Z"}
+    if end is not None:
+        time_data["end"] = end
+    return {
+        "id": "bash",
+        "type": "tool",
+        "tool": "bash",
+        "state": {"status": "completed" if end else "running", "time": time_data},
+    }
 
 
 def append_user_assistant_turn(messages: list[dict[str, object]], index: int) -> None:
@@ -104,6 +117,7 @@ def publish_opencode(
     project: dict[str, object] | None = None,
     from_text: str | None = None,
     to_text: str | None = None,
+    observation_window: dict[str, str] | None = None,
 ) -> None:
     current = run(
         archive,
@@ -127,7 +141,9 @@ def publish_opencode(
             "opencode",
             "session",
             session_id,
-            current.collection_range.as_manifest(),
+            observation_window
+            if observation_window is not None
+            else current.collection_range.as_manifest(),
             tuple(
                 {"path": path}
                 for path in (
@@ -160,6 +176,7 @@ def publish_github(
     from_text: str = "2026-01-01T00:00:00+08:00",
     to_text: str = "2026-01-02T00:00:00+08:00",
     effective_options: dict[str, object] | None = None,
+    observation_window: dict[str, str] | None = None,
 ) -> None:
     current = run(
         archive,
@@ -174,7 +191,9 @@ def publish_github(
             "github",
             object_kind,
             source_id,
-            current.collection_range.as_manifest(),
+            observation_window
+            if observation_window is not None
+            else current.collection_range.as_manifest(),
             tuple({"path": name} for name in evidence),
         )
     )
@@ -287,6 +306,274 @@ def github_output(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     return output
+
+
+def test_selection_chooses_first_observation_at_or_after_request_end(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    for run_id, marker, from_text, to_text, observed_to in (
+        (
+            "before",
+            "before",
+            "2025-12-28T00:00:00+00:00",
+            "2025-12-29T00:00:00+00:00",
+            "2026-01-01T10:00:00Z",
+        ),
+        (
+            "first-future",
+            "first future",
+            "2025-12-29T00:00:00+00:00",
+            "2025-12-30T00:00:00+00:00",
+            "2026-01-01T17:00:00Z",
+        ),
+        (
+            "second-future",
+            "second future",
+            "2025-12-30T00:00:00+00:00",
+            "2025-12-31T00:00:00+00:00",
+            "2026-01-01T18:00:00Z",
+        ),
+    ):
+        publish_opencode(
+            archive,
+            session(
+                "root",
+                messages=[
+                    message(
+                        marker,
+                        "2026-01-01T01:00:00Z",
+                        [{"type": "text", "text": marker}],
+                    )
+                ],
+            ),
+            run_id,
+            from_text=from_text,
+            to_text=to_text,
+            observation_window={
+                "from": "2026-01-01T09:00:00Z",
+                "to": observed_to,
+            },
+        )
+
+    result = extract_context(request(), load_archive(archive.root))
+    item = result.items[0]
+    assert item.snapshot.run["run_id"] == "first-future"
+    assert item.opencode is not None
+    assert [message["id"] for message in item.opencode.messages] == ["first future"]
+
+
+def test_selection_chooses_latest_observation_before_request_end(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    for run_id, marker, from_text, to_text, observed_to in (
+        (
+            "early",
+            "early",
+            "2025-12-28T00:00:00+00:00",
+            "2025-12-29T00:00:00+00:00",
+            "2026-01-01T10:00:00Z",
+        ),
+        (
+            "latest",
+            "latest",
+            "2025-12-29T00:00:00+00:00",
+            "2025-12-30T00:00:00+00:00",
+            "2026-01-01T15:00:00Z",
+        ),
+    ):
+        publish_opencode(
+            archive,
+            session(
+                "root",
+                messages=[message(marker, "2026-01-01T01:00:00Z")],
+            ),
+            run_id,
+            from_text=from_text,
+            to_text=to_text,
+            observation_window={
+                "from": "2026-01-01T09:00:00Z",
+                "to": observed_to,
+            },
+        )
+
+    result = extract_context(request(), load_archive(archive.root))
+    assert result.items[0].snapshot.run["run_id"] == "latest"
+
+
+def test_selection_chooses_earliest_observation_for_historical_request_end(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    for run_id, from_text, to_text, observed_to in (
+        (
+            "aug-20",
+            "2025-12-28T00:00:00+00:00",
+            "2025-12-29T00:00:00+00:00",
+            "2026-01-03T00:00:00Z",
+        ),
+        (
+            "sep-01",
+            "2025-12-29T00:00:00+00:00",
+            "2025-12-30T00:00:00+00:00",
+            "2026-01-04T00:00:00Z",
+        ),
+    ):
+        publish_opencode(
+            archive,
+            session(
+                "root",
+                messages=[message(run_id, "2025-12-31T12:00:00Z")],
+            ),
+            run_id,
+            from_text=from_text,
+            to_text=to_text,
+            observation_window={
+                "from": "2026-01-02T00:00:00Z",
+                "to": observed_to,
+            },
+        )
+
+    historical = ContextRequest.parse("2025-12-31T00:00:00Z", "2026-01-01T00:00:00Z")
+    result = extract_context(historical, load_archive(archive.root))
+    assert result.items[0].snapshot.run["run_id"] == "aug-20"
+
+
+def test_selection_uses_observation_window_not_collection_range(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session("root", messages=[message("first", "2026-01-01T01:00:00Z")]),
+        "first",
+        from_text="2026-01-01T00:00:00+00:00",
+        to_text="2026-01-02T00:00:00+00:00",
+        observation_window={
+            "from": "2026-01-01T09:00:00Z",
+            "to": "2026-01-01T10:00:00Z",
+        },
+    )
+    publish_opencode(
+        archive,
+        session("root", messages=[message("second", "2026-01-01T01:00:00Z")]),
+        "second",
+        from_text="2026-01-02T00:00:00+00:00",
+        to_text="2026-01-03T00:00:00+00:00",
+        observation_window={
+            "from": "2026-01-01T11:00:00Z",
+            "to": "2026-01-01T15:00:00Z",
+        },
+    )
+
+    result = extract_context(request(), load_archive(archive.root))
+    assert result.items[0].snapshot.run["run_id"] == "second"
+
+
+def test_selection_contract_is_shared_by_github_and_opencode(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    for source_kind, run_id, from_text, to_text in (
+        (
+            "opencode",
+            "opencode-old",
+            "2025-12-28T00:00:00+00:00",
+            "2025-12-29T00:00:00+00:00",
+        ),
+        (
+            "opencode",
+            "opencode-new",
+            "2025-12-29T00:00:00+00:00",
+            "2025-12-30T00:00:00+00:00",
+        ),
+        (
+            "github",
+            "github-old",
+            "2025-12-28T00:00:00+00:00",
+            "2025-12-29T00:00:00+00:00",
+        ),
+        (
+            "github",
+            "github-new",
+            "2025-12-29T00:00:00+00:00",
+            "2025-12-30T00:00:00+00:00",
+        ),
+    ):
+        window = {
+            "from": "2026-01-01T09:00:00Z",
+            "to": "2026-01-01T10:00:00Z"
+            if run_id.endswith("old")
+            else "2026-01-01T17:00:00Z",
+        }
+        if source_kind == "opencode":
+            publish_opencode(
+                archive,
+                session("root", messages=[message(run_id, "2026-01-01T01:00:00Z")]),
+                run_id,
+                from_text=from_text,
+                to_text=to_text,
+                observation_window=window,
+            )
+        else:
+            publish_github(
+                archive,
+                "PR_1",
+                {
+                    "issue.json": github_base(),
+                    "pull-request.json": {"node_id": "PR_1"},
+                    "comments.001.json": [
+                        {
+                            "id": 1,
+                            "body": run_id,
+                            "created_at": "2026-01-01T01:00:00Z",
+                        }
+                    ],
+                },
+                run_id=run_id,
+                from_text=from_text,
+                to_text=to_text,
+                observation_window=window,
+            )
+
+    result = extract_context(request(), load_archive(archive.root))
+    selected = {
+        item.snapshot.manifest["source_kind"]: item.snapshot.run["run_id"]
+        for item in result.items
+    }
+    assert selected == {"github": "github-new", "opencode": "opencode-new"}
+
+
+def test_selection_tie_break_is_independent_of_input_order(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    for run_id, from_text, to_text in (
+        ("tie-z", "2025-12-28T00:00:00+00:00", "2025-12-29T00:00:00+00:00"),
+        ("tie-a", "2025-12-29T00:00:00+00:00", "2025-12-30T00:00:00+00:00"),
+    ):
+        publish_opencode(
+            archive,
+            session("root", messages=[message(run_id, "2026-01-01T01:00:00Z")]),
+            run_id,
+            from_text=from_text,
+            to_text=to_text,
+            observation_window={
+                "from": "2026-01-01T09:00:00Z",
+                "to": "2026-01-01T17:00:00Z",
+            },
+        )
+
+    snapshots = tuple(
+        snapshot for run in load_archive(archive.root) for snapshot in run.snapshots
+    )
+    assert (
+        select_observation(tuple(reversed(snapshots)), request().end).run["run_id"]
+        == "tie-a"
+    )
 
 
 def test_empty_output_has_only_useful_index_without_front_matter(
@@ -682,62 +969,6 @@ def test_github_event_with_earlier_and_in_range_times_has_one_canonical_bucket(
     )
     assert "edited once" in text(output, "activity.md")
     assert not (output / "github/example/project/pull/1/background.md").exists()
-
-
-def test_github_mutable_note_only_appears_for_later_observed_fallback(
-    tmp_path: Path,
-) -> None:
-    archive = Archive(tmp_path / "archive")
-    archive.root.mkdir()
-    old = {
-        "issue.json": {**github_base(), "title": "old"},
-        "pull-request.json": {"node_id": "PR_1"},
-    }
-    later = {
-        "issue.json": {
-            **github_base(),
-            "title": "later",
-            "updated_at": "2026-01-01T01:00:00Z",
-        },
-        "pull-request.json": {"node_id": "PR_1"},
-        "comments.001.json": [
-            {"id": 1, "body": "selected", "created_at": "2026-01-01T01:00:00Z"}
-        ],
-    }
-    publish_github(
-        archive,
-        "PR_1",
-        old,
-        run_id="old-run",
-        from_text="2025-12-31T00:00:00+08:00",
-        to_text="2026-01-01T00:00:00+08:00",
-    )
-    publish_github(
-        archive,
-        "PR_1",
-        later,
-        run_id="later-run",
-        from_text="2026-01-02T00:00:00+08:00",
-        to_text="2026-01-03T00:00:00+08:00",
-    )
-    output = tmp_path / "output"
-    generate_context(archive.root, request(), output)
-    overview = text(output, "overview.md")
-    assert "Mutable fields may include" not in overview
-
-    only_later_archive = Archive(tmp_path / "only-later-archive")
-    only_later_archive.root.mkdir()
-    publish_github(
-        only_later_archive,
-        "PR_1",
-        later,
-        run_id="only-later",
-        from_text="2026-01-02T00:00:00+08:00",
-        to_text="2026-01-03T00:00:00+08:00",
-    )
-    later_output = tmp_path / "later-output"
-    generate_context(only_later_archive.root, request(), later_output)
-    assert "Mutable fields may include" in text(later_output, "overview.md")
 
 
 def test_github_tracked_actor_is_annotated_without_hard_coding(
@@ -1189,15 +1420,7 @@ def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
 ) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
-    running_tool = {
-        "id": "bash",
-        "type": "tool",
-        "tool": "bash",
-        "state": {
-            "status": "running",
-            "time": {"start": "2026-01-01T01:00:00Z"},
-        },
-    }
+    running_tool = bash_tool()
     publish_opencode(
         archive,
         session(
@@ -1212,16 +1435,7 @@ def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
     before_part = before.items[0].opencode.messages[0]["parts"][0]
     assert before_part["completion"] == "unknown"
 
-    completed_tool = {
-        **running_tool,
-        "state": {
-            "status": "completed",
-            "time": {
-                "start": "2026-01-01T01:00:00Z",
-                "end": "2026-01-01T01:01:00Z",
-            },
-        },
-    }
+    completed_tool = bash_tool("2026-01-01T01:01:00Z")
     publish_opencode(
         archive,
         session(
@@ -1241,6 +1455,115 @@ def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     assert "## Gaps" not in (output / "index.md").read_text()
+
+
+def test_opencode_does_not_merge_a_later_observation(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    running_tool = bash_tool()
+    completed_tool = bash_tool("2026-01-01T01:01:00Z")
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[message("turn", "2026-01-01T01:00:00Z", [running_tool])],
+        ),
+        "selected",
+        from_text="2025-12-28T00:00:00+00:00",
+        to_text="2025-12-29T00:00:00+00:00",
+        observation_window={
+            "from": "2026-01-01T09:00:00Z",
+            "to": "2026-01-01T17:00:00Z",
+        },
+    )
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            messages=[
+                message("turn", "2026-01-01T01:00:00Z", [completed_tool]),
+                message(
+                    "later-message",
+                    "2026-01-01T02:00:00Z",
+                    [{"type": "text", "text": "must not leak"}],
+                ),
+            ],
+        ),
+        "later",
+        from_text="2025-12-29T00:00:00+00:00",
+        to_text="2025-12-30T00:00:00+00:00",
+        observation_window={
+            "from": "2026-01-01T09:00:00Z",
+            "to": "2026-01-01T18:00:00Z",
+        },
+    )
+
+    result = extract_context(request(), load_archive(archive.root))
+    assert result.items[0].snapshot.run["run_id"] == "selected"
+    assert result.items[0].opencode is not None
+    messages = result.items[0].opencode.messages
+    assert [value["id"] for value in messages] == ["turn"]
+    assert messages[0]["parts"][0]["completion"] == "unknown"
+    assert "end" not in messages[0]["parts"][0]
+
+
+def test_github_does_not_merge_later_body_comment_or_diff(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_github(
+        archive,
+        "PR_1",
+        {
+            "issue.json": {**github_base(), "title": "selected", "body": "old body"},
+            "pull-request.json": {"node_id": "PR_1"},
+            "comments.001.json": [
+                {"id": 1, "body": "old comment", "created_at": "2026-01-01T01:00:00Z"}
+            ],
+            "pull-request.diff": "old diff\n",
+        },
+        run_id="selected",
+        from_text="2025-12-28T00:00:00+00:00",
+        to_text="2025-12-29T00:00:00+00:00",
+        observation_window={
+            "from": "2026-01-01T09:00:00Z",
+            "to": "2026-01-01T17:00:00Z",
+        },
+    )
+    publish_github(
+        archive,
+        "PR_1",
+        {
+            "issue.json": {**github_base(), "title": "later", "body": "later body"},
+            "pull-request.json": {"node_id": "PR_1"},
+            "comments.001.json": [
+                {"id": 2, "body": "later comment", "created_at": "2026-01-01T02:00:00Z"}
+            ],
+            "pull-request.diff": "later diff\n",
+        },
+        run_id="later",
+        from_text="2025-12-29T00:00:00+00:00",
+        to_text="2025-12-30T00:00:00+00:00",
+        observation_window={
+            "from": "2026-01-01T09:00:00Z",
+            "to": "2026-01-01T18:00:00Z",
+        },
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    overview = text(output, "overview.md")
+    activity = text(output, "activity.md")
+    diff = text(output, "diff.patch")
+    assert "selected" in overview and "old body" in overview
+    assert "# example/project PR #1 — later" not in overview
+    assert "later body" not in overview
+    assert "Mutable fields may include" in overview
+    assert "old comment" in activity and "later comment" not in activity
+    assert diff == "old diff\n"
 
 
 def test_opencode_groups_by_project_worktree_and_shows_distinct_workdirs(
