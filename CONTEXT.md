@@ -29,8 +29,8 @@ The recorded query and permission boundary of a successfully published Collectio
 _Avoid_: Completeness, audit log
 
 **Source Instance**:
-A stable source-specific scope used to distinguish Collection Ranges. For GitHub it is the authenticated actor's stable node ID; for OpenCode it is a user-maintained, globally unique opaque `--instance-id` that never encodes a hostname or filesystem path.
-_Avoid_: Machine identity, project path
+A stable source-specific scope used to distinguish Collection Ranges and detect overlap to prevent duplicate collection. For GitHub it is the authenticated actor's stable node ID; for OpenCode it is a user-chosen `--instance-id` that is unique across machines and stable on the same machine. A machine name is valid if it meets both conditions.
+_Avoid_: Project association
 
 **Snapshot**:
 An append-only, complete set of evidence from one Observation Window of one Source Item. A Snapshot does not represent a global system state.
