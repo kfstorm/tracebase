@@ -1,6 +1,14 @@
 # Tracebase
 
-Tracebase preserves private work evidence in a replayable local archive and generates offline context for exploring that work. GitHub and OpenCode are the currently supported sources; additional sources may be added.
+Tracebase preserves private work evidence in a replayable local archive, generates offline context, and produces work summaries. GitHub and OpenCode are the currently supported sources; additional sources may be added.
+
+## Contents
+
+- [Features](#features)
+- [Getting Started](#getting-started)
+- [Usage](#usage)
+- [Development](#development)
+- [License](#license)
 
 ## Features
 
@@ -8,6 +16,7 @@ Tracebase preserves private work evidence in a replayable local archive and gene
 - **OpenCode collection:** Preserve source-native session exports with collection metadata.
 - **Explicit coverage:** Record time ranges and source boundaries, retain successful empty runs, and reject overlapping published ranges for the same logical source.
 - **Offline context:** Generate a disposable, browsable directory from archived evidence without querying the sources again.
+- **Work summaries:** Run the production Summarizer against an archive or existing Context Output and publish a validated Markdown summary with provenance.
 
 Coverage records what the collector observed, not a guarantee of complete historical account activity. Tracebase preserves evidence; it does not generate long-term AI memory.
 
@@ -59,7 +68,7 @@ Successful collection prints one summary line to stdout; progress goes to stderr
 
 ### Generate Context Offline
 
-After collecting evidence, select a work time range to explore:
+After collecting evidence, select a work time range to explore. Context extraction chooses one observation per Source Item: the latest observation completed by the request end, or the earliest available observation when all observations are later.
 
 ```bash
 uv run tracebase context \
@@ -73,6 +82,43 @@ Start with `index.md` in the output directory. This range selects work records, 
 
 For all options, run `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, or `uv run tracebase context --help`.
 
+### Generate a Work Summary
+
+The `summary` command runs the production Summarizer in a pinned Docker image. It requires Docker and a configured OpenCode authentication file so the selected model can run. The archive mode creates Context Output from the requested range, then publishes `summary.md` and `manifest.json`:
+
+```bash
+uv run tracebase summary \
+  --archive "$HOME/.tracebase/archive" \
+  --from 2026-09-01T00:00:00+00:00 \
+  --to 2026-09-02T00:00:00+00:00 \
+  --model openai/gpt-5 \
+  --output "$HOME/.tracebase/summary-2026-09-01"
+```
+
+To retain the generated Context Output or inspect non-secret runtime and shard artifacts, provide separate output directories:
+
+```bash
+uv run tracebase summary \
+  --archive "$HOME/.tracebase/archive" \
+  --from 2026-09-01T00:00:00+00:00 \
+  --to 2026-09-02T00:00:00+00:00 \
+  --model openai/gpt-5 \
+  --context-output "$HOME/.tracebase/context-2026-09-01" \
+  --debug-output "$HOME/.tracebase/summary-debug-2026-09-01" \
+  --output "$HOME/.tracebase/summary-2026-09-01"
+```
+
+You can also summarize an existing Context Output with `--context` instead of `--archive`; omit `--from`, `--to`, and `--context-output` in that mode:
+
+```bash
+uv run tracebase summary \
+  --context "$HOME/.tracebase/context-2026-09-01" \
+  --model openai/gpt-5 \
+  --output "$HOME/.tracebase/summary-2026-09-01"
+```
+
+Summary Output, retained Context Output, and debug output may contain sensitive work evidence and should be handled like the Raw Archive. The selected model provider may receive the Context Output; make a separate derived-data scope and sanitization decision before using a third-party or AI service. The summary is published only after its required shard reports pass validation; failed summaries are not published. For all options, run `uv run tracebase summary --help`.
+
 ## Development
 
 Install Node.js/npm as well as uv to run the duplication check. Bootstrap dependencies and Git hooks, then run the checks:
@@ -85,7 +131,7 @@ uv run pymarkdown --strict-config scan README.md AGENTS.md
 uv run pre-commit run --all-files
 ```
 
-The lint script checks Python style, types, dead code, dependencies, and domain documentation. Without `--check`, it also fixes and formats Python files. The full pre-commit suite includes tests and `jscpd` duplication detection.
+The lint script checks Python style, types, dead code, dependencies, and domain documentation. Without `--check`, it also fixes and formats Python files. The full pre-commit suite includes tests and `jscpd` duplication detection. Summary integration requires Docker and OpenCode credentials, so its container workflow is covered by synthetic tests rather than a live model call.
 
 See [AGENTS.md](AGENTS.md) for contributor guardrails, [CONTEXT.md](CONTEXT.md) for domain terminology, and [GitHub issue conventions](docs/agents/issue-tracker.md) for planning work.
 

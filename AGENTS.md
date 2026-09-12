@@ -1,6 +1,6 @@
 # Agent Guide
 
-Tracebase collects private work evidence and derives offline Context Output. GitHub and OpenCode are the currently supported sources; additional sources may be added. See [README.md](README.md) for setup and CLI usage.
+Tracebase collects private work evidence, derives offline Context Output, and produces Summary Output. GitHub and OpenCode are the currently supported sources; additional sources may be added. See [README.md](README.md) for setup and CLI usage.
 
 ## Task Context
 
@@ -36,4 +36,4 @@ Preserve evidence needed to reconstruct professional work and its necessary coll
 - Keep the v0 archive in user-controlled private storage and preserve source-native content unchanged. Archive privacy and synchronization are caller preconditions; any third-party or AI-service use requires a separate derived-data scope and sanitization decision.
 - For OpenCode, use `--instance-id` to scope overlap detection and prevent duplicate collection. Keep it unique across machines and stable on the same machine; a machine name is valid if it meets both conditions.
 - Derive Context Output offline without mutating the Raw Archive. Context Output is disposable and not redacted; apply the same confidentiality as the archive.
-- Use synthetic evidence in tests and keep real archives, session exports, and Context Output outside the repository. Progress and exceptions must not expose credentials or source-native sensitive content.
+- Use synthetic evidence in tests and keep real archives, session exports, Context Output, Summary Output, and debug output outside the repository. Progress, exceptions, and debug output must not expose credentials or source-native sensitive content.

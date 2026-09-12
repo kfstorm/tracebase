@@ -57,3 +57,7 @@ A disposable, self-contained directory assembled from one Context Extraction Res
 _Avoid_: Cache, index, intermediate archive
 
 Context Output v1 does not perform sensitive-data redaction and should be treated with the same confidentiality as the Raw Archive.
+
+**Summary Output**:
+A caller-owned, derived directory containing a human-readable work summary and provenance generated from Context Output by the production Summarizer. It is not Source-native Evidence and may contain sensitive work evidence; treat it with the same confidentiality as the Raw Archive. Sending its input to a third-party or AI service requires a separate derived-data scope and sanitization decision.
+_Avoid_: Raw Archive, long-term memory
