@@ -68,7 +68,7 @@ Successful collection prints one summary line to stdout; progress goes to stderr
 
 ### Generate Context Offline
 
-After collecting evidence, select a work time range to explore. Context extraction chooses one observation per Source Item: the latest observation completed by the request end, or the earliest available observation when all observations are later.
+After collecting evidence, select a work time range to explore. Context extraction chooses one observation per Source Item: the earliest observation completed at or after the request end, or the latest available observation if all observations are earlier.
 
 ```bash
 uv run tracebase context \
