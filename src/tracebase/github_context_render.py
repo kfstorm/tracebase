@@ -9,6 +9,7 @@ from .context import ContextExtractionResult, ContextItem
 from .context_render import format_timestamp, parse_timestamp
 from .github_context import (
     github_actor_login,
+    github_inline_comment_canonical_id,
     github_logins_match,
     github_user_work_record_ids,
 )
@@ -284,9 +285,12 @@ def _thread_comments(
     activity: list[dict[str, Any]] = []
     future: list[dict[str, Any]] = []
     for node in nodes:
-        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+        if not isinstance(node, dict):
             continue
-        value = inline.get(node["id"], node)
+        canonical_id = github_inline_comment_canonical_id(node)
+        if canonical_id is None:
+            continue
+        value = inline.get(canonical_id, node)
         times = _times(value)
         if any(start <= timestamp < end for timestamp in times):
             activity.append(value)
@@ -327,7 +331,9 @@ def _thread_lines(
                 [
                     value
                     for value in values
-                    if ("inline-comment", str(value.get("id"))) in user_work_ids
+                    if (canonical_id := github_inline_comment_canonical_id(value))
+                    is not None
+                    and ("inline-comment", canonical_id) in user_work_ids
                 ],
             ),
             (
@@ -335,7 +341,9 @@ def _thread_lines(
                 [
                     value
                     for value in values
-                    if ("inline-comment", str(value.get("id"))) not in user_work_ids
+                    if (canonical_id := github_inline_comment_canonical_id(value))
+                    is None
+                    or ("inline-comment", canonical_id) not in user_work_ids
                 ],
             ),
         ):
@@ -376,9 +384,10 @@ def _thread_entries(
         if not isinstance(nodes, list):
             nodes = []
         all_threaded_ids.update(
-            str(node["id"])
+            canonical_id
             for node in nodes
-            if isinstance(node, dict) and isinstance(node.get("id"), str)
+            if isinstance(node, dict)
+            and (canonical_id := github_inline_comment_canonical_id(node)) is not None
         )
         if not earlier and not activity:
             continue
@@ -416,7 +425,9 @@ def _thread_entries(
                 thread_id,
                 lines,
                 any(
-                    ("inline-comment", str(value.get("id"))) in user_work_ids
+                    (canonical_id := github_inline_comment_canonical_id(value))
+                    is not None
+                    and ("inline-comment", canonical_id) in user_work_ids
                     for value in [*earlier, *activity]
                 ),
             )

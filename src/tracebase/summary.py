@@ -16,7 +16,7 @@ from typing import Any, Protocol
 from .context import ContextRequest, generate_context
 from .summary_container import ContainerMounts, ContainerRunner, ensure_image
 from .summary_opencode import prepare_config, prepare_state
-from .summary_shards import complete_personal_shard_sections, inspect_shards
+from .summary_shards import inspect_shards
 
 IMAGE = "tracebase-opencode:1.18.29"
 RECOVERY_PROMPT = (
@@ -311,7 +311,6 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
             results / "summary.md",
         )
         summary = _read_result(results / "summary.md")
-        complete_personal_shard_sections(work)
         if inspect_shards(work, context).errors:
             raise SummaryError("Summarizer shard protocol was incomplete")
         publication = Path(

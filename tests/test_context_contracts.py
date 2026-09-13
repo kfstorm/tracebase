@@ -658,6 +658,14 @@ def test_context_skips_known_chatgpt_source_without_projector(
         "github",
         "opencode",
     }
+    assert {
+        item.snapshot.manifest["source_kind"]: item.attribution_mode
+        for item in result.items
+    } == {
+        "github": AttributionMode.ACTOR_SCOPED,
+        "opencode": AttributionMode.PERSONAL,
+    }
+    assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
     assert "github/example/project/pull/1/overview.md" in files(output)
     assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
         output
@@ -971,6 +979,70 @@ def test_review_threads_are_materialized_and_unthreaded_comments_remain(
     assert "loose" in activity
     assert activity.count("first") == 1
     assert activity.count("reply") == 1
+
+
+def test_review_thread_classifies_rest_comments_by_graphql_canonical_id(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "review-comments.001.json": [
+                {
+                    "id": 776172573,
+                    "node_id": "PRRC_TRACKED",
+                    "body": "tracked inline review",
+                    "user": {"login": "tracked-user"},
+                    "path": "src/example.py",
+                    "line": 12,
+                    "created_at": "2026-01-01T01:00:00Z",
+                },
+                {
+                    "id": 776172574,
+                    "node_id": "PRRC_COLLABORATOR",
+                    "body": "collaborator inline review",
+                    "user": {"login": "collaborator"},
+                    "path": "src/example.py",
+                    "line": 12,
+                    "created_at": "2026-01-01T02:00:00Z",
+                },
+            ],
+            "review-threads.001.json": {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRT_THREAD",
+                                        "comments": {
+                                            "nodes": [
+                                                {"id": "PRRC_TRACKED"},
+                                                {"id": "PRRC_COLLABORATOR"},
+                                            ]
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    activity = text(output, "activity.md")
+    user_work = activity.split("#### User work", 1)[1].split(
+        "#### Context-only evidence", 1
+    )[0]
+    context_only = activity.split("#### Context-only evidence", 1)[1]
+    assert "tracked inline review" in user_work
+    assert "collaborator inline review" not in user_work
+    assert "collaborator inline review" in context_only
 
 
 def test_active_review_thread_separates_earlier_and_future_comments(
@@ -2942,6 +3014,7 @@ def test_context_generation_is_offline(
 
 def test_source_attribution_mapping_is_explicit_and_rejects_unknown_kinds() -> None:
     assert source_attribution_mode("opencode") is AttributionMode.PERSONAL
+    assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
     assert source_attribution_mode("github") is AttributionMode.ACTOR_SCOPED
     with pytest.raises(AttributionError, match="no attribution semantics"):
         source_attribution_mode("future-source")

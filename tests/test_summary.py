@@ -23,10 +23,12 @@ class FakeRunner:
         *,
         recover: bool = False,
         incomplete: bool = False,
+        missing_context_section: bool = False,
     ) -> None:
         self.output = output
         self.recover = recover
         self.incomplete = incomplete
+        self.missing_context_section = missing_context_section
         self.calls: list[list[str]] = []
 
     def run(
@@ -43,7 +45,12 @@ class FakeRunner:
                 work = self.output / "work"
                 (work / "shards").mkdir(exist_ok=True)
                 (work / "shards/repo.md").write_text(
-                    "## User work\n\nevidence\n",
+                    "## User work\n\nevidence\n"
+                    + (
+                        ""
+                        if self.missing_context_section
+                        else "\n## Context-only evidence\n\nNone.\n"
+                    ),
                     encoding="utf-8",
                 )
                 status = "failed" if self.incomplete else "complete"
@@ -169,6 +176,25 @@ def test_incomplete_shards_publish_nothing(tmp_path: Path) -> None:
 
     assert not output.exists()
     assert not list(tmp_path.glob(".summary.*"))
+
+
+def test_missing_shard_section_fails_without_mutating_worker_report(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    debug = tmp_path / "debug"
+    runner = FakeRunner(tmp_path, missing_context_section=True)
+    bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="shard protocol"):
+        summarize(
+            SummaryRequest(source, "model", None, output, debug_output=debug), runner
+        )
+
+    assert not output.exists()
+    report = debug / "work/shards/repo.md"
+    assert report.read_text(encoding="utf-8") == "## User work\n\nevidence\n"
 
 
 def test_debug_retains_existing_runtime_artifacts_without_extra_calls(

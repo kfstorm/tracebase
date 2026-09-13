@@ -116,6 +116,15 @@ def github_logins_match(login: Any, tracked_login: str | None) -> bool:
     )
 
 
+def github_inline_comment_canonical_id(value: dict[str, Any]) -> str | None:
+    """Return the GraphQL node ID shared by REST and thread representations."""
+    node_id = value.get("node_id")
+    if isinstance(node_id, str) and node_id:
+        return node_id
+    identifier = value.get("id")
+    return identifier if isinstance(identifier, str) and identifier else None
+
+
 def _record_is_in_range(record: dict[str, Any], start: datetime, end: datetime) -> bool:
     return any(
         start <= timestamp < end
