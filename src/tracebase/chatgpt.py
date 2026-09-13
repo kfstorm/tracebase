@@ -135,13 +135,21 @@ class _ProfileLock:
     """Process lock preventing two browser contexts from sharing one profile."""
 
     def __init__(self, profile: Path):
+        self._profile = profile
         self._path = profile.with_name(profile.name + ".lock")
         self._file: Any = None
 
     def __enter__(self) -> _ProfileLock:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = self._path.open("a+b")
+        _secure_directory(self._path.parent)
+        _secure_directory(self._profile)
+        if self._path.is_symlink() or (
+            self._path.exists() and not self._path.is_file()
+        ):
+            raise ArchiveError("ChatGPT browser profile lock is invalid")
         try:
+            self._file = self._path.open("a+b")
+            if platform.system() != "Windows":
+                self._path.chmod(0o600)
             if platform.system() == "Windows":
                 self._file.seek(0)
                 self._file.write(b"0")
@@ -154,21 +162,48 @@ class _ProfileLock:
                 )
             else:
                 fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError, OSError:
-            self._file.close()
+        except BlockingIOError:
+            if self._file is not None:
+                self._file.close()
             self._file = None
             raise ArchiveError("ChatGPT browser profile is already in use") from None
+        except OSError as error:
+            if self._file is not None:
+                self._file.close()
+            self._file = None
+            raise ArchiveError("ChatGPT browser profile lock is unavailable") from error
         return self
 
     def __exit__(self, *_: object) -> None:
         if self._file is None:
             return
+        file = self._file
+        self._file = None
         try:
-            if platform.system() != "Windows":
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+            if platform.system() == "Windows":
+                file.seek(0)
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    file.fileno(),
+                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                    1,
+                )
+            else:
+                fcntl.flock(file.fileno(), fcntl.LOCK_UN)
         finally:
-            self._file.close()
-            self._file = None
+            file.close()
+
+
+def _secure_directory(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise ArchiveError("ChatGPT browser profile directory is invalid")
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if platform.system() != "Windows":
+            path.chmod(0o700)
+    except OSError as error:
+        raise ArchiveError(
+            "ChatGPT browser profile directory is unavailable"
+        ) from error
 
 
 def _stealth_page(page: _Page) -> None:
@@ -446,6 +481,9 @@ def _discover_partition(
     offset = 0
     pages = 0
     listed = 0
+    previous_update: datetime | None = None
+    ordering_verified = True
+    early_stopped = False
     while True:
         params = {
             "offset": str(offset),
@@ -464,6 +502,9 @@ def _discover_partition(
             if not isinstance(source_id, str) or not source_id:
                 raise ChatGPTError("ChatGPT discovery item is invalid")
             updated = _parse_timestamp(item.get("update_time"), "conversation update")
+            if previous_update is not None and updated > previous_update:
+                ordering_verified = False
+            previous_update = updated
             if not _ordinary(item) or not (
                 collection_range.start <= updated < collection_range.end
             ):
@@ -496,6 +537,14 @@ def _discover_partition(
                 ),
             )
         )
+        if (
+            items
+            and ordering_verified
+            and previous_update is not None
+            and previous_update < collection_range.start
+        ):
+            early_stopped = True
+            break
         if len(items) < returned_limit:
             break
         offset += returned_limit
@@ -505,6 +554,8 @@ def _discover_partition(
         "pages": pages,
         "listed_items": listed,
         "pagination_complete": True,
+        "ordering_verified": ordering_verified,
+        "early_stopped": early_stopped,
     }
 
 
@@ -668,7 +719,16 @@ def _hydrate(run: CollectionRun, api: _ChatGPTAPI, candidate: _Candidate) -> Non
 def resolve_context() -> ChatGPTContext:
     """Resolve and validate the authenticated account for a Collection Run."""
 
-    with _Browser(profile_path(), headless=True, stealth=True) as browser:
+    try:
+        return _resolve_context_with_browser(headless=True)
+    except ChatGPTBrowserVerificationError:
+        if not _display_fallback_available():
+            raise
+        return _resolve_context_with_browser(headless=False)
+
+
+def _resolve_context_with_browser(*, headless: bool) -> ChatGPTContext:
+    with _Browser(profile_path(), headless=headless, stealth=True) as browser:
         if browser.page is None:
             raise ChatGPTError("ChatGPT browser page is unavailable")
         session = _ChatGPTAPI(browser.page).session()
@@ -677,7 +737,9 @@ def resolve_context() -> ChatGPTContext:
         scope_id=session.account_id,
         collector_version="0.1.0",
         effective_options={
-            "browser_execution": "stealth-headless",
+            "browser_execution": (
+                "stealth-headless" if headless else "stealth-headed-display-fallback"
+            ),
             "discovery_limit": _DISCOVERY_LIMIT,
             "message_page_size": _NUM_TURNS,
         },
@@ -781,9 +843,26 @@ def _collect_api(
 def collect(run: CollectionRun, reporter: ProgressReporter) -> CollectionResult:
     """Discover and fully hydrate ordinary conversations in the range."""
 
-    with _Browser(profile_path(), headless=True, stealth=True) as browser:
+    try:
+        return _collect_with_browser(run, reporter, headless=True)
+    except ChatGPTBrowserVerificationError:
+        if not _display_fallback_available():
+            raise
+        return _collect_with_browser(run, reporter, headless=False)
+
+
+def _collect_with_browser(
+    run: CollectionRun, reporter: ProgressReporter, *, headless: bool
+) -> CollectionResult:
+    with _Browser(profile_path(), headless=headless, stealth=True) as browser:
         api = _authenticated_api(browser)
         return _collect_api(run, reporter, api)
+
+
+def _display_fallback_available() -> bool:
+    return platform.system() == "Linux" and bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    )
 
 
 def _session_is_valid(api: _ChatGPTAPI) -> bool:

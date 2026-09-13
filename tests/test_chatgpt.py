@@ -1,4 +1,5 @@
 import json
+import stat
 from io import StringIO
 from pathlib import Path
 
@@ -8,10 +9,12 @@ from tracebase.archive import Archive, ArchiveError, CollectionRange, Collection
 from tracebase.chatgpt import (
     ChatGPTAuthenticationError,
     ChatGPTError,
+    _Browser,
     _Candidate,
     _ChatGPTAPI,
     _collect_api,
     _discover,
+    _discover_partition,
     _hydrate,
     _ProfileLock,
     _Response,
@@ -34,6 +37,12 @@ def response(value: object, status: int = 200) -> _Response:
 
 def reporter() -> ProgressReporter:
     return ProgressReporter(LineProgressSink(StringIO()))
+
+
+def discovery_reporter() -> ProgressReporter:
+    progress = reporter()
+    progress.emit(ProgressEvent(kind="start", task_id="chatgpt.discover"))
+    return progress
 
 
 def item(
@@ -138,6 +147,165 @@ def test_discovery_covers_four_partitions_and_stabilizes() -> None:
         if call[1]["offset"] == "0"
     } == {("false", "false"), ("false", "true"), ("true", "false"), ("true", "true")}
     assert all(call[1]["offset"] in {"0", "2"} for call in api.calls)
+
+
+class PartitionAPI(DiscoveryAPI):
+    def __init__(self, pages: list[list[dict[str, object]]]) -> None:
+        self.pages = pages
+        self.calls: list[int] = []
+
+    def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+        assert endpoint == "/backend-api/conversations"
+        offset = int(params["offset"])
+        self.calls.append(offset)
+        page = self.pages[offset // 2] if offset // 2 < len(self.pages) else []
+        return response({"items": page, "limit": 2, "total": 999_999})
+
+
+def test_discovery_stops_when_first_page_is_older_than_range() -> None:
+    api = PartitionAPI(
+        [
+            [
+                item(
+                    "old-1",
+                    "2025-12-31T23:00:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+                item(
+                    "old-2",
+                    "2025-12-31T22:00:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+            ]
+        ]
+    )
+
+    candidates, coverage = _discover_partition(
+        api, RANGE, False, False, 1, discovery_reporter()
+    )
+
+    assert candidates == {}
+    assert api.calls == [0]
+    assert coverage["early_stopped"] is True
+
+
+def test_discovery_stops_after_range_page_enters_old_region() -> None:
+    api = PartitionAPI(
+        [
+            [
+                item(
+                    "in-range",
+                    "2026-01-01T00:30:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+                item(
+                    "at-start",
+                    "2026-01-01T00:00:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+            ],
+            [
+                item(
+                    "old",
+                    "2025-12-31T23:59:59Z",
+                    archived=False,
+                    starred=False,
+                )
+            ],
+        ]
+    )
+
+    candidates, coverage = _discover_partition(
+        api, RANGE, False, False, 1, discovery_reporter()
+    )
+
+    assert set(candidates) == {"in-range", "at-start"}
+    assert api.calls == [0, 2]
+    assert coverage["early_stopped"] is True
+
+
+def test_discovery_keeps_scanning_when_ordering_is_invalid() -> None:
+    api = PartitionAPI(
+        [
+            [
+                item(
+                    "in-range",
+                    "2026-01-01T00:30:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+                item(
+                    "in-range-2",
+                    "2026-01-01T00:20:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+            ],
+            [
+                item(
+                    "later-in-range",
+                    "2026-01-01T00:40:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+                item(
+                    "old-2",
+                    "2025-12-31T22:00:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+            ],
+            [
+                item(
+                    "old-3",
+                    "2025-12-31T21:00:00Z",
+                    archived=False,
+                    starred=False,
+                )
+            ],
+        ]
+    )
+
+    candidates, coverage = _discover_partition(
+        api, RANGE, False, False, 1, discovery_reporter()
+    )
+
+    assert set(candidates) == {"in-range", "in-range-2", "later-in-range"}
+    assert api.calls == [0, 2, 4]
+    assert coverage["early_stopped"] is False
+    assert coverage["ordering_verified"] is False
+
+
+def test_stabilization_finds_new_in_range_id_on_later_pass() -> None:
+    class AppearingAPI(DiscoveryAPI):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pass_calls = 0
+
+        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+            if params["is_archived"] == "false" and params["is_starred"] == "false":
+                self.pass_calls += 1
+                if self.pass_calls == 2:
+                    self.pages[(False, False)].append(
+                        item(
+                            "appeared-later",
+                            "2026-01-01T00:45:00Z",
+                            archived=False,
+                            starred=False,
+                        )
+                    )
+            return super().request(endpoint, params)
+
+    api = AppearingAPI()
+
+    candidates, _coverage, passes = _discover(api, RANGE, discovery_reporter())
+
+    assert "appeared-later" in candidates
+    assert passes == 3
 
 
 class HydrationAPI:
@@ -323,6 +491,38 @@ def test_profile_lock_rejects_concurrent_use(tmp_path: Path) -> None:
     second = _ProfileLock(profile)
     with _ProfileLock(profile), pytest.raises(ArchiveError, match="already in use"):
         second.__enter__()
+
+
+def test_profile_lock_restricts_existing_profile_permissions(tmp_path: Path) -> None:
+    profile = tmp_path / "tracebase" / "profile"
+    profile.mkdir(parents=True)
+    profile.parent.chmod(0o755)
+    profile.chmod(0o755)
+
+    with _ProfileLock(profile):
+        assert stat.S_IMODE(profile.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(profile.stat().st_mode) == 0o700
+        assert stat.S_IMODE(profile.with_name("profile.lock").stat().st_mode) == 0o600
+
+
+def test_browser_launch_failure_releases_profile_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingPlaywright:
+        def start(self) -> None:
+            raise RuntimeError("launch failed")
+
+    monkeypatch.setattr("tracebase.chatgpt.sync_playwright", FailingPlaywright)
+    profile = tmp_path / "profile"
+
+    with (
+        pytest.raises(ChatGPTError, match="could not be started"),
+        _Browser(profile, headless=True, stealth=False),
+    ):
+        pass
+
+    with _ProfileLock(profile):
+        pass
 
 
 def test_cli_registers_chatgpt_collection_and_auth_commands(
