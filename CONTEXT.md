@@ -76,6 +76,13 @@ _Avoid_: Projection, synchronized view
 A disposable, self-contained directory assembled from one Context Extraction Result for consumer exploration. It is reproducible from selected Raw Archive evidence, the Context request, and required archive-level identity profile(s), owned by the caller, and not a durable derived store or a synchronized view of the source. Refreshing an identity profile may change tracked-account annotations without changing Source-native Evidence.
 _Avoid_: Cache, index, intermediate archive
 
+Context Markdown preserves source-native evidence type, temporal grouping,
+relationship, and order. Under `actor_scoped`, attribution is an orthogonal
+record-level annotation such as `[User work]` or `[Context only]`; it does not
+create parallel attribution sections or reorder a thread, timeline, or commit
+section. Shard reports may project those records into separate user-work and
+context-only sections, but Context itself does not.
+
 Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output v1 does not perform sensitive-data redaction and should be treated with the same confidentiality as the Raw Archive.
 
 **Summary Output**:

@@ -20,6 +20,14 @@ missing attribution with actorless or collective wording such as "the PR
 implemented" or "the team fixed". Use only the minimum neutral state needed to
 explain a user's attributed action or outcome.
 
+For `actor_scoped` GitHub Context, the authoritative attribution is attached to
+each atomic record as `[User work]` or `[Context only]`. Do not infer attribution
+again from actor names when the annotation is present. Context preserves
+source-native grouping: a same review thread can contain both annotations in
+conversation order, and one single `## Commits` section can contain both kinds
+of commit. The annotation never creates a new Context heading or changes record
+ordering.
+
 `/work/TASK.md` is the authoritative task specification for the entire session.
 It is durable state, not an optional prompt. If the session is compacted, or you
 are uncertain about your progress, reread `/work/TASK.md` and
@@ -75,15 +83,27 @@ individual evidence. Group OpenCode evidence by `project_directory`; group
 GitHub evidence by `repository`. Small groups may be combined into one `misc`
 shard. Do not create a cross-source relationship from time proximity, similar
 names, or adjacent evidence. Combine scopes only when the index establishes
-that they are one group. Every Context item that could contain materially
-meaningful requested-interval work must belong to exactly one shard, and no shard
-may overlap another.
+that they are one group.
 
-For each shard, first make a user-work projection using the attribution mode of
-each item. A GitHub Item with only collaborator activity is not a personal
-Summary workstream, even when its context is technically important. A shard
-report must have these explicit sections, including an empty section when that
-category has no evidence:
+Parse the canonical projected Context item roots from `/context/index.md` (the
+directory containing each linked `overview.md`) and resolve every declared shard
+scope to those actual roots. The shard inventory must form a complete disjoint
+partition: every projected Context item belongs to exactly one shard, no item
+belongs to two shards, and sources without a Context projector do not enter this
+partition. A repository or `misc` shard may resolve to multiple items. Use exact
+canonical paths in `scope` where practical, for example
+`github/owner/repository` or a comma-separated list of canonical item paths for
+`misc`; do not rely on human interpretation of a scope description.
+
+For each shard, preserve the complete assigned Context evidence while making a
+user-work projection from the attribution annotation on each record. A GitHub
+Item with only collaborator activity is not a personal Summary workstream, even
+when its context is technically important. A review thread must remain one
+conversation unit with chronological/source order intact; do not create nested
+`User work` or `Context-only evidence` headings inside it. Keep commits in the
+single source-native `## Commits` section, retaining timeline order and each
+commit's annotation. A shard report must have these explicit sections, including
+an empty section when that category has no evidence:
 
 ```markdown
 ## User work

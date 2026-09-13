@@ -20,7 +20,8 @@ _CONTEXT_ONLY_SECTION = "## Context-only evidence"
 _ATTRIBUTION_MODE_VALUES = {mode.value for mode in AttributionMode}
 _ATTRIBUTION_MODE = re.compile(r"attribution mode: `([^`]+)`")
 _CONTEXT_LINK = re.compile(r"\]\(([^)]+)\)")
-_GITHUB_SCOPE = re.compile(r"(?:GitHub )?repository (?P<repo>[^,:;]+)")
+_CONTEXT_ROOT = re.compile(r"(?:github|opencode)/[A-Za-z0-9._/-]+")
+_GITHUB_SCOPE = re.compile(r"(?:GitHub )?repository (?P<repo>[^,;:]+)")
 _OPENCODE_SCOPE = re.compile(r"OpenCode(?: project)? (?P<project>[^:;]+)")
 
 
@@ -41,26 +42,42 @@ def _status_data(notes: str) -> Any:
         raise ValueError("NOTES.md SHARD_STATUS block is not valid JSON") from error
 
 
-def _scope_matches(scope: str, line: str) -> bool:
-    if scope.startswith("/context/"):
-        relative_scope = scope.removeprefix("/context/").split("/{", 1)[0]
-    elif scope.startswith("github/"):
-        relative_scope = "/".join(scope.split("/{", 1)[0].split("/")[:3])
-    elif scope.startswith("opencode/"):
-        relative_scope = scope.split("/session/", 1)[0]
-    else:
-        github_scope = _GITHUB_SCOPE.match(scope)
-        if github_scope is not None:
-            relative_scope = f"github/{github_scope.group('repo').strip()}"
-        else:
-            opencode_scope = _OPENCODE_SCOPE.match(scope)
-            if opencode_scope is None:
-                return False
-            project = opencode_scope.group("project").strip()
-            relative_scope = f"opencode{project}"
-    return any(
-        target == relative_scope or target.startswith(f"{relative_scope}/")
-        for target in _CONTEXT_LINK.findall(line)
+def _context_items(index_lines: tuple[str, ...]) -> dict[str, str]:
+    """Return projected item roots and their declared attribution modes."""
+    items: dict[str, str] = {}
+    for line in index_lines:
+        mode = _ATTRIBUTION_MODE.search(line)
+        if mode is None:
+            continue
+        for target in _CONTEXT_LINK.findall(line):
+            if not target.endswith("/overview.md"):
+                continue
+            root = target.removesuffix("/overview.md").removeprefix("./")
+            items[root] = mode.group(1)
+    return items
+
+
+def _scope_prefixes(scope: str) -> tuple[str, ...]:
+    cleaned = scope.split(" (", 1)[0].strip()
+    if cleaned.startswith("/context/"):
+        return (cleaned.removeprefix("/context/").split("/{", 1)[0],)
+    if cleaned.startswith(("github/", "opencode/")):
+        return (cleaned.split("/{", 1)[0].rstrip("/"),)
+    github_scope = _GITHUB_SCOPE.match(cleaned)
+    if github_scope is not None:
+        return (f"github/{github_scope.group('repo').strip()}",)
+    opencode_scope = _OPENCODE_SCOPE.match(cleaned)
+    if opencode_scope is not None:
+        return (f"opencode{opencode_scope.group('project').strip()}",)
+    return tuple(_CONTEXT_ROOT.findall(cleaned))
+
+
+def _scope_items(scope: str, item_roots: set[str]) -> frozenset[str]:
+    prefixes = _scope_prefixes(scope)
+    return frozenset(
+        root
+        for root in item_roots
+        if any(root == prefix or root.startswith(f"{prefix}/") for prefix in prefixes)
     )
 
 
@@ -99,6 +116,9 @@ def inspect_shards(
         except OSError, UnicodeError:
             index_error = True
             errors.append("could not read Context index")
+    context_items = _context_items(index_lines)
+    item_roots = set(context_items)
+    shard_items: list[tuple[str, frozenset[str]]] = []
     seen: set[str] = set()
     for item in data["shards"]:
         if not isinstance(item, dict):
@@ -140,14 +160,10 @@ def inspect_shards(
             elif not isinstance(attribution_modes, list):
                 pass
             else:
-                expected_modes = {
-                    match.group(1)
-                    for line in index_lines
-                    if _scope_matches(scope.split(" (", 1)[0], line)
-                    for match in [_ATTRIBUTION_MODE.search(line)]
-                    if match is not None
-                }
-                if not expected_modes:
+                resolved_items = _scope_items(scope, item_roots)
+                shard_items.append((shard_id, resolved_items))
+                expected_modes = {context_items[root] for root in resolved_items}
+                if not resolved_items:
                     errors.append(
                         f"shard {shard_id!r} scope does not match Context items"
                     )
@@ -178,4 +194,17 @@ def inspect_shards(
                         )
                 except OSError, UnicodeError:
                     errors.append(f"shard {shard_id!r} canonical report cannot be read")
+    if context_dir is not None and not index_error:
+        memberships: dict[str, list[str]] = {root: [] for root in item_roots}
+        for shard_id, resolved_items in shard_items:
+            for root in resolved_items:
+                memberships[root].append(shard_id)
+        for root, owners in sorted(memberships.items()):
+            if not owners:
+                errors.append(f"Context item {root!r} is not covered by any shard")
+            elif len(owners) > 1:
+                errors.append(
+                    f"Context item {root!r} is covered by multiple shards: "
+                    + ", ".join(owners)
+                )
     return ShardObservability(tuple(errors))

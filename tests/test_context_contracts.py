@@ -1009,6 +1009,15 @@ def test_review_thread_classifies_rest_comments_by_graphql_canonical_id(
                     "line": 12,
                     "created_at": "2026-01-01T02:00:00Z",
                 },
+                {
+                    "id": 776172575,
+                    "node_id": "PRRC_TRACKED_FOLLOWUP",
+                    "body": "tracked follow-up",
+                    "user": {"login": "tracked-user"},
+                    "path": "src/example.py",
+                    "line": 12,
+                    "created_at": "2026-01-01T03:00:00Z",
+                },
             ],
             "review-threads.001.json": {
                 "data": {
@@ -1022,6 +1031,7 @@ def test_review_thread_classifies_rest_comments_by_graphql_canonical_id(
                                             "nodes": [
                                                 {"id": "PRRC_TRACKED"},
                                                 {"id": "PRRC_COLLABORATOR"},
+                                                {"id": "PRRC_TRACKED_FOLLOWUP"},
                                             ]
                                         },
                                     }
@@ -1036,13 +1046,16 @@ def test_review_thread_classifies_rest_comments_by_graphql_canonical_id(
     )
 
     activity = text(output, "activity.md")
-    user_work = activity.split("#### User work", 1)[1].split(
-        "#### Context-only evidence", 1
-    )[0]
-    context_only = activity.split("#### Context-only evidence", 1)[1]
-    assert "tracked inline review" in user_work
-    assert "collaborator inline review" not in user_work
-    assert "collaborator inline review" in context_only
+    assert activity.count("Review thread") == 1
+    assert "#### User work" not in activity
+    assert "#### Context-only evidence" not in activity
+    assert (
+        activity.index("tracked inline review")
+        < activity.index("collaborator inline review")
+        < activity.index("tracked follow-up")
+    )
+    assert activity.count("[User work]") == 2
+    assert activity.count("[Context only]") >= 1
 
 
 def test_active_review_thread_separates_earlier_and_future_comments(
@@ -1230,9 +1243,9 @@ def test_commits_use_commit_time_buckets_and_preserve_full_messages(
     background = text(output, "background.md")
     assert "Commit placement uses Git committer time" in activity
     assert activity.count("Commit placement uses Git committer time") == 1
-    assert "2026-01-01 09:00 · `during1` · unknown" in activity
+    assert "2026-01-01 09:00 · `during1` · unknown · [Context only]" in activity
     assert (
-        "- 2026-01-01 09:00 · `during1` · unknown\n"
+        "- 2026-01-01 09:00 · `during1` · unknown · [Context only]\n"
         "  Authored: 2026-01-01 10:00\n"
         "  During subject\n\n  Why and how"
     ) in activity
@@ -1241,7 +1254,7 @@ def test_commits_use_commit_time_buckets_and_preserve_full_messages(
     assert "cutoff1" not in activity
     assert "future1" not in activity
     assert "Commit placement uses Git committer time" in background
-    assert "2025-12-31 23:30 · `before1` · unknown" in background
+    assert "2025-12-31 23:30 · `before1` · unknown · [Context only]" in background
     assert "Before subject" in background and "Before body" in background
     assert "during1" not in background
 
@@ -1308,7 +1321,7 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
     assert activity.index("zzzzz") < activity.index("aaaaaaa")
     assert "Kai Yang (tracked account)" in activity
     assert activity.count("Kai Yang (tracked account)") == 1
-    assert "`same000` · Kai Yang\n" in activity
+    assert "`same000` · Kai Yang · [Context only]\n" in activity
     assert "mubai" in activity
     assert "kai@example.com" not in activity
     assert "Co-authored-by: Name <private@example.com>" in activity
@@ -1579,8 +1592,8 @@ def test_high_value_timeline_events_and_review_commit_are_rendered(
     assert "Base ref changed" in activity
     assert "Renamed old title -> new title" in activity
     assert (
-        "Review by @reviewer · 2026-01-01 17:00 · on abcdef1 (CHANGES_REQUESTED)"
-        in activity
+        "Review by @reviewer · 2026-01-01 17:00 · [Context only] · on abcdef1 "
+        "(CHANGES_REQUESTED)" in activity
     )
     assert "head_ref_deleted" not in activity
 
@@ -3133,6 +3146,13 @@ def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
                     "sha": "user12345678",
                     "message": "Tracked follow-up",
                 },
+                {
+                    "id": 7,
+                    "node_id": "TRACKED_CLOSED",
+                    "event": "closed",
+                    "actor": {"login": "tracked-user"},
+                    "created_at": "2026-01-01T06:30:00Z",
+                },
             ],
         },
         effective_options={"actor_login": "tracked-user"},
@@ -3140,14 +3160,18 @@ def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
 
     activity = text(output, "activity.md")
     assert "Attribution mode: `actor_scoped`" in text(output, "overview.md")
-    assert "## User work" in activity
-    assert "## Context-only evidence" in activity
+    assert activity.count("## Commits") == 1
+    assert "## User work" not in activity
+    assert "## Context-only evidence" not in activity
     assert "Attribution mode: `actor_scoped`" in activity
     assert activity.index("tracked concern") < activity.index("other finding")
     assert activity.index("approved after review") < activity.index("separate finding")
-    assert activity.index("Tracked follow-up") < activity.index(
-        "Collaborator implementation"
+    assert activity.index("Collaborator implementation") < activity.index(
+        "Tracked follow-up"
     )
+    assert "Closed by @tracked-user (tracked account) · [User work]" in activity
+    assert activity.count("[User work]") == 4
+    assert activity.count("[Context only]") == 4
 
     result = extract_context(request(), load_archive(archive.root), archive.root)
     projection = result.items[0].github
@@ -3198,10 +3222,11 @@ def test_actor_scoped_item_with_only_collaborator_activity_is_context_only(
 
     overview = text(output, "overview.md")
     activity = text(output, "activity.md")
-    assert "No tracked-account user work was identified" in overview
+    assert "No tracked-account user work was identified" not in overview
     assert "## User work" not in activity
-    assert "## Context-only evidence" in activity
+    assert "## Context-only evidence" not in activity
     assert "Important collaborator implementation" in activity
+    assert "[Context only]" in activity
     assert "attribution mode: `actor_scoped`" in (output / "index.md").read_text()
 
 
@@ -3262,6 +3287,9 @@ def test_mixed_sources_keep_personal_work_and_tracked_actions_only(
     )
     assert "tracked decision" in github_activity
     assert "collaborator implementation details" in github_activity
-    assert github_activity.index("## User work") < github_activity.index(
-        "## Context-only evidence"
+    assert "## User work" not in github_activity
+    assert "## Context-only evidence" not in github_activity
+    assert github_activity.index("[User work]") < github_activity.index(
+        "tracked decision"
     )
+    assert "[Context only]" in github_activity

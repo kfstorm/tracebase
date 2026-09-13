@@ -145,6 +145,9 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
 
     assert "final Summary is a projection of the user's work" in prompt
     assert "`personal`" in prompt and "`actor_scoped`" in prompt
+    assert "authoritative attribution" in prompt
+    assert "same review thread" in prompt
+    assert "single `## Commits` section" in prompt
     assert "## User work" in prompt
     assert "## Context-only evidence" in prompt
     assert "Only `User work` may be promoted" in prompt
@@ -372,7 +375,10 @@ def test_shard_validation_does_not_match_context_scope_prefixes(
     (tmp_path / "NOTES.md").write_text(
         '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"repo",'
         '"scope":"/context/repo","attribution_modes":["personal"],'
-        '"status":"complete","retry_count":0,"report":"/work/shards/repo.md"}]}'
+        '"status":"complete","retry_count":0,"report":"/work/shards/repo.md"},'
+        '{"id":"repo-tools","scope":"/context/repo-tools",'
+        '"attribution_modes":["actor_scoped"],"status":"complete",'
+        '"retry_count":0,"report":"/work/shards/repo-tools.md"}]}'
         "<!-- SHARD_STATUS_END -->",
         encoding="utf-8",
     )
@@ -381,8 +387,148 @@ def test_shard_validation_does_not_match_context_scope_prefixes(
         "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
         encoding="utf-8",
     )
+    (tmp_path / "shards/repo-tools.md").write_text(
+        "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
 
     assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_rejects_missing_context_item(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "github/acme/one/issue/1/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/two/issue/2/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/one/issue/{1}",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("not covered by any shard" in error for error in errors)
+
+
+def test_shard_partition_rejects_overlapping_context_item(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "github/acme/one/issue/1/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "first",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "second",
+                "scope": "github/acme/one/issue/{1}",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("covered by multiple shards" in error for error in errors)
+
+
+def test_shard_partition_allows_repository_scope_covering_multiple_items(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/pull/2/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "repo",
+                "scope": "repository acme/repo",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_allows_misc_scope_covering_explicit_items(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "opencode/home/work/session/01/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "misc",
+                "scope": (
+                    "misc: opencode/home/work/session/01, github/acme/repo/issue/1"
+                ),
+                "attribution_modes": ["personal", "actor_scoped"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def _write_partition_fixture(tmp_path: Path, shards: list[dict[str, object]]) -> None:
+    (tmp_path / "NOTES.md").write_text(
+        "<!-- SHARD_STATUS_BEGIN -->"
+        + json.dumps(
+            {
+                "shards": [
+                    {
+                        **shard,
+                        "status": "complete",
+                        "retry_count": 0,
+                        "report": f"/work/shards/{shard['id']}.md",
+                    }
+                    for shard in shards
+                ]
+            }
+        )
+        + "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+    for shard in shards:
+        (tmp_path / "shards" / f"{shard['id']}.md").write_text(
+            "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+            encoding="utf-8",
+        )
 
 
 def test_shard_validation_matches_context_scope_file_set(
@@ -394,18 +540,15 @@ def test_shard_validation_matches_context_scope_file_set(
         "- **repo** [attribution mode: `actor_scoped`](github/repo/overview.md)\n",
         encoding="utf-8",
     )
-    (tmp_path / "NOTES.md").write_text(
-        '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"repo",'
-        '"scope":"repository repo; PRs #1, #2",'
-        '"attribution_modes":["actor_scoped"],"status":"complete",'
-        '"retry_count":0,"report":"/work/shards/repo.md"}]} '
-        "<!-- SHARD_STATUS_END -->",
-        encoding="utf-8",
-    )
-    (tmp_path / "shards").mkdir()
-    (tmp_path / "shards/repo.md").write_text(
-        "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
-        encoding="utf-8",
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "repo",
+                "scope": "repository repo; PRs #1, #2",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
     )
 
     assert inspect_shards(tmp_path, context_dir).errors == ()
@@ -433,30 +576,7 @@ def test_shard_validation_matches_source_path_scopes(tmp_path: Path) -> None:
             "attribution_modes": ["personal"],
         },
     ]
-    (tmp_path / "NOTES.md").write_text(
-        "<!-- SHARD_STATUS_BEGIN -->"
-        + json.dumps(
-            {
-                "shards": [
-                    {
-                        **shard,
-                        "status": "complete",
-                        "retry_count": 0,
-                        "report": f"/work/shards/{shard['id']}.md",
-                    }
-                    for shard in shards
-                ]
-            }
-        )
-        + "<!-- SHARD_STATUS_END -->",
-        encoding="utf-8",
-    )
-    (tmp_path / "shards").mkdir()
-    for shard in shards:
-        (tmp_path / "shards" / f"{shard['id']}.md").write_text(
-            "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
-            encoding="utf-8",
-        )
+    _write_partition_fixture(tmp_path, shards)
 
     assert inspect_shards(tmp_path, context_dir).errors == ()
 
