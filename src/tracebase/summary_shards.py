@@ -62,6 +62,8 @@ def _scope_prefixes(scope: str) -> tuple[str, ...]:
     if cleaned.startswith("/context/"):
         return (cleaned.removeprefix("/context/").split("/{", 1)[0],)
     if cleaned.startswith(("github/", "opencode/")):
+        if "," in cleaned:
+            return tuple(_CONTEXT_ROOT.findall(cleaned))
         return (cleaned.split("/{", 1)[0].rstrip("/"),)
     github_scope = _GITHUB_SCOPE.match(cleaned)
     if github_scope is not None:
