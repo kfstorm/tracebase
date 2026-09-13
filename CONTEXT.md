@@ -29,8 +29,8 @@ The recorded query and permission boundary of a successfully published Collectio
 _Avoid_: Completeness, audit log
 
 **Source Instance**:
-A stable source-specific scope used to distinguish Collection Ranges. For GitHub it is the authenticated actor's stable node ID; for OpenCode it is a user-maintained, globally unique opaque `--instance-id` that never encodes a hostname or filesystem path.
-_Avoid_: Machine identity, project path
+A stable source-specific scope used to distinguish Collection Ranges and detect overlap to prevent duplicate collection. For GitHub it is the authenticated actor's stable node ID; for OpenCode it is a user-chosen `--instance-id` that is unique across machines and stable on the same machine. A machine name is valid if it meets both conditions.
+_Avoid_: Project association
 
 **Snapshot**:
 An append-only, complete set of evidence from one Observation Window of one Source Item. A Snapshot does not represent a global system state.
@@ -49,7 +49,7 @@ The start and end of the collector's observation of one source object. It is dis
 _Avoid_: Snapshot time, source update time
 
 **Context Extraction Result**:
-A disposable, in-memory result derived offline from the current archive for a mandatory, explicit half-open work time range. The shared v1 foundation groups every loaded Snapshot by Source Item identity and retains direct references to the loaded source objects without treating Observation Window as work time or interpreting source-native records. Source-specific projections later select source records for the requested range and add inclusion meaning, relations, and uncertainty. It is not serialized independently: the same process uses it to assemble consumer input from those objects. Its work time range is distinct from Collection Range; the result is neither Source-native Evidence, a Snapshot, nor a synchronized view of the source.
+A disposable, in-memory result derived offline from the current archive for a mandatory, explicit half-open work time range. The shared v1 foundation groups loaded Snapshots by Source Item identity and selects exactly one Snapshot per logical object using its Observation Window completion time relative to the request end. Source-specific projections then interpret only that selected Snapshot, select source records for the requested range, and add inclusion meaning, relations, and uncertainty. It is not serialized independently: the same process uses it to assemble consumer input from those objects. Its work time range is distinct from Collection Range; the result is neither Source-native Evidence, a Snapshot, nor a synchronized view of the source.
 _Avoid_: Projection, synchronized view
 
 **Context Output**:
@@ -57,3 +57,7 @@ A disposable, self-contained directory assembled from one Context Extraction Res
 _Avoid_: Cache, index, intermediate archive
 
 Context Output v1 does not perform sensitive-data redaction and should be treated with the same confidentiality as the Raw Archive.
+
+**Summary Output**:
+A caller-owned, derived directory containing a human-readable work summary and provenance generated from Context Output by the production Summarizer. It is not Source-native Evidence and may contain sensitive work evidence; treat it with the same confidentiality as the Raw Archive. Sending its input to a third-party or AI service requires a separate derived-data scope and sanitization decision.
+_Avoid_: Raw Archive, long-term memory
