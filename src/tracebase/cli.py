@@ -108,15 +108,19 @@ def _parser() -> argparse.ArgumentParser:
     github_identity = identity_sources.add_parser(
         "github", add_help=True, allow_abbrev=False
     )
-    github_identity.add_subparsers(dest="identity_action", required=True).add_parser(
+    identity_actions = github_identity.add_subparsers(
+        dest="identity_action", required=True
+    )
+    sync_identity = identity_actions.add_parser(
         "sync", add_help=True, allow_abbrev=False
     )
+    sync_identity.add_argument("--archive", required=True)
     return parser
 
 
-def _sync_github_identity() -> int:
+def _sync_github_identity(archive: str) -> int:
     try:
-        profile = sync_github_identity()
+        profile = sync_github_identity(archive)
     except ArchiveError as error:
         print(str(error), file=sys.stderr)
         return 1
@@ -134,7 +138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 1
     if arguments.command == "identity":
-        return _sync_github_identity()
+        return _sync_github_identity(arguments.archive)
     if arguments.command == "context":
         try:
             request = ContextRequest.parse(arguments.from_text, arguments.to_text)

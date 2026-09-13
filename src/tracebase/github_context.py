@@ -226,7 +226,10 @@ def _record_sort_key(
 
 
 def project_github(  # noqa: PLR0915
-    selected_snapshot: PublishedSnapshot, start: datetime, end: datetime
+    selected_snapshot: PublishedSnapshot,
+    start: datetime,
+    end: datetime,
+    archive_root: str | None = None,
 ) -> GitHubProjection:
     """Project archived GitHub payloads without inferring causal history."""
     records: dict[tuple[str, str], dict[str, Any]] = {}
@@ -467,7 +470,9 @@ def project_github(  # noqa: PLR0915
     selected = [
         record for record in ordered if "in_range_work" in _roles(record, start, end)
     ]
-    identity = load_github_identity()
+    identity = (
+        load_github_identity(archive_root, tracked_login) if archive_root else None
+    )
     return GitHubProjection(
         bool(selected),
         ordered,

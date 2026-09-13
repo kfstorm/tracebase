@@ -28,10 +28,16 @@ class GitHubIdentity:
         return self.emails | self.noreply_aliases
 
 
-def identity_profile_path() -> Path:
-    config_home = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(config_home) if config_home else Path.home() / ".config"
-    return root / "tracebase" / "github-identity.json"
+def identity_profile_path(archive_root: str | Path, login: str) -> Path:
+    if (
+        not isinstance(login, str)
+        or not login
+        or login in {".", ".."}
+        or "/" in login
+        or "\\" in login
+    ):
+        raise ArchiveError("GitHub login is invalid for an identity profile")
+    return Path(archive_root).absolute() / "profiles" / "github" / f"{login}.json"
 
 
 def normalize_email(value: Any) -> str | None:
@@ -41,8 +47,16 @@ def normalize_email(value: Any) -> str | None:
     return normalized or None
 
 
-def load_github_identity() -> GitHubIdentity | None:
-    path = identity_profile_path()
+def load_github_identity(
+    archive_root: str | Path, login: str | None
+) -> GitHubIdentity | None:
+    if login is None:
+        return None
+    requested_login = login
+    try:
+        path = identity_profile_path(archive_root, login)
+    except ArchiveError:
+        return None
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except OSError, UnicodeDecodeError, json.JSONDecodeError:
@@ -57,6 +71,7 @@ def load_github_identity() -> GitHubIdentity | None:
     if (
         not isinstance(login, str)
         or not login
+        or login != requested_login
         or not isinstance(numeric_id, int)
         or isinstance(numeric_id, bool)
         or not isinstance(synced_at, str)
@@ -83,8 +98,8 @@ def load_github_identity() -> GitHubIdentity | None:
     )
 
 
-def _write_profile(value: dict[str, Any]) -> Path:
-    path = identity_profile_path()
+def _write_profile(archive_root: str | Path, login: str, value: dict[str, Any]) -> Path:
+    path = identity_profile_path(archive_root, login)
     parent = path.parent
     try:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -107,6 +122,7 @@ def _write_profile(value: dict[str, Any]) -> Path:
 
 
 def save_github_identity(
+    archive_root: str | Path,
     login: str,
     numeric_id: int,
     emails: list[str],
@@ -116,6 +132,8 @@ def save_github_identity(
         f"{login}@users.noreply.github.com",
     ]
     return _write_profile(
+        archive_root,
+        login,
         {
             "emails": emails,
             "login": login,
@@ -123,5 +141,5 @@ def save_github_identity(
             "numeric_id": numeric_id,
             "provider": "github",
             "synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        }
+        },
     )

@@ -1023,11 +1023,11 @@ def test_commits_use_commit_time_buckets_and_preserve_full_messages(
 
 
 def test_commits_keep_timeline_order_and_show_author_identity_and_time(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
-    config_home = tmp_path / "config"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    profile_path = config_home / "tracebase" / "github-identity.json"
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    profile_path = archive.root / "profiles" / "github" / "tracked-user.json"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text(
         json.dumps(
@@ -1041,8 +1041,6 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
             }
         )
     )
-    archive = Archive(tmp_path / "archive")
-    archive.root.mkdir()
     output = github_output(
         archive,
         tmp_path,
@@ -1074,6 +1072,19 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
                     "committer": {"name": "mubai", "date": "2026-01-01T01:00:00Z"},
                     "message": "Second in Timeline",
                 },
+                {
+                    "id": 3,
+                    "node_id": "COMMIT_SAME_NAME",
+                    "event": "committed",
+                    "sha": "same0001234567",
+                    "author": {
+                        "name": "Kai Yang",
+                        "email": "someone-else@example.com",
+                        "date": "2026-01-01T02:00:00Z",
+                    },
+                    "committer": {"name": "Rebaser", "date": "2026-01-01T02:00:00Z"},
+                    "message": "Same name, different identity",
+                },
             ]
         },
         effective_options={"actor_login": "tracked-user"},
@@ -1082,6 +1093,8 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
     activity = text(output, "activity.md")
     assert activity.index("zzzzz") < activity.index("aaaaaaa")
     assert "Kai Yang (tracked account)" in activity
+    assert activity.count("Kai Yang (tracked account)") == 1
+    assert "`same000` · Kai Yang\n" in activity
     assert "mubai" in activity
     assert "kai@example.com" not in activity
     assert "Authored: 2026-01-01 07:00" in activity
@@ -1090,9 +1103,8 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
 
 
 def test_github_overview_always_names_tracked_account_without_profile(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config"))
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     output = github_output(

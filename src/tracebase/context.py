@@ -235,7 +235,9 @@ def _validate_context_source(snapshot: PublishedSnapshot) -> None:
 
 
 def extract_context(
-    request: ContextRequest, runs: tuple[PublishedRun, ...]
+    request: ContextRequest,
+    runs: tuple[PublishedRun, ...],
+    archive_root: str | Path | None = None,
 ) -> ContextExtractionResult:
     """Group archive objects and run source-specific extraction."""
     grouped: dict[tuple[str, str, str, str], list[PublishedSnapshot]] = {}
@@ -248,7 +250,12 @@ def extract_context(
         selected_snapshot = select_observation(tuple(snapshots), request.end)
         try:
             github = (
-                project_github(selected_snapshot, request.start, request.end)
+                project_github(
+                    selected_snapshot,
+                    request.start,
+                    request.end,
+                    str(archive_root) if archive_root is not None else None,
+                )
                 if key[0] == "github"
                 else None
             )
@@ -306,4 +313,6 @@ def generate_context(
     # Import lazily to keep extraction independent from renderer modules.
     from .context_render import render_context  # noqa: PLC0415
 
-    return render_context(extract_context(request, load_archive(archive)), output)
+    return render_context(
+        extract_context(request, load_archive(archive), str(Path(archive))), output
+    )

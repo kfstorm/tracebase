@@ -276,7 +276,7 @@ def test_github_request_reports_http_500_diagnostics_after_retries(
 def test_github_identity_sync_persists_narrow_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    archive = tmp_path / "archive"
 
     monkeypatch.setattr(
         "tracebase.github._GitHub.request",
@@ -285,9 +285,9 @@ def test_github_identity_sync_persists_narrow_profile(
         ),
     )
 
-    assert cli.main(["identity", "github", "sync"]) == 0
+    assert cli.main(["identity", "github", "sync", "--archive", str(archive)]) == 0
 
-    profile_path = tmp_path / "config" / "tracebase" / "github-identity.json"
+    profile_path = archive / "profiles" / "github" / "tracked-user.json"
     profile = json.loads(profile_path.read_text())
     assert profile["login"] == "tracked-user"
     assert profile["numeric_id"] == 123
@@ -303,16 +303,16 @@ def test_github_identity_sync_persists_narrow_profile(
 def test_github_identity_sync_reports_email_permission_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    archive = tmp_path / "archive"
 
     monkeypatch.setattr(
         "tracebase.github._GitHub.request", build_identity_request(fail_emails=True)
     )
 
-    assert cli.main(["identity", "github", "sync"]) == 1
+    assert cli.main(["identity", "github", "sync", "--archive", str(archive)]) == 1
 
     assert "/user/emails" in capsys.readouterr().err
-    assert not (tmp_path / "config" / "tracebase" / "github-identity.json").exists()
+    assert not (archive / "profiles" / "github").exists()
 
 
 def test_github_request_retries_timeout_then_succeeds(

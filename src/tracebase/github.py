@@ -570,7 +570,7 @@ def _actor(github: _GitHub) -> tuple[str, str]:
     return node_id, login
 
 
-def sync_identity() -> Path:
+def sync_identity(archive_root: str | Path) -> Path:
     """Refresh the local GitHub identity profile without affecting collection."""
 
     github = _GitHub()
@@ -604,7 +604,7 @@ def sync_identity() -> Path:
         and isinstance(email := entry.get("email"), str)
         and email.strip()
     ]
-    return save_github_identity(login, numeric_id, emails)
+    return save_github_identity(archive_root, login, numeric_id, emails)
 
 
 def resolve_context() -> GitHubContext:
