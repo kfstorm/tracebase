@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import time
 import uuid
 from contextlib import suppress
@@ -59,8 +60,6 @@ class _Page(Protocol):
     def evaluate(self, _expression: str, _arg: Any = None) -> Any: ...
 
     def goto(self, url: str, **_kwargs: Any) -> Any: ...
-
-    def is_closed(self) -> bool: ...
 
 
 class _APIResponse(Protocol):
@@ -1031,10 +1030,6 @@ def _probe_existing_session() -> _SessionProbeResult:
         return _ChatGPTSessionProbe(browser.context).check()
 
 
-def _session_label(session: _Session) -> str:
-    return session.label
-
-
 def status() -> _Session | None:
     """Check the saved session without opening a visible browser."""
 
@@ -1056,39 +1051,37 @@ def reset() -> None:
 
 
 def authenticate() -> None:
-    """Check the saved session, then wait for interactive authentication if needed."""
+    """Launch user-controlled Chromium, then verify the saved session."""
 
-    existing = _probe_existing_session()
-    if existing.state is _SessionState.AUTHENTICATED and existing.session is not None:
-        print(f"Already authenticated as {_session_label(existing.session)}")
-        return
-
-    with _Browser(profile_path(), headless=False, stealth=False) as browser:
-        if browser.page is None or browser.context is None:
-            raise ChatGPTError("ChatGPT browser is unavailable")
-        main_page = browser.page
-        probe = _ChatGPTSessionProbe(browser.context)
-        deadline = _monotonic() + _AUTH_WAIT_SECONDS
-        consecutive_failures = 0
-        while _monotonic() < deadline:
-            if main_page.is_closed():
-                raise ChatGPTAuthenticationError("ChatGPT authentication cancelled")
-            try:
-                result = probe.check()
-            except _TransientSessionProbeError as error:
-                consecutive_failures += 1
-                if consecutive_failures >= _REQUEST_RETRIES + 1:
-                    raise ChatGPTError(str(error)) from error
-            else:
-                consecutive_failures = 0
-                if (
-                    result.state is _SessionState.AUTHENTICATED
-                    and result.session is not None
-                ):
-                    print(f"Authenticated as {_session_label(result.session)}")
-                    return
-            _sleep(_AUTH_POLL_SECONDS)
-    raise ChatGPTAuthenticationError("ChatGPT authentication timed out")
+    profile = profile_path()
+    with _ProfileLock(profile):
+        command = [
+            _system_chromium_path(),
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            _CHATGPT_URL,
+        ]
+        try:
+            process = subprocess.Popen(command)
+        except OSError as error:
+            raise ChatGPTError("ChatGPT browser could not be started") from error
+        print(
+            "ChatGPT browser opened. Complete authentication, close Chromium, "
+            "then Tracebase will check the saved session."
+        )
+        try:
+            process.wait()
+        except KeyboardInterrupt:
+            with suppress(Exception):
+                process.terminate()
+            raise ChatGPTAuthenticationError(
+                "ChatGPT authentication cancelled"
+            ) from None
+    session = status()
+    if session is None:
+        raise ChatGPTAuthenticationError("ChatGPT authentication was not completed")
+    print(f"Authenticated as {session.label}")
 
 
 __all__ = [

@@ -22,8 +22,6 @@ from tracebase.chatgpt import (
     _ProfileLock,
     _Response,
     _Session,
-    _SessionProbeResult,
-    _SessionState,
     authenticate,
     collect,
     profile_path,
@@ -495,9 +493,6 @@ class Page:
         self.calls += 1
         return {"status": self.status, "headers": {}, "body": self.body}
 
-    def is_closed(self) -> bool:
-        return False
-
 
 class ProbeResponse:
     def __init__(self, status: int, body: object) -> None:
@@ -528,15 +523,11 @@ class ProbeContext:
 
 
 class AuthPage:
-    def __init__(self, *, closed: bool = False, url: str = "https://chatgpt.com"):
-        self.closed = closed
+    def __init__(self, *, url: str = "https://chatgpt.com"):
         self.url = url
 
     def goto(self, _url: str, **_kwargs: object) -> None:
         pass
-
-    def is_closed(self) -> bool:
-        return self.closed
 
     def evaluate(self, _expression: str, _arg: object) -> dict[str, object]:
         raise AssertionError("auth must not use page.evaluate")
@@ -590,82 +581,56 @@ def test_auth_probe_rejects_malformed_provider_response() -> None:
         ).check()
 
 
-def test_authenticate_survives_google_navigation_and_transient_failure(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_authenticate_launches_uncontrolled_system_chromium(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    request = ProbeRequest(
-        [ProbeResponse(401, {}), RuntimeError("navigation race"), session_response()]
-    )
-    browser = AuthBrowser(
-        ProbeContext(request), AuthPage(url="https://accounts.google.com/oauth")
-    )
+    profile = tmp_path / "profile"
+    command: list[str] = []
+
+    class FinishedProcess:
+        def wait(self) -> int:
+            return 0
+
+    def fake_popen(args: list[str]) -> FinishedProcess:
+        command.extend(args)
+        return FinishedProcess()
+
+    monkeypatch.setattr("tracebase.chatgpt.profile_path", lambda: profile)
     monkeypatch.setattr(
-        "tracebase.chatgpt._probe_existing_session",
-        lambda: _SessionProbeResult(_SessionState.UNAUTHENTICATED),
+        "tracebase.chatgpt._system_chromium_path", lambda: "/usr/bin/chromium"
     )
-    monkeypatch.setattr("tracebase.chatgpt._Browser", lambda *args, **kwargs: browser)
-    monkeypatch.setattr("tracebase.chatgpt._AUTH_WAIT_SECONDS", 1)
-    monkeypatch.setattr("tracebase.chatgpt._AUTH_POLL_SECONDS", 0)
-    monkeypatch.setattr("tracebase.chatgpt._monotonic", lambda: 0)
-    monkeypatch.setattr("tracebase.chatgpt._sleep", lambda _seconds: None)
+    monkeypatch.setattr("tracebase.chatgpt.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "tracebase.chatgpt.status",
+        lambda: _Session("account-1", "foo@example.com"),
+    )
 
     authenticate()
 
-    assert browser.page.url == "https://accounts.google.com/oauth"
-    assert capsys.readouterr().out == "Authenticated as foo@example.com\n"
+    assert command == [
+        "/usr/bin/chromium",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://chatgpt.com",
+    ]
+    output = capsys.readouterr().out
+    assert "ChatGPT browser opened" in output
+    assert "Authenticated as foo@example.com" in output
 
 
-def test_authenticate_fails_after_bounded_probe_failures(
-    monkeypatch: pytest.MonkeyPatch,
+def test_authenticate_reports_browser_start_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    request = ProbeRequest(
-        [RuntimeError("first"), RuntimeError("second"), RuntimeError("third")]
-    )
-    browser = AuthBrowser(ProbeContext(request), AuthPage())
+    monkeypatch.setattr("tracebase.chatgpt.profile_path", lambda: tmp_path / "profile")
     monkeypatch.setattr(
-        "tracebase.chatgpt._probe_existing_session",
-        lambda: _SessionProbeResult(_SessionState.UNAUTHENTICATED),
+        "tracebase.chatgpt.subprocess.Popen",
+        lambda _args: (_ for _ in ()).throw(OSError("synthetic launch failure")),
     )
-    monkeypatch.setattr("tracebase.chatgpt._Browser", lambda *args, **kwargs: browser)
-    monkeypatch.setattr("tracebase.chatgpt._AUTH_WAIT_SECONDS", 600)
-    monkeypatch.setattr("tracebase.chatgpt._AUTH_POLL_SECONDS", 0)
-    monkeypatch.setattr("tracebase.chatgpt._monotonic", lambda: 0)
-    monkeypatch.setattr("tracebase.chatgpt._sleep", lambda _seconds: None)
 
-    with pytest.raises(ChatGPTError, match="session probe failed"):
-        authenticate()
-
-
-def test_authenticate_times_out_without_real_sleep(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = AuthBrowser(
-        ProbeContext(ProbeRequest([ProbeResponse(401, {})])), AuthPage()
-    )
-    clock = iter((0, 0, 601))
-    monkeypatch.setattr(
-        "tracebase.chatgpt._probe_existing_session",
-        lambda: _SessionProbeResult(_SessionState.UNAUTHENTICATED),
-    )
-    monkeypatch.setattr("tracebase.chatgpt._Browser", lambda *args, **kwargs: browser)
-    monkeypatch.setattr("tracebase.chatgpt._monotonic", lambda: next(clock))
-    monkeypatch.setattr("tracebase.chatgpt._sleep", lambda _seconds: None)
-
-    with pytest.raises(ChatGPTAuthenticationError, match="timed out"):
-        authenticate()
-
-
-def test_interactive_auth_reports_main_window_cancellation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = AuthBrowser(ProbeContext(ProbeRequest([])), AuthPage(closed=True))
-    monkeypatch.setattr(
-        "tracebase.chatgpt._probe_existing_session",
-        lambda: _SessionProbeResult(_SessionState.UNAUTHENTICATED),
-    )
-    monkeypatch.setattr("tracebase.chatgpt._Browser", lambda *args, **kwargs: browser)
-
-    with pytest.raises(ChatGPTAuthenticationError, match="cancelled"):
+    with pytest.raises(ChatGPTError, match="could not be started"):
         authenticate()
 
 
@@ -990,27 +955,6 @@ def test_cli_chatgpt_auth_actions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("tracebase.cli.reset_chatgpt", lambda: calls.append("reset"))
     assert main(["auth", "chatgpt", "reset"]) == 0
     assert calls == ["reset"]
-
-
-def test_authenticate_skips_headed_browser_for_existing_session(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(
-        "tracebase.chatgpt._probe_existing_session",
-        lambda: _SessionProbeResult(
-            _SessionState.AUTHENTICATED, _Session("id", "foo@example.com")
-        ),
-    )
-
-    class UnexpectedBrowser:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            raise AssertionError("headed auth browser must not start")
-
-    monkeypatch.setattr("tracebase.chatgpt._Browser", UnexpectedBrowser)
-
-    authenticate()
-
-    assert capsys.readouterr().out == "Already authenticated as foo@example.com\n"
 
 
 def test_cli_status_authenticated_is_headless_only(

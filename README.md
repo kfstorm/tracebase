@@ -99,7 +99,7 @@ ChatGPT auth and collection require a system Chromium installation. Tracebase pa
 
 Interactive ChatGPT authentication and collection use the same system Chromium browser and Tracebase-owned profile. This keeps one browser engine and one persistent profile for cookies, OAuth state, and session probing.
 
-Authenticate the Tracebase-owned persistent browser profile interactively. Tracebase first checks the saved session and opens a visible browser only when login is required. The profile contains credential-equivalent sensitive browser state; it is kept outside the Raw Archive and must remain private:
+Launch the Tracebase-owned persistent browser profile for interactive authentication. This command does not inject Playwright or inspect the session while the browser is open: complete login yourself and close Chromium; the command then checks the saved session automatically. The profile contains credential-equivalent sensitive browser state; it is kept outside the Raw Archive and must remain private:
 
 ```bash
 uv run tracebase auth chatgpt
@@ -119,7 +119,7 @@ uv run tracebase auth chatgpt reset
 
 Reset is the supported account-switching flow: run `reset`, then run `auth chatgpt` again. It deletes only the dedicated browser profile, including its cookies, local storage, and provider login state; it does not delete previously collected ChatGPT Raw Archive data. Reset is refused while another Tracebase ChatGPT browser operation is using the profile.
 
-During interactive authentication, Tracebase leaves Google, Microsoft, Apple, MFA, CAPTCHA, Cloudflare, and other provider verification flows to the user. It does not automate or bypass passwords, account selection, MFA, CAPTCHA, Cloudflare, or browser verification. The visible page may navigate through these normal third-party login pages while Tracebase checks the shared browser session independently.
+During interactive authentication, Tracebase leaves Google, Microsoft, Apple, MFA, CAPTCHA, Cloudflare, and other provider verification flows to the user. It does not automate or bypass passwords, account selection, MFA, CAPTCHA, Cloudflare, or browser verification. The launched Chromium process is not controlled by Playwright; close it after completing the normal third-party login flow, and Tracebase automatically inspects the shared profile.
 
 Collect ordinary personal ChatGPT conversations with an explicit browser mode:
 
