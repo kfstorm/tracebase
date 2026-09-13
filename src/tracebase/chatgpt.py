@@ -266,8 +266,24 @@ def _stealth_page(page: _Page) -> None:
     Stealth().apply_stealth_sync(page)
 
 
+def _system_chromium_path() -> str:
+    for name in ("chromium", "chromium-browser"):
+        executable = shutil.which(name)
+        if executable is not None:
+            return executable
+    raise ChatGPTError(
+        "System Chromium was not found; install Chromium before using ChatGPT"
+    )
+
+
 class _Browser:
-    def __init__(self, profile: Path, *, headless: bool, stealth: bool):
+    def __init__(
+        self,
+        profile: Path,
+        *,
+        headless: bool,
+        stealth: bool,
+    ):
         self.profile = profile
         self.headless = headless
         # Provider login pages should see a normal headed browser fingerprint.
@@ -285,6 +301,7 @@ class _Browser:
             self.context = self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self.profile),
                 headless=self.headless,
+                executable_path=_system_chromium_path(),
             )
             self.page = (
                 self.context.pages[0] if self.context.pages else self.context.new_page()

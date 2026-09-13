@@ -95,11 +95,9 @@ Successful collection prints one summary line to stdout; progress goes to stderr
 
 ### Collect ChatGPT Conversations
 
-ChatGPT auth and collection require the Playwright Chromium browser binary. Install it only if you use this collector:
+ChatGPT auth and collection require a system Chromium installation. Tracebase passes the same system Chromium executable to Playwright for both headed authentication and collection; it does not use Playwright's bundled browser binary. On Linux, install the `chromium` system package before using this collector.
 
-```bash
-uv run playwright install chromium
-```
+Interactive ChatGPT authentication and collection use the same system Chromium browser and Tracebase-owned profile. This keeps one browser engine and one persistent profile for cookies, OAuth state, and session probing.
 
 Authenticate the Tracebase-owned persistent browser profile interactively. Tracebase first checks the saved session and opens a visible browser only when login is required. The profile contains credential-equivalent sensitive browser state; it is kept outside the Raw Archive and must remain private:
 

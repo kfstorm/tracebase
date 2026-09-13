@@ -892,6 +892,52 @@ def test_browser_launch_failure_releases_profile_lock(
         pass
 
 
+def test_browser_uses_the_system_chromium_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launch_options: dict[str, object] = {}
+
+    class FakePage:
+        def goto(self, _url: str, **_kwargs: object) -> None:
+            pass
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages = [FakePage()]
+
+        def new_page(self) -> FakePage:
+            return self.pages[0]
+
+        def close(self) -> None:
+            pass
+
+    class FakeChromium:
+        def launch_persistent_context(self, **kwargs: object) -> FakeContext:
+            launch_options.update(kwargs)
+            return FakeContext()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def start(self) -> FakePlaywright:
+            return self
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr("tracebase.chatgpt.sync_playwright", FakePlaywright)
+    monkeypatch.setattr(
+        "tracebase.chatgpt._system_chromium_path", lambda: "/usr/bin/chromium"
+    )
+
+    with _Browser(tmp_path / "profile", headless=False, stealth=False):
+        pass
+
+    assert "channel" not in launch_options
+    assert launch_options["headless"] is False
+    assert launch_options["executable_path"] == "/usr/bin/chromium"
+
+
 def test_cli_registers_chatgpt_collection_and_auth_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
