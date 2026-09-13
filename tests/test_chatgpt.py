@@ -420,6 +420,11 @@ def test_empty_discovery_publishes_an_empty_successful_run(tmp_path: Path) -> No
 
     assert json.loads((published / "run.json").read_text())["snapshots"] == []
     assert result.coverage["selected_conversations"] == 0
+    assert (
+        "Discovery update_time is validated for message/edit content changes but is "
+        "not known to advance for every conversation metadata mutation."
+        in result.coverage["source_limitations"]
+    )
 
 
 def test_provider_failure_leaves_staging_and_never_publishes(tmp_path: Path) -> None:
@@ -567,8 +572,39 @@ def test_profile_path_uses_platform_state_directories(
     )
 
     monkeypatch.setattr("tracebase.chatgpt.platform.system", lambda: "Linux")
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    assert profile_path() == Path("/home/tester/.local/state/tracebase/chatgpt-browser")
+
+    monkeypatch.setenv("XDG_STATE_HOME", "")
+    assert profile_path() == Path("/home/tester/.local/state/tracebase/chatgpt-browser")
+
+    monkeypatch.setenv("XDG_STATE_HOME", "relative/path")
+    assert profile_path() == Path("/home/tester/.local/state/tracebase/chatgpt-browser")
+
     monkeypatch.setenv("XDG_STATE_HOME", "/tmp/tester-state")
     assert profile_path() == Path("/tmp/tester-state/tracebase/chatgpt-browser")
+
+
+def test_windows_profile_path_rejects_empty_or_relative_localappdata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tracebase.chatgpt.platform.system", lambda: "Windows")
+    monkeypatch.setattr("tracebase.chatgpt.Path.home", lambda: Path("/home/tester"))
+
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    assert profile_path() == Path(
+        "/home/tester/AppData/Local/tracebase/chatgpt-browser"
+    )
+
+    monkeypatch.setenv("LOCALAPPDATA", "relative/path")
+    assert profile_path() == Path(
+        "/home/tester/AppData/Local/tracebase/chatgpt-browser"
+    )
+
+    monkeypatch.setenv("LOCALAPPDATA", "")
+    assert profile_path() == Path(
+        "/home/tester/AppData/Local/tracebase/chatgpt-browser"
+    )
 
 
 def test_profile_lock_rejects_concurrent_use(tmp_path: Path) -> None:

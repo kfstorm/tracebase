@@ -126,10 +126,18 @@ def profile_path() -> Path:
     if system == "Darwin":
         root = Path.home() / "Library" / "Application Support"
     elif system == "Windows":
-        root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        root = _absolute_env_path("LOCALAPPDATA", Path.home() / "AppData/Local")
     else:
-        root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+        root = _absolute_env_path("XDG_STATE_HOME", Path.home() / ".local/state")
     return root / "tracebase" / "chatgpt-browser"
+
+
+def _absolute_env_path(name: str, fallback: Path) -> Path:
+    value = os.environ.get(name)
+    if not value:
+        return fallback
+    path = Path(value)
+    return path if path.is_absolute() else fallback
 
 
 class _ProfileLock:
@@ -833,6 +841,9 @@ def _collect_api(
                 "records, "
                 "not complete branch recovery.",
                 "Canvas/textdocs are outside this collector's v1 representation.",
+                "Discovery update_time is validated for message/edit content changes "
+                "but is not known to advance for every conversation metadata "
+                "mutation.",
             ],
         }
     )
