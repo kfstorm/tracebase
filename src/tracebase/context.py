@@ -25,6 +25,12 @@ from .opencode_context import (
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
 )
+# Archive recognition is broader than the set of sources with Context projectors.
+_ARCHIVE_OBJECT_KINDS = {
+    "github": {"issue", "pull-request"},
+    "opencode": {"session"},
+    "chatgpt": {"conversation"},
+}
 _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "github": {"issue", "pull-request"},
     "opencode": {"session"},
@@ -225,14 +231,14 @@ def _session_first_in_range(projection: OpenCodeProjection) -> datetime:
     return min(candidates) if candidates else datetime.max.replace(tzinfo=UTC)
 
 
-def _validate_context_source(snapshot: PublishedSnapshot) -> None:
+def _context_projection_supported(snapshot: PublishedSnapshot) -> bool:
     source_kind = snapshot.manifest["source_kind"]
-    supported_kinds = _SUPPORTED_CONTEXT_OBJECT_KINDS.get(source_kind)
-    if (
-        supported_kinds is None
-        or snapshot.manifest["object_kind"] not in supported_kinds
-    ):
+    object_kind = snapshot.manifest["object_kind"]
+    archive_kinds = _ARCHIVE_OBJECT_KINDS.get(source_kind)
+    if archive_kinds is None or object_kind not in archive_kinds:
         raise ContextError("unsupported context source")
+    supported_kinds = _SUPPORTED_CONTEXT_OBJECT_KINDS.get(source_kind)
+    return supported_kinds is not None and object_kind in supported_kinds
 
 
 def _require_github_profiles(
@@ -288,7 +294,9 @@ def extract_context(
     grouped: dict[tuple[str, str, str, str], list[PublishedSnapshot]] = {}
     for run in runs:
         for snapshot in run.snapshots:
-            _validate_context_source(snapshot)
+            if not _context_projection_supported(snapshot):
+                # Preserve known archive evidence without inventing a projection.
+                continue
             grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
     all_items: list[ContextItem] = []
     for key, snapshots in sorted(grouped.items()):

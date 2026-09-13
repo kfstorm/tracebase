@@ -5,7 +5,7 @@ This context defines the evidence and observation language for a historical, rep
 ## Language
 
 **Source Item**:
-A source-specific top-level unit that is independently discovered and represented by a Snapshot. A GitHub Item is an Issue or Pull Request that passed Eligibility; an OpenCode Item is a session. An Item does not include its related-object graph, and the shared term does not erase source-specific semantics.
+A source-specific top-level unit that is independently discovered and represented by a Snapshot. A GitHub Item is an Issue or Pull Request that passed Eligibility; an OpenCode Item is a session; a ChatGPT Item is an ordinary personal conversation. An Item does not include its related-object graph, and the shared term does not erase source-specific semantics.
 _Avoid_: Artifact, universal entity
 
 **Explicit Reference**:
@@ -25,7 +25,7 @@ Archive-level mutable metadata keyed by the tracked GitHub account's stable `/us
 _Avoid_: Identity evidence, account snapshot
 
 **Hydration**:
-The collection of source-native endpoint responses for one discovered GitHub Item. Hydration preserves the observed responses without asserting they formed an atomic provider snapshot.
+The collection of source-native provider responses for one discovered Source Item. Hydration preserves the observed responses, including source-specific pagination, without asserting they formed an atomic provider snapshot.
 _Avoid_: Sync, mirror, enrichment
 
 **Coverage**:
@@ -33,7 +33,7 @@ The recorded query and permission boundary of a successfully published Collectio
 _Avoid_: Completeness, audit log
 
 **Source Instance**:
-A stable source-specific scope used to distinguish Collection Ranges and detect overlap to prevent duplicate collection. For GitHub it is the authenticated actor's stable node ID; for OpenCode it is a user-chosen `--instance-id` that is unique across machines and stable on the same machine. A machine name is valid if it meets both conditions.
+A stable source-specific scope used to distinguish Collection Ranges and detect overlap to prevent duplicate collection. For GitHub it is the authenticated actor's stable node ID; for OpenCode it is a user-chosen `--instance-id` that is unique across machines and stable on the same machine; for ChatGPT it is the authenticated account's stable provider identity used as the scope ID. A machine name is valid as an OpenCode instance ID if it meets both conditions.
 _Avoid_: Project association
 
 **Snapshot**:
