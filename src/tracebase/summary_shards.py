@@ -20,8 +20,8 @@ _CONTEXT_ONLY_SECTION = "## Context-only evidence"
 _ATTRIBUTION_MODE_VALUES = {mode.value for mode in AttributionMode}
 _ATTRIBUTION_MODE = re.compile(r"attribution mode: `([^`]+)`")
 _CONTEXT_LINK = re.compile(r"\]\(([^)]+)\)")
-_GITHUB_SCOPE = re.compile(r"GitHub repository (?P<repo>[^;]+)")
-_OPENCODE_SCOPE = re.compile(r"OpenCode project (?P<project>[^;]+)")
+_GITHUB_SCOPE = re.compile(r"(?:GitHub )?repository (?P<repo>[^,:;]+)")
+_OPENCODE_SCOPE = re.compile(r"OpenCode(?: project)? (?P<project>[^:;]+)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,20 +43,21 @@ def _status_data(notes: str) -> Any:
 
 def _scope_matches(scope: str, line: str) -> bool:
     if scope.startswith("/context/"):
-        relative_scope = scope.removeprefix("/context/")
-        return any(
-            target == relative_scope or target.startswith(f"{relative_scope}/")
-            for target in _CONTEXT_LINK.findall(line)
-        )
-    github_scope = _GITHUB_SCOPE.match(scope)
-    if github_scope is not None:
-        relative_scope = f"github/{github_scope.group('repo').strip()}"
+        relative_scope = scope.removeprefix("/context/").split("/{", 1)[0]
+    elif scope.startswith("github/"):
+        relative_scope = "/".join(scope.split("/{", 1)[0].split("/")[:3])
+    elif scope.startswith("opencode/"):
+        relative_scope = scope.split("/session/", 1)[0]
     else:
-        opencode_scope = _OPENCODE_SCOPE.match(scope)
-        if opencode_scope is None:
-            return False
-        project = opencode_scope.group("project").strip()
-        relative_scope = f"opencode{project}"
+        github_scope = _GITHUB_SCOPE.match(scope)
+        if github_scope is not None:
+            relative_scope = f"github/{github_scope.group('repo').strip()}"
+        else:
+            opencode_scope = _OPENCODE_SCOPE.match(scope)
+            if opencode_scope is None:
+                return False
+            project = opencode_scope.group("project").strip()
+            relative_scope = f"opencode{project}"
     return any(
         target == relative_scope or target.startswith(f"{relative_scope}/")
         for target in _CONTEXT_LINK.findall(line)

@@ -385,6 +385,82 @@ def test_shard_validation_does_not_match_context_scope_prefixes(
     assert inspect_shards(tmp_path, context_dir).errors == ()
 
 
+def test_shard_validation_matches_context_scope_file_set(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **repo** [attribution mode: `actor_scoped`](github/repo/overview.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "NOTES.md").write_text(
+        '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"repo",'
+        '"scope":"repository repo; PRs #1, #2",'
+        '"attribution_modes":["actor_scoped"],"status":"complete",'
+        '"retry_count":0,"report":"/work/shards/repo.md"}]} '
+        "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+    (tmp_path / "shards/repo.md").write_text(
+        "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_validation_matches_source_path_scopes(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **GitHub** [attribution mode: `actor_scoped`]("
+        "github/example/project/pull/1/overview.md)\n"
+        "- **OpenCode** [attribution mode: `personal`]("
+        "opencode/home/tester/project/session/01/overview.md)\n",
+        encoding="utf-8",
+    )
+    shards = [
+        {
+            "id": "github",
+            "scope": "github/example/project/pull/{1}",
+            "attribution_modes": ["actor_scoped"],
+        },
+        {
+            "id": "opencode",
+            "scope": "opencode/home/tester/project/session/{01}",
+            "attribution_modes": ["personal"],
+        },
+    ]
+    (tmp_path / "NOTES.md").write_text(
+        "<!-- SHARD_STATUS_BEGIN -->"
+        + json.dumps(
+            {
+                "shards": [
+                    {
+                        **shard,
+                        "status": "complete",
+                        "retry_count": 0,
+                        "report": f"/work/shards/{shard['id']}.md",
+                    }
+                    for shard in shards
+                ]
+            }
+        )
+        + "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+    for shard in shards:
+        (tmp_path / "shards" / f"{shard['id']}.md").write_text(
+            "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+            encoding="utf-8",
+        )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
 def test_cli_rejects_conflicting_inputs(capsys: pytest.CaptureFixture[str]) -> None:
     result = cli.main(
         [
