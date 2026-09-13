@@ -9,6 +9,7 @@ import shlex
 import shutil
 import tempfile
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -192,6 +193,7 @@ def _write_private(path: Path, content: bytes) -> None:
 
 
 def _replace_profile(profile_root: Path, temporary_root: Path) -> None:
+    """Install a staged profile and best-effort restore on install failure."""
     parent = profile_root.parent
     previous_root: Path | None = None
     if profile_root.exists() or profile_root.is_symlink():
@@ -201,18 +203,20 @@ def _replace_profile(profile_root: Path, temporary_root: Path) -> None:
         profile_root.replace(previous_root)
     try:
         temporary_root.replace(profile_root)
-    except BaseException:
+    except OSError:
         if previous_root is not None and not profile_root.exists():
-            previous_root.replace(profile_root)
+            with suppress(OSError):
+                previous_root.replace(profile_root)
         raise
     if previous_root is not None:
-        shutil.rmtree(previous_root)
+        with suppress(OSError):
+            shutil.rmtree(previous_root)
 
 
 def save_github_identity(
     archive_root: str | Path, user_body: bytes, email_bodies: tuple[bytes, ...]
 ) -> Path:
-    """Atomically persist complete GitHub identity response bodies."""
+    """Stage complete GitHub identity response bodies before replacement."""
     user = _json_bytes(user_body)
     if not isinstance(user, dict):
         raise ArchiveError("GitHub identity response was invalid")

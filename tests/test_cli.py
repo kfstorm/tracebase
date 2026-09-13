@@ -13,7 +13,7 @@ from stat import S_IMODE
 
 import pytest
 
-from tracebase import cli
+from tracebase import cli, github_identity
 from tracebase.archive import (
     Archive,
     ArchiveError,
@@ -35,6 +35,7 @@ from tracebase.github import (
     _updated_range,
     collect,
 )
+from tracebase.github_identity import save_github_identity
 from tracebase.progress import LineProgressSink, ProgressEvent, ProgressReporter
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -189,6 +190,17 @@ def build_identity_request(
         )
 
     return request
+
+
+def sync_initial_identity_profile(
+    monkeypatch: pytest.MonkeyPatch, archive: Path
+) -> Path:
+    monkeypatch.setattr(
+        "tracebase.github._GitHub.request",
+        build_identity_request([[{"email": "old@example.com"}]]),
+    )
+    assert cli.main(["identity", "github", "sync", "--archive", str(archive)]) == 0
+    return archive / "profiles" / "github" / encode_path_id("actor-node")
 
 
 def run_github_request_with_attempts(
@@ -389,6 +401,69 @@ def test_github_identity_sync_failure_preserves_previous_profile(
         if path.is_file()
     }
     assert after == before
+
+
+def test_github_identity_replacement_failure_restores_previous_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "archive"
+    profile_root = sync_initial_identity_profile(monkeypatch, archive)
+    before = (profile_root / "user.json").read_bytes()
+    original_replace = Path.replace
+
+    def fail_new_install(self: Path, target: Path) -> Path:
+        if (
+            target == profile_root
+            and self.name.startswith(f".{profile_root.name}.")
+            and "previous-" not in self.name
+        ):
+            raise OSError("synthetic install failure")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_new_install)
+    with pytest.raises(ArchiveError, match="profile could not be written"):
+        save_github_identity(
+            archive,
+            json.dumps(
+                {"id": 123, "login": "tracked-user", "node_id": "actor-node"}
+            ).encode(),
+            (json.dumps([{"email": "new@example.com"}]).encode(),),
+        )
+
+    assert (profile_root / "user.json").read_bytes() == before
+    assert not any("previous-" in path.name for path in profile_root.parent.iterdir())
+
+
+def test_github_identity_cleanup_failure_keeps_new_profile_valid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = tmp_path / "archive"
+    profile_root = sync_initial_identity_profile(monkeypatch, archive)
+    old_user = (profile_root / "user.json").read_bytes()
+    original_rmtree = github_identity.shutil.rmtree
+
+    def fail_backup_cleanup(path: str | Path, *args: object, **kwargs: object) -> None:
+        if "previous-" in Path(path).name:
+            raise OSError("synthetic cleanup failure")
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr("tracebase.github_identity.shutil.rmtree", fail_backup_cleanup)
+    save_github_identity(
+        archive,
+        json.dumps(
+            {
+                "id": 123,
+                "login": "tracked-user",
+                "node_id": "actor-node",
+                "revision": "new",
+            }
+        ).encode(),
+        (json.dumps([{"email": "new@example.com"}]).encode(),),
+    )
+
+    assert (profile_root / "user.json").read_bytes() != old_user
+    assert json.loads((profile_root / "user.json").read_bytes())["revision"] == "new"
+    assert any("previous-" in path.name for path in profile_root.parent.iterdir())
 
 
 def test_github_request_retries_timeout_then_succeeds(
