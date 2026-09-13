@@ -58,6 +58,7 @@ def item(
     starred: bool,
     automation: bool = False,
     temporary: bool = False,
+    gizmo_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "id": source_id,
@@ -66,6 +67,7 @@ def item(
         "is_starred": starred,
         "is_automation_conversation": automation,
         "is_temporary_chat": temporary,
+        "gizmo_id": gizmo_id,
     }
 
 
@@ -103,6 +105,20 @@ class DiscoveryAPI:
                     starred=True,
                     automation=True,
                 ),
+                item(
+                    "temporary",
+                    "2026-01-01T00:30:00Z",
+                    archived=False,
+                    starred=True,
+                    temporary=True,
+                ),
+                item(
+                    "project-conversation",
+                    "2026-01-01T00:30:00Z",
+                    archived=False,
+                    starred=True,
+                    gizmo_id="g-p-synthetic-project",
+                ),
             ],
             (True, False): [
                 item(
@@ -110,6 +126,13 @@ class DiscoveryAPI:
                     "2026-01-01T00:30:00Z",
                     archived=True,
                     starred=False,
+                ),
+                item(
+                    "custom-gpt-conversation",
+                    "2026-01-01T00:30:00Z",
+                    archived=True,
+                    starred=False,
+                    gizmo_id="g-synthetic-custom-gpt",
                 ),
                 item(
                     "at-end",
@@ -144,6 +167,12 @@ def test_discovery_covers_four_partitions_and_stabilizes() -> None:
         "at-start",
         "archived-conversation",
     }
+    assert not {
+        "automation",
+        "temporary",
+        "project-conversation",
+        "custom-gpt-conversation",
+    } & set(candidates)
     assert passes == 2
     assert len(coverage) == 8
     assert {

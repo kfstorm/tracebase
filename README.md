@@ -95,7 +95,7 @@ uv run tracebase collect chatgpt \
 
 ChatGPT discovery uses conversation `update_time` and the same half-open Collection Range `[from, to)`. Discovery `update_time` is validated for message/edit content changes but is not known to advance for every conversation metadata mutation; it is not a complete conversation mutation log. Message-level work-time selection belongs to a later Context projection, not collection. Authentication failures, browser verification, rate limits, or incomplete hydration prevent a successful run from being published.
 
-Known ChatGPT source limitations include mutable offset pagination, provider responses that do not guarantee complete branch history, Canvas/textdocs outside the v1 representation, conversations deleted before discovery being unavailable for retrospective collection, and the lack of reliable current provider evidence distinguishing Project or Custom GPT conversations from ordinary personal chats. The collector does not add speculative `gizmo_id`, `workspace_id`, or `conversation_origin` predicates.
+Known ChatGPT source limitations include mutable offset pagination, provider responses that do not guarantee complete branch history, Canvas/textdocs outside the v1 representation, and conversations deleted before discovery being unavailable for retrospective collection. Discovery excludes Project and Custom GPT conversations when the provider item has a non-null `gizmo_id`; this predicate was validated against synthetic ordinary, Project, and Custom GPT conversations. Other provider metadata may still be incomplete or change without notice.
 
 ### Generate Context Offline
 

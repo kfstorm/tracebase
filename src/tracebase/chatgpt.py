@@ -463,7 +463,8 @@ def _discovery_page(
 
 def _ordinary(item: dict[str, Any]) -> bool:
     return (
-        item.get("is_temporary_chat") is False
+        item.get("gizmo_id") is None
+        and item.get("is_temporary_chat") is False
         and item.get("is_automation_conversation") is False
     )
 
@@ -706,6 +707,7 @@ def _hydrate(run: CollectionRun, api: _ChatGPTAPI, candidate: _Candidate) -> Non
             {
                 "update_time": candidate.update_time.isoformat(),
                 "ordinary_predicate": [
+                    "gizmo_id is null",
                     "is_temporary_chat === false",
                     "is_automation_conversation === false",
                 ],
@@ -841,6 +843,8 @@ def _collect_api(
                 "records, "
                 "not complete branch recovery.",
                 "Canvas/textdocs are outside this collector's v1 representation.",
+                "Project and Custom GPT conversations are excluded when the provider "
+                "discovery item has a non-null gizmo_id.",
                 "Discovery update_time is validated for message/edit content changes "
                 "but is not known to advance for every conversation metadata "
                 "mutation.",
