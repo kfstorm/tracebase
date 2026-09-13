@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from .archive import ArchiveError, CollectionRange, CollectionRun, Snapshot
+from .archive import (
+    ArchiveError,
+    CollectionRange,
+    CollectionRun,
+    Snapshot,
+    load_published_archive,
+)
 from .collector import CollectionContext, CollectionResult
 from .github_identity import save_github_identity
 from .progress import ProgressEvent, ProgressReporter
@@ -574,37 +580,50 @@ def sync_identity(archive_root: str | Path) -> Path:
     """Refresh the local GitHub identity profile without affecting collection."""
 
     github = _GitHub()
-    response = github.request("/user")
-    user = github.json(response)
+    user_response = github.request("/user")
+    user = github.json(user_response)
     if not isinstance(user, dict):
         raise ArchiveError("GitHub identity response was invalid")
+    node_id = user.get("node_id")
     login = user.get("login")
     numeric_id = user.get("id")
     if (
-        not isinstance(login, str)
+        not isinstance(node_id, str)
+        or not node_id
+        or not isinstance(login, str)
         or not login
         or not isinstance(numeric_id, int)
         or isinstance(numeric_id, bool)
     ):
         raise ArchiveError("GitHub identity response was invalid")
+    archive_path = Path(archive_root).absolute()
+    known_scopes = set()
+    if (archive_path / "runs").exists():
+        known_scopes = {
+            run.manifest["source"]["scope_id"]
+            for run in load_published_archive(archive_root)
+            if isinstance(run.manifest.get("source"), dict)
+            and run.manifest["source"].get("kind") == "github"
+            and isinstance(run.manifest["source"].get("scope_id"), str)
+        }
+    if known_scopes and node_id not in known_scopes:
+        raise ArchiveError(
+            "GitHub identity does not match any GitHub Collection Run source scope"
+        )
     try:
-        emails_response = github.request("/user/emails")
+        email_responses = tuple(
+            response for _endpoint, response in _pages(github, "/user/emails")
+        )
     except ArchiveError as error:
         raise ArchiveError(
             "GitHub identity sync could not read /user/emails; "
             "check token permission or request access to associated emails"
         ) from error
-    emails_value = github.json(emails_response)
-    if not isinstance(emails_value, list):
-        raise ArchiveError("GitHub identity email response was invalid")
-    emails = [
-        email
-        for entry in emails_value
-        if isinstance(entry, dict)
-        and isinstance(email := entry.get("email"), str)
-        and email.strip()
-    ]
-    return save_github_identity(archive_root, login, numeric_id, emails)
+    return save_github_identity(
+        archive_root,
+        user_response.body,
+        tuple(response.body for response in email_responses),
+    )
 
 
 def resolve_context() -> GitHubContext:

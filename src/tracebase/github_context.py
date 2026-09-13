@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from .archive import ArchiveError, PublishedSnapshot
+from .github_identity import GitHubIdentity
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +22,7 @@ class GitHubProjection:
     number: int
     title: str | None
     tracked_login: str | None
-    tracked_commit_identities: frozenset[str] = frozenset()
+    tracked_identity: GitHubIdentity | None = None
 
 
 def _json(snapshot: PublishedSnapshot, path: str) -> dict[str, Any] | list[Any]:

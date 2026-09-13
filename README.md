@@ -50,7 +50,7 @@ uv run tracebase collect github \
 
 ### Sync GitHub Identity
 
-Identity sync is not required for GitHub collection. It is required before generating Context Output that includes GitHub items, so historical Git commits can be marked as `(tracked account)` when their author email matches the authenticated GitHub account. Regular `collect github` still calls `/user` only and does not automatically call `/user/emails`.
+Identity sync is not required for GitHub collection. It is required before generating Context Output that includes GitHub items, so historical Git commits can be marked as `(tracked account)` when their author email matches the authenticated GitHub account. Regular `collect github` still calls `/user` only and does not automatically call `/user/emails`. Identity sync preserves the complete `/user` response and every paginated `/user/emails` response; attribution fields are derived later while reading the profile.
 
 Identity sync requires a GitHub token with the `user:email` scope. For a GitHub CLI OAuth credential, refresh the scope and then sync using the explicit archive path:
 
@@ -61,13 +61,17 @@ uv run tracebase identity github sync \
   --archive "/path/to/archive"
 ```
 
-The profile is stored at:
+The profile is stored under the stable GitHub source identity returned by `/user.node_id`:
 
 ```text
-<archive>/profiles/github/<login>.json
+<archive>/profiles/github/<encoded-scope-id>/
+├── profile.json
+├── user.json
+├── emails.001.json
+└── ...
 ```
 
-The profile is archive-level mutable metadata. It is not part of `runs/`, a Snapshot, or Source-native Evidence. It contains associated GitHub email addresses, so protect it with the same care as the Raw Archive. Skipping identity sync does not affect collection or Context generation when no GitHub items are included. If Context includes GitHub items, the matching profile must exist and be valid; otherwise generation fails with the sync command needed to create it. Context Output never renders these private email addresses.
+The profile is archive-level mutable metadata keyed by the same stable source scope stored in GitHub Collection Run manifests. It is not part of `runs/`, a Snapshot, or Source-native Evidence. It contains associated GitHub account data, so protect it with the same care as the Raw Archive. A profile can be refreshed without recollecting historical evidence. Skipping identity sync does not affect collection or Context generation when no GitHub items are included. If Context includes GitHub items, the matching stable-ID profile must exist and be valid; otherwise generation fails with the sync command needed to create it. Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output does not perform redaction.
 
 ### Collect OpenCode Sessions
 

@@ -21,7 +21,7 @@ Unmodified bytes provided by a source and preserved in the private v0 archive. I
 _Avoid_: Sanitized original, memory
 
 **GitHub Identity Profile**:
-Archive-level mutable metadata that maps one tracked GitHub account to commit email identities for attribution. It is not Source-native Evidence, a Snapshot, or part of a Collection Run; it lives outside `runs/` and may be refreshed without recollecting historical evidence.
+Archive-level mutable metadata keyed by the tracked GitHub account's stable `/user.node_id`, matching the `source.scope_id` in GitHub Collection Run manifests. It preserves complete `/user` and paginated `/user/emails` response bodies and derives commit email attribution when read. It is not Source-native Evidence, a Snapshot, or part of a Collection Run; it lives outside `runs/` and may be refreshed without recollecting historical evidence.
 _Avoid_: Identity evidence, account snapshot
 
 **Hydration**:
@@ -53,14 +53,14 @@ The start and end of the collector's observation of one source object. It is dis
 _Avoid_: Snapshot time, source update time
 
 **Context Extraction Result**:
-A disposable, in-memory result derived offline from the current archive for a mandatory, explicit half-open work time range. The shared v1 foundation groups loaded Snapshots by Source Item identity and selects exactly one Snapshot per logical object using its Observation Window completion time relative to the request end. Source-specific projections then interpret only that selected Snapshot, select source records for the requested range, and add inclusion meaning, relations, and uncertainty. If selected Context items include GitHub items, the corresponding tracked-account GitHub Identity Profile is required and is used only to attribute Git commit identities. It is not serialized independently: the same process uses it to assemble consumer input from those objects. Its work time range is distinct from Collection Range; the result is neither Source-native Evidence, a Snapshot, nor a synchronized view of the source.
+A disposable, in-memory result derived offline from the current archive for a mandatory, explicit half-open work time range. The shared v1 foundation groups loaded Snapshots by Source Item identity and selects exactly one Snapshot per logical object using its Observation Window completion time relative to the request end. Source-specific projections then interpret only that selected Snapshot, select source records for the requested range, and add inclusion meaning, relations, and uncertainty. If selected Context items include GitHub items, the corresponding stable-scope tracked-account GitHub Identity Profile is required and is used only to attribute Git commit identities. It is not serialized independently: the same process uses it to assemble consumer input from those objects. Its work time range is distinct from Collection Range; the result is neither Source-native Evidence, a Snapshot, nor a synchronized view of the source.
 _Avoid_: Projection, synchronized view
 
 **Context Output**:
 A disposable, self-contained directory assembled from one Context Extraction Result for consumer exploration. It is reproducible from selected Raw Archive evidence, the Context request, and required archive-level identity profile(s), owned by the caller, and not a durable derived store or a synchronized view of the source. Refreshing an identity profile may change tracked-account annotations without changing Source-native Evidence.
 _Avoid_: Cache, index, intermediate archive
 
-Context Output v1 does not perform sensitive-data redaction and should be treated with the same confidentiality as the Raw Archive.
+Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output v1 does not perform sensitive-data redaction and should be treated with the same confidentiality as the Raw Archive.
 
 **Summary Output**:
 A caller-owned, derived directory containing a human-readable work summary and provenance generated from Context Output by the production Summarizer. It is not Source-native Evidence and may contain sensitive work evidence; treat it with the same confidentiality as the Raw Archive. Sending its input to a third-party or AI service requires a separate derived-data scope and sanitization decision.

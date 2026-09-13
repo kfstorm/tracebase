@@ -39,7 +39,7 @@ def run(
     return CollectionRun(
         archive,
         source_kind,
-        "instance-1" if source_kind == "opencode" else "tracked-actor",
+        "instance-1" if source_kind == "opencode" else "actor-node",
         CollectionRange.parse(from_text, to_text),
         "test",
         effective_options or {},
@@ -234,27 +234,41 @@ def write_github_profile(
     archive: Archive,
     login: str = "tracked-user",
     *,
+    scope_id: str = "actor-node",
+    emails: list[str] | None = None,
+    email_pages: list[list[str]] | None = None,
     profile: dict[str, object] | None = None,
 ) -> Path:
-    profile_path = archive.root / "profiles" / "github" / f"{login}.json"
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(
+    profile_root = archive.root / "profiles" / "github" / encode_path_id(scope_id)
+    profile_root.mkdir(parents=True, exist_ok=True)
+    user = profile or {
+        "id": 123,
+        "login": login,
+        "node_id": scope_id,
+        "profile_field": "preserved",
+    }
+    pages = email_pages or [emails or ["private@example.com"]]
+    response_files = ["user.json"] + [
+        f"emails.{index:03d}.json" for index in range(1, len(pages) + 1)
+    ]
+    (profile_root / "profile.json").write_text(
         json.dumps(
-            profile
-            or {
+            {
+                "format_version": 2,
                 "provider": "github",
-                "login": login,
-                "numeric_id": 123,
-                "emails": ["private@example.com"],
-                "noreply_aliases": [
-                    f"123+{login}@users.noreply.github.com",
-                ],
+                "response_files": response_files,
+                "scope_id": scope_id,
                 "synced_at": "2026-01-01T00:00:00Z",
             }
         ),
         encoding="utf-8",
     )
-    return profile_path
+    (profile_root / "user.json").write_text(json.dumps(user), encoding="utf-8")
+    for index, page in enumerate(pages, start=1):
+        (profile_root / f"emails.{index:03d}.json").write_text(
+            json.dumps([{"email": email} for email in page]), encoding="utf-8"
+        )
+    return profile_root
 
 
 def activity_evidence() -> dict[str, object]:
@@ -324,6 +338,7 @@ def github_output(
     evidence: dict[str, object | str],
     pull_request: dict[str, object] | None = None,
     effective_options: dict[str, object] | None = None,
+    with_profile: bool = True,
 ) -> Path:
     payload = {"node_id": "PR_1", **(pull_request or {})}
     publish_github(
@@ -336,6 +351,12 @@ def github_output(
         },
         effective_options=effective_options,
     )
+    if with_profile:
+        profile_root = (
+            archive.root / "profiles" / "github" / encode_path_id("actor-node")
+        )
+        if not profile_root.exists():
+            write_github_profile(archive)
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     return output
@@ -390,7 +411,7 @@ def test_selection_chooses_first_observation_at_or_after_request_end(
             },
         )
 
-    result = extract_context(request(), load_archive(archive.root))
+    result = extract_context(request(), load_archive(archive.root), archive.root)
     item = result.items[0]
     assert item.snapshot.run["run_id"] == "first-future"
     assert item.opencode is not None
@@ -433,7 +454,7 @@ def test_selection_chooses_latest_observation_before_request_end(
             },
         )
 
-    result = extract_context(request(), load_archive(archive.root))
+    result = extract_context(request(), load_archive(archive.root), archive.root)
     assert result.items[0].snapshot.run["run_id"] == "latest"
 
 
@@ -573,7 +594,8 @@ def test_selection_contract_is_shared_by_github_and_opencode(
                 observation_window=window,
             )
 
-    result = extract_context(request(), load_archive(archive.root))
+    write_github_profile(archive)
+    result = extract_context(request(), load_archive(archive.root), archive.root)
     selected = {
         item.snapshot.manifest["source_kind"]: item.snapshot.run["run_id"]
         for item in result.items
@@ -743,6 +765,7 @@ def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None
         },
         object_kind="issue",
     )
+    write_github_profile(archive)
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     overview = text(output, "overview.md")
@@ -1068,20 +1091,7 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
 ) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
-    profile_path = archive.root / "profiles" / "github" / "tracked-user.json"
-    profile_path.parent.mkdir(parents=True)
-    profile_path.write_text(
-        json.dumps(
-            {
-                "provider": "github",
-                "login": "tracked-user",
-                "numeric_id": 123,
-                "emails": ["Kai@Example.com"],
-                "noreply_aliases": ["123+tracked-user@users.noreply.github.com"],
-                "synced_at": "2026-01-01T00:00:00Z",
-            }
-        )
-    )
+    write_github_profile(archive, emails=["Kai@Example.com", "private@example.com"])
     output = github_output(
         archive,
         tmp_path,
@@ -1098,7 +1108,10 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
                         "date": "2025-12-31T23:00:00Z",
                     },
                     "committer": {"name": "Rebaser", "date": "2026-01-01T01:00:00Z"},
-                    "message": "First in Timeline",
+                    "message": (
+                        "First in Timeline\n\n"
+                        "Co-authored-by: Name <private@example.com>"
+                    ),
                 },
                 {
                     "id": 2,
@@ -1138,9 +1151,60 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
     assert "`same000` · Kai Yang\n" in activity
     assert "mubai" in activity
     assert "kai@example.com" not in activity
+    assert "Co-authored-by: Name <private@example.com>" in activity
     assert "Authored: 2026-01-01 07:00" in activity
     assert "Commit placement uses Git committer time" in activity
     assert "Neither timestamp is GitHub push time" in activity
+
+
+def test_commit_attribution_uses_email_evidence_and_stable_numeric_identity(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(
+        archive,
+        email_pages=[["first-page@example.com"], ["known@example.com"]],
+    )
+    commits = [
+        ("page-two", "known@example.com", "Page two email"),
+        ("modern", "123+renamed-user@users.noreply.github.com", "Modern"),
+        ("wrong", "999+tracked-user@users.noreply.github.com", "Wrong ID"),
+        ("legacy", "tracked-user@users.noreply.github.com", "Legacy"),
+        ("other", "other-user@users.noreply.github.com", "Other login"),
+        ("same-name", "unrelated@example.com", "Same Name"),
+    ]
+    timeline = [
+        {
+            "id": index,
+            "node_id": node_id,
+            "event": "committed",
+            "sha": f"{index:07d}1234567",
+            "author": {
+                "name": "Same Name",
+                "email": email,
+                "date": "2026-01-01T01:00:00Z",
+            },
+            "committer": {"name": "Same Name", "date": "2026-01-01T01:00:00Z"},
+            "message": label,
+        }
+        for index, (node_id, email, label) in enumerate(commits, start=1)
+    ]
+    output = github_output(
+        archive,
+        tmp_path,
+        {"timeline.001.json": timeline},
+        effective_options={"actor_login": "tracked-user"},
+    )
+    activity = text(output, "activity.md")
+    assert activity.count("Same Name (tracked account)") == 3
+    assert "Wrong ID" in activity and "Modern" in activity
+    assert "Modern" in activity
+    assert "Page two email" in activity
+    assert "Wrong ID" in activity
+    assert "`0000002`" in activity
+    assert "`0000004`" in activity
+    assert "`0000005`" in activity
 
 
 def test_github_context_with_profile_generates_normally(tmp_path: Path) -> None:
@@ -1162,7 +1226,7 @@ def test_github_context_with_profile_generates_normally(tmp_path: Path) -> None:
 def test_github_context_fails_when_profile_is_missing(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
-    profile_path = archive.root / "profiles" / "github" / "tracked-user.json"
+    profile_path = archive.root / "profiles" / "github" / encode_path_id("actor-node")
 
     with pytest.raises(ContextError) as error:
         github_output(
@@ -1170,10 +1234,11 @@ def test_github_context_fails_when_profile_is_missing(tmp_path: Path) -> None:
             tmp_path,
             {"comments.001.json": []},
             effective_options={"actor_login": "tracked-user"},
+            with_profile=False,
         )
 
     message = str(error.value)
-    assert "@tracked-user was not found" in message
+    assert "source scope actor-node was not found" in message
     assert str(profile_path) in message
     assert "tracebase identity github sync --archive" in message
     assert "private@example.com" not in message
@@ -1183,8 +1248,10 @@ def test_github_context_fails_when_profile_json_is_invalid(tmp_path: Path) -> No
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     profile_path = write_github_profile(archive)
-    profile_path.write_text('{"emails":["private@example.com"', encoding="utf-8")
-    with pytest.raises(ContextError, match="contains invalid JSON") as error:
+    (profile_path / "profile.json").write_text(
+        '{"response_files":["user.json"]', encoding="utf-8"
+    )
+    with pytest.raises(ContextError, match="is invalid") as error:
         github_output(
             archive,
             tmp_path,
@@ -1197,22 +1264,12 @@ def test_github_context_fails_when_profile_json_is_invalid(tmp_path: Path) -> No
 def test_github_context_fails_when_profile_schema_is_invalid(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
-    profile_path = write_github_profile(archive)
-    profile_path.write_text(
-        json.dumps(
-            {
-                "provider": "github",
-                "login": "tracked-user",
-                "numeric_id": "not-an-id",
-                "emails": ["private@example.com"],
-                "noreply_aliases": [],
-                "synced_at": "2026-01-01T00:00:00Z",
-            }
-        ),
-        encoding="utf-8",
+    write_github_profile(
+        archive,
+        profile={"id": "not-an-id", "login": "tracked-user", "node_id": "actor-node"},
     )
 
-    with pytest.raises(ContextError, match="schema is invalid") as error:
+    with pytest.raises(ContextError, match="is invalid") as error:
         github_output(
             archive,
             tmp_path,
@@ -1222,31 +1279,17 @@ def test_github_context_fails_when_profile_schema_is_invalid(tmp_path: Path) -> 
     assert "private@example.com" not in str(error.value)
 
 
-def test_github_context_fails_when_profile_login_does_not_match(tmp_path: Path) -> None:
+def test_github_context_uses_stable_scope_when_login_changes(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
-    profile_path = write_github_profile(
+    write_github_profile(archive, login="current-user")
+    output = github_output(
         archive,
-        profile={
-            "provider": "github",
-            "login": "another-user",
-            "numeric_id": 123,
-            "emails": ["private@example.com"],
-            "noreply_aliases": [],
-            "synced_at": "2026-01-01T00:00:00Z",
-        },
+        tmp_path,
+        {"comments.001.json": []},
+        effective_options={"actor_login": "tracked-user"},
     )
-
-    with pytest.raises(ContextError, match="schema is invalid") as error:
-        github_output(
-            archive,
-            tmp_path,
-            {"comments.001.json": []},
-            effective_options={"actor_login": "tracked-user"},
-        )
-
-    assert str(profile_path) in str(error.value)
-    assert "private@example.com" not in str(error.value)
+    assert "- GitHub: @tracked-user" in text(output, "overview.md")
 
 
 def test_github_context_without_selected_items_does_not_require_profile(
@@ -2050,6 +2093,7 @@ def test_github_does_not_merge_later_body_comment_or_diff(
         },
     )
 
+    write_github_profile(archive)
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     overview = text(output, "overview.md")

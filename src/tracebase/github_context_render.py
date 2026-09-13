@@ -7,7 +7,7 @@ from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
 from .context_render import format_timestamp, parse_timestamp
-from .github_identity import normalize_email
+from .github_identity import GitHubIdentity
 
 GITHUB_COMMIT_LIMIT = 250
 
@@ -80,9 +80,7 @@ def _actor_label(value: dict[str, Any], tracked_login: str | None) -> str:
     return f"@{actor} (tracked account)" if actor == tracked_login else f"@{actor}"
 
 
-def _commit_author(
-    value: dict[str, Any], tracked_commit_identities: frozenset[str]
-) -> str:
+def _commit_author(value: dict[str, Any], identity: GitHubIdentity | None) -> str:
     author = value.get("author")
     committer = value.get("committer")
     author_name = author.get("name") if isinstance(author, dict) else None
@@ -94,8 +92,7 @@ def _commit_author(
     else:
         name = "unknown"
     author_email = author.get("email") if isinstance(author, dict) else None
-    normalized_email = normalize_email(author_email)
-    if normalized_email in tracked_commit_identities:
+    if identity is not None and identity.matches_commit_email(author_email):
         return f"{name} (tracked account)"
     return name
 
@@ -517,7 +514,7 @@ def _commit_section(
     bucket: str,
     timezone: tzinfo,
     warn_without_commits: bool,
-    tracked_commit_identities: frozenset[str],
+    identity: GitHubIdentity | None,
 ) -> list[str]:
     commits: list[tuple[datetime, str, str, str, datetime | None, int]] = []
     fallback_order = 0
@@ -545,7 +542,7 @@ def _commit_section(
                 timestamp,
                 sha,
                 message if isinstance(message, str) else "",
-                _commit_author(value, tracked_commit_identities),
+                _commit_author(value, identity),
                 author_date
                 if author_date is not None
                 and committer_date is not None
@@ -605,7 +602,7 @@ def _activity(
             bucket,
             timezone,
             bucket == "activity",
-            item.github.tracked_commit_identities,
+            item.github.tracked_identity,
         )
     )
     if lines == [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]:
