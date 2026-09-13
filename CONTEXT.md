@@ -42,8 +42,9 @@ user's work. `personal` means materially meaningful work recorded by the source
 belongs to the user, including delegated agent or subagent work. `actor_scoped`
 means only explicitly tracked-account actions or authorship belong to the user;
 other participant activity remains context-only evidence. The current mapping
-is OpenCode -> `personal` and GitHub -> `actor_scoped`. Every supported source
-kind must be explicitly mapped; unknown source kinds do not inherit a default.
+is OpenCode -> `personal`, ChatGPT -> `personal`, and GitHub -> `actor_scoped`.
+Every supported source kind must be explicitly mapped; unknown source kinds do
+not inherit a default.
 
 **User-work Projection**:
 The attribution-filtered evidence that may become a Summary workstream. It is
