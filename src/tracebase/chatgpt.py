@@ -41,6 +41,7 @@ _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500
 _AUTH_WAIT_SECONDS = 600
 _AUTH_POLL_SECONDS = 2
+_AUTH_PROCESS_CLEANUP_SECONDS = 5
 _DISCOVERY_PARTITIONS = (
     (False, False),
     (False, True),
@@ -1075,6 +1076,12 @@ def authenticate() -> None:
         except KeyboardInterrupt:
             with suppress(Exception):
                 process.terminate()
+            try:
+                process.wait(timeout=_AUTH_PROCESS_CLEANUP_SECONDS)
+            except subprocess.TimeoutExpired:
+                with suppress(Exception):
+                    process.kill()
+                process.wait()
             raise ChatGPTAuthenticationError(
                 "ChatGPT authentication cancelled"
             ) from None

@@ -1,5 +1,6 @@
 import json
 import stat
+import subprocess
 from io import StringIO
 from pathlib import Path
 
@@ -632,6 +633,50 @@ def test_authenticate_reports_browser_start_failure(
 
     with pytest.raises(ChatGPTError, match="could not be started"):
         authenticate()
+
+
+def test_authenticate_waits_for_child_cleanup_before_releasing_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = tmp_path / "profile"
+    calls: list[object] = []
+
+    class InterruptedProcess:
+        wait_calls = 0
+
+        def wait(self, **kwargs: object) -> int:
+            calls.append(("wait", kwargs))
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise KeyboardInterrupt
+            if self.wait_calls == 2:
+                raise subprocess.TimeoutExpired("chromium", kwargs["timeout"])
+            return 0
+
+        def terminate(self) -> None:
+            calls.append("terminate")
+
+        def kill(self) -> None:
+            calls.append("kill")
+
+    monkeypatch.setattr("tracebase.chatgpt.profile_path", lambda: profile)
+    monkeypatch.setattr("tracebase.chatgpt._system_chromium_path", lambda: "chromium")
+    monkeypatch.setattr(
+        "tracebase.chatgpt.subprocess.Popen", lambda _args: InterruptedProcess()
+    )
+
+    with pytest.raises(ChatGPTAuthenticationError, match="cancelled"):
+        authenticate()
+
+    assert calls == [
+        ("wait", {}),
+        "terminate",
+        ("wait", {"timeout": 5}),
+        "kill",
+        ("wait", {}),
+    ]
+    with _ProfileLock(profile):
+        pass
 
 
 def test_auth_probe_identity_fallbacks() -> None:
