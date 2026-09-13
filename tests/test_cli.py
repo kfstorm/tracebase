@@ -308,6 +308,9 @@ def test_github_identity_sync_persists_complete_paginated_profile(
     assert profile["provider"] == "github"
     assert profile["format_version"] == 2
     assert profile["scope_id"] == "actor-node"
+    assert "login" not in profile
+    assert "numeric_id" not in profile
+    assert "unknown_field" not in profile
     assert profile["response_files"] == [
         "user.json",
         "emails.001.json",
@@ -335,6 +338,8 @@ def test_github_identity_sync_persists_complete_paginated_profile(
     ]
     assert S_IMODE((profile_root / "profile.json").stat().st_mode) == 0o600
     assert S_IMODE((profile_root / "user.json").stat().st_mode) == 0o600
+    assert S_IMODE((profile_root / "emails.001.json").stat().st_mode) == 0o600
+    assert S_IMODE((profile_root / "emails.002.json").stat().st_mode) == 0o600
     assert S_IMODE(profile_root.stat().st_mode) == 0o700
     assert "private@example.com" not in capsys.readouterr().out
 
