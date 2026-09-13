@@ -29,6 +29,7 @@ _MAX_DISCOVERY_PASSES = 3
 _REQUEST_RETRIES = 2
 _RETRY_DELAYS = (0.5, 1.0)
 _REQUEST_TIMEOUT_MS = 60_000
+_BROWSER_MODES = ("headless", "headed")
 _SUCCESS_STATUS = 200
 _SUCCESS_STATUS_UPPER = 300
 _AUTH_FAILURE_STATUS = 401
@@ -716,19 +717,17 @@ def _hydrate(run: CollectionRun, api: _ChatGPTAPI, candidate: _Candidate) -> Non
         run.write_evidence(snapshot_root, item.path, item.response.body)
 
 
-def resolve_context() -> ChatGPTContext:
+def resolve_context(browser_mode: str = "headless") -> ChatGPTContext:
     """Resolve and validate the authenticated account for a Collection Run."""
 
-    try:
-        return _resolve_context_with_browser(headless=True)
-    except ChatGPTBrowserVerificationError:
-        if not _display_fallback_available():
-            raise
-        return _resolve_context_with_browser(headless=False)
+    _validate_browser_mode(browser_mode)
+    return _resolve_context_with_browser(browser_mode)
 
 
-def _resolve_context_with_browser(*, headless: bool) -> ChatGPTContext:
-    with _Browser(profile_path(), headless=headless, stealth=True) as browser:
+def _resolve_context_with_browser(browser_mode: str) -> ChatGPTContext:
+    with _Browser(
+        profile_path(), headless=browser_mode == "headless", stealth=True
+    ) as browser:
         if browser.page is None:
             raise ChatGPTError("ChatGPT browser page is unavailable")
         session = _ChatGPTAPI(browser.page).session()
@@ -737,9 +736,8 @@ def _resolve_context_with_browser(*, headless: bool) -> ChatGPTContext:
         scope_id=session.account_id,
         collector_version="0.1.0",
         effective_options={
-            "browser_execution": (
-                "stealth-headless" if headless else "stealth-headed-display-fallback"
-            ),
+            "browser_mode": browser_mode,
+            "browser_execution": f"stealth-{browser_mode}",
             "discovery_limit": _DISCOVERY_LIMIT,
             "message_page_size": _NUM_TURNS,
         },
@@ -840,29 +838,30 @@ def _collect_api(
     )
 
 
-def collect(run: CollectionRun, reporter: ProgressReporter) -> CollectionResult:
+def collect(
+    run: CollectionRun, reporter: ProgressReporter, browser_mode: str = "headless"
+) -> CollectionResult:
     """Discover and fully hydrate ordinary conversations in the range."""
 
-    try:
-        return _collect_with_browser(run, reporter, headless=True)
-    except ChatGPTBrowserVerificationError:
-        if not _display_fallback_available():
-            raise
-        return _collect_with_browser(run, reporter, headless=False)
+    _validate_browser_mode(browser_mode)
+    return _collect_with_browser(run, reporter, browser_mode)
 
 
 def _collect_with_browser(
-    run: CollectionRun, reporter: ProgressReporter, *, headless: bool
+    run: CollectionRun, reporter: ProgressReporter, browser_mode: str
 ) -> CollectionResult:
-    with _Browser(profile_path(), headless=headless, stealth=True) as browser:
+    with _Browser(
+        profile_path(), headless=browser_mode == "headless", stealth=True
+    ) as browser:
         api = _authenticated_api(browser)
         return _collect_api(run, reporter, api)
 
 
-def _display_fallback_available() -> bool:
-    return platform.system() == "Linux" and bool(
-        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    )
+def _validate_browser_mode(browser_mode: str) -> None:
+    if browser_mode not in _BROWSER_MODES:
+        raise ChatGPTError(
+            f"ChatGPT browser mode must be one of: {', '.join(_BROWSER_MODES)}"
+        )
 
 
 def _session_is_valid(api: _ChatGPTAPI) -> bool:

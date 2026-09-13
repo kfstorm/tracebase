@@ -90,6 +90,12 @@ def _parser() -> argparse.ArgumentParser:
         source_parser.add_argument("--archive", required=True)
         source_parser.add_argument("--from", dest="from_text", required=True)
         source_parser.add_argument("--to", dest="to_text", required=True)
+        if source == "chatgpt":
+            source_parser.add_argument(
+                "--browser-mode",
+                choices=("headless", "headed"),
+                default="headless",
+            )
         if source == "opencode":
             source_parser.add_argument("--instance-id", required=True)
     context = commands.add_parser("context", add_help=True, allow_abbrev=False)
@@ -201,10 +207,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         label="Preparing ChatGPT collection",
                     )
                 )
-                context = resolve_chatgpt_context()
+                context = resolve_chatgpt_context(arguments.browser_mode)
                 run = _new_run(archive, collection_range, run_id, context)
                 progress.emit(ProgressEvent(kind="finish", task_id="prepare"))
-                result = collect_chatgpt(run, progress)
+                result = collect_chatgpt(run, progress, arguments.browser_mode)
                 published = _publish(run, result, progress)
             except ArchiveError as error:
                 print(str(error), file=sys.stderr)

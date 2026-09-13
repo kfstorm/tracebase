@@ -8,6 +8,8 @@ import pytest
 from tracebase.archive import Archive, ArchiveError, CollectionRange, CollectionRun
 from tracebase.chatgpt import (
     ChatGPTAuthenticationError,
+    ChatGPTBrowserVerificationError,
+    ChatGPTContext,
     ChatGPTError,
     _Browser,
     _Candidate,
@@ -18,9 +20,12 @@ from tracebase.chatgpt import (
     _hydrate,
     _ProfileLock,
     _Response,
+    collect,
     profile_path,
+    resolve_context,
 )
 from tracebase.cli import _parser, main
+from tracebase.collector import CollectionResult
 from tracebase.progress import LineProgressSink, ProgressEvent, ProgressReporter
 
 RANGE = CollectionRange.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")
@@ -472,6 +477,86 @@ def test_401_is_a_clean_auth_failure() -> None:
         api.session()
 
 
+def test_explicit_browser_mode_is_propagated_to_context_and_collection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    context = ChatGPTContext("chatgpt", "account-1", "test", {})
+    context_modes: list[str] = []
+    collection_modes: list[str] = []
+    result = CollectionResult(coverage={})
+
+    monkeypatch.setattr(
+        "tracebase.chatgpt._resolve_context_with_browser",
+        lambda browser_mode: context_modes.append(browser_mode) or context,
+    )
+    monkeypatch.setattr(
+        "tracebase.chatgpt._collect_with_browser",
+        lambda run, reporter, browser_mode: (
+            collection_modes.append(browser_mode) or result
+        ),
+    )
+
+    assert resolve_context("headed") == context
+    run = CollectionRun(
+        Archive(tmp_path / "archive"),
+        "chatgpt",
+        "account-1",
+        RANGE,
+        collector_version="test",
+        effective_options={},
+    )
+    assert collect(run, reporter(), "headed") is result
+    assert context_modes == ["headed"]
+    assert collection_modes == ["headed"]
+
+
+def test_context_records_explicit_browser_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modes: list[tuple[bool, bool]] = []
+
+    class FakeBrowser:
+        def __init__(self, profile: Path, *, headless: bool, stealth: bool) -> None:
+            modes.append((headless, stealth))
+            self.page = Page(
+                200,
+                json.dumps(
+                    {"accessToken": "test-token", "account": {"id": "account-1"}}
+                ),
+            )
+
+        def __enter__(self) -> FakeBrowser:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+    monkeypatch.setattr("tracebase.chatgpt._Browser", FakeBrowser)
+
+    context = resolve_context("headed")
+
+    assert modes == [(False, True)]
+    assert context.effective_options["browser_mode"] == "headed"
+    assert context.effective_options["browser_execution"] == "stealth-headed"
+
+
+def test_browser_verification_does_not_fallback_from_headless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fail(browser_mode: str) -> ChatGPTContext:
+        calls.append(browser_mode)
+        raise ChatGPTBrowserVerificationError("verification required")
+
+    monkeypatch.setattr("tracebase.chatgpt._resolve_context_with_browser", fail)
+
+    with pytest.raises(ChatGPTBrowserVerificationError, match="verification"):
+        resolve_context("headless")
+
+    assert calls == ["headless"]
+
+
 def test_profile_path_uses_platform_state_directories(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -543,6 +628,61 @@ def test_cli_registers_chatgpt_collection_and_auth_commands(
     auth_args = _parser().parse_args(["auth", "chatgpt"])
 
     assert collect_args.source == "chatgpt"
+    assert collect_args.browser_mode == "headless"
     assert auth_args.command == "auth"
+    headed_args = _parser().parse_args(
+        [
+            "collect",
+            "chatgpt",
+            "--archive",
+            "/tmp/archive",
+            "--browser-mode",
+            "headed",
+            "--from",
+            "2026-01-01T00:00:00Z",
+            "--to",
+            "2026-01-01T01:00:00Z",
+        ]
+    )
+    assert headed_args.browser_mode == "headed"
     monkeypatch.setattr("tracebase.cli.authenticate_chatgpt", lambda: None)
     assert main(["auth", "chatgpt"]) == 0
+
+
+def test_cli_passes_browser_mode_to_chatgpt_collector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    context = ChatGPTContext("chatgpt", "account-1", "test", {})
+    context_modes: list[str] = []
+    collection_modes: list[str] = []
+
+    monkeypatch.setattr(
+        "tracebase.cli.resolve_chatgpt_context",
+        lambda browser_mode: context_modes.append(browser_mode) or context,
+    )
+    monkeypatch.setattr(
+        "tracebase.cli.collect_chatgpt",
+        lambda run, progress, browser_mode: (
+            collection_modes.append(browser_mode) or CollectionResult(coverage={})
+        ),
+    )
+
+    assert (
+        main(
+            [
+                "collect",
+                "chatgpt",
+                "--archive",
+                str(tmp_path / "archive"),
+                "--browser-mode",
+                "headed",
+                "--from",
+                "2026-01-01T00:00:00Z",
+                "--to",
+                "2026-01-01T01:00:00Z",
+            ]
+        )
+        == 0
+    )
+    assert context_modes == ["headed"]
+    assert collection_modes == ["headed"]
