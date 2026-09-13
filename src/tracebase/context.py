@@ -16,6 +16,7 @@ from .archive import (
     load_published_archive,
 )
 from .github_context import GitHubProjection, project_github
+from .github_identity import GitHubIdentity, require_github_identity
 from .opencode_context import (
     OpenCodeProjection,
     project_opencode,
@@ -240,8 +241,54 @@ def _context_projection_supported(snapshot: PublishedSnapshot) -> bool:
     return supported_kinds is not None and object_kind in supported_kinds
 
 
+def _require_github_profiles(
+    items: list[ContextItem],
+    runs: tuple[PublishedRun, ...],
+    archive_root: str | Path | None,
+) -> dict[str, GitHubIdentity]:
+    scope_ids = sorted(
+        {
+            item.snapshot.run["source"]["scope_id"]
+            for item in items
+            if item.github is not None
+        }
+    )
+    if not scope_ids:
+        return {}
+    if archive_root is None:
+        raise ContextError(
+            "GitHub identity profiles require an archive path during Context extraction"
+        )
+    historical_logins: dict[str, set[str]] = {scope_id: set() for scope_id in scope_ids}
+    for run in runs:
+        source = run.manifest.get("source")
+        if not isinstance(source, dict) or source.get("kind") != "github":
+            continue
+        scope_id = source.get("scope_id")
+        if not isinstance(scope_id, str) or scope_id not in historical_logins:
+            continue
+        login = (
+            run.manifest.get("collector", {})
+            .get("effective_options", {})
+            .get("actor_login")
+        )
+        if isinstance(login, str) and login:
+            historical_logins[scope_id].add(login)
+    identities: dict[str, GitHubIdentity] = {}
+    for scope_id in scope_ids:
+        try:
+            identities[scope_id] = require_github_identity(
+                archive_root, scope_id, historical_logins[scope_id]
+            )
+        except ArchiveError as error:
+            raise ContextError(str(error)) from None
+    return identities
+
+
 def extract_context(
-    request: ContextRequest, runs: tuple[PublishedRun, ...]
+    request: ContextRequest,
+    runs: tuple[PublishedRun, ...],
+    archive_root: str | Path | None = None,
 ) -> ContextExtractionResult:
     """Group archive objects and run source-specific extraction."""
     grouped: dict[tuple[str, str, str, str], list[PublishedSnapshot]] = {}
@@ -256,7 +303,11 @@ def extract_context(
         selected_snapshot = select_observation(tuple(snapshots), request.end)
         try:
             github = (
-                project_github(selected_snapshot, request.start, request.end)
+                project_github(
+                    selected_snapshot,
+                    request.start,
+                    request.end,
+                )
                 if key[0] == "github"
                 else None
             )
@@ -279,6 +330,22 @@ def extract_context(
             or (item.opencode.selected and item.opencode.parent_id is None)
         )
     ]
+    github_items = [item for item in all_items if item.github is not None]
+    github_identities = _require_github_profiles(github_items, runs, archive_root)
+    for item_index, item in enumerate(all_items):
+        if item.github is None:
+            continue
+        scope_id = item.snapshot.run["source"]["scope_id"]
+        identity = github_identities.get(scope_id)
+        if identity is None:
+            continue
+        all_items[item_index] = replace(
+            item,
+            github=replace(
+                item.github,
+                tracked_identity=identity,
+            ),
+        )
     github_items = [item for item in all_items if item.github is not None]
     for item in github_items:
         assert item.github is not None
@@ -314,4 +381,6 @@ def generate_context(
     # Import lazily to keep extraction independent from renderer modules.
     from .context_render import render_context  # noqa: PLC0415
 
-    return render_context(extract_context(request, load_archive(archive)), output)
+    return render_context(
+        extract_context(request, load_archive(archive), str(Path(archive))), output
+    )

@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from .archive import ArchiveError, PublishedSnapshot
+from .github_identity import GitHubIdentity
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +22,7 @@ class GitHubProjection:
     number: int
     title: str | None
     tracked_login: str | None
+    tracked_identity: GitHubIdentity | None = None
 
 
 def _json(snapshot: PublishedSnapshot, path: str) -> dict[str, Any] | list[Any]:
@@ -93,6 +95,7 @@ def _record(
     value: dict[str, Any],
     evidence_path: str,
     snapshot: PublishedSnapshot,
+    source_order: int | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "kind": kind,
@@ -108,6 +111,8 @@ def _record(
     actor = _actor(value)
     if actor is not None:
         result["actor"] = actor
+    if source_order is not None:
+        result["source_order"] = source_order
     return result
 
 
@@ -221,7 +226,9 @@ def _record_sort_key(
 
 
 def project_github(  # noqa: PLR0915
-    selected_snapshot: PublishedSnapshot, start: datetime, end: datetime
+    selected_snapshot: PublishedSnapshot,
+    start: datetime,
+    end: datetime,
 ) -> GitHubProjection:
     """Project archived GitHub payloads without inferring causal history."""
     records: dict[tuple[str, str], dict[str, Any]] = {}
@@ -242,6 +249,7 @@ def project_github(  # noqa: PLR0915
     if not isinstance(tracked_login, str) or not tracked_login:
         tracked_login = None
     paged_thread_comments: list[tuple[str, list[dict[str, Any]]]] = []
+    timeline_order = 0
 
     inline_nodes_by_rest_id: dict[int, str] = {}
     inline_replies: list[tuple[int, str]] = []
@@ -311,8 +319,16 @@ def project_github(  # noqa: PLR0915
                     kind, identifier = "review", value["id"]
                 _add_record(
                     records,
-                    _record(kind, str(identifier), value, path, snapshot),
+                    _record(
+                        kind,
+                        str(identifier),
+                        value,
+                        path,
+                        snapshot,
+                        timeline_order,
+                    ),
                 )
+                timeline_order += 1
     if object_kind == "pull-request":
         pull = _json(snapshot, "pull-request.json")
         if not isinstance(pull, dict) or pull.get("node_id") != source_id:

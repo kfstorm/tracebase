@@ -7,6 +7,7 @@ Tracebase preserves private work evidence in a replayable local archive, generat
 - [Features](#features)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
+- [Sync GitHub Identity](#sync-github-identity)
 - [Development](#development)
 - [License](#license)
 
@@ -47,6 +48,31 @@ uv run tracebase collect github \
   --from 2026-09-01T00:00:00+00:00 \
   --to 2026-09-02T00:00:00+00:00
 ```
+
+### Sync GitHub Identity
+
+Identity sync is not required for GitHub collection. It is required before generating Context Output that includes GitHub items, so historical Git commits can be marked as `(tracked account)` when their author email matches the authenticated GitHub account. Regular `collect github` still calls `/user` only and does not automatically call `/user/emails`. Identity sync preserves the complete `/user` response and every paginated `/user/emails` response; attribution fields are derived later while reading the profile.
+
+Identity sync requires a GitHub token with the `user:email` scope. For a GitHub CLI OAuth credential, refresh the scope and then sync using the explicit archive path:
+
+```bash
+gh auth refresh -h github.com -s user:email
+
+uv run tracebase identity github sync \
+  --archive "/path/to/archive"
+```
+
+The profile is stored under the stable GitHub source identity returned by `/user.node_id`:
+
+```text
+<archive>/profiles/github/<encoded-scope-id>/
+├── profile.json
+├── user.json
+├── emails.001.json
+└── ...
+```
+
+The profile is archive-level mutable metadata keyed by the same stable source scope stored in GitHub Collection Run manifests. It is not part of `runs/`, a Snapshot, or Source-native Evidence. It contains associated GitHub account data, so protect it with the same care as the Raw Archive. A profile can be refreshed without recollecting historical evidence. Skipping identity sync does not affect collection or Context generation when no GitHub items are included. If Context includes GitHub items, the matching stable-ID profile must exist and be valid; otherwise generation fails with the sync command needed to create it. Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output does not perform redaction.
 
 ### Collect OpenCode Sessions
 
@@ -101,6 +127,8 @@ Known ChatGPT source limitations include mutable offset pagination, provider res
 
 After collecting evidence, select a work time range to explore. Context extraction chooses one observation per Source Item: the earliest observation completed at or after the request end, or the latest available observation if all observations are earlier.
 
+If the selected Context includes GitHub items, the matching GitHub identity profile must already exist and be valid. Run the identity sync first when needed.
+
 ```bash
 uv run tracebase context \
   --archive "$HOME/.tracebase/archive" \
@@ -111,7 +139,7 @@ uv run tracebase context \
 
 Start with `index.md` in the output directory. This range selects work records, not collector observation times. Context Output is disposable and does **not** redact sensitive data: treat it with the same confidentiality as the Raw Archive. Third-party or AI-service use requires a separate scope and sanitization decision.
 
-For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, or `uv run tracebase context --help`.
+For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
 
 ### Generate a Work Summary
 
