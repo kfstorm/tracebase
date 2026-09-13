@@ -7,7 +7,7 @@ Tracebase preserves private work evidence in a replayable local archive, generat
 - [Features](#features)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
-- [Sync GitHub Identity](#sync-github-identity-optional)
+- [Sync GitHub Identity](#sync-github-identity)
 - [Development](#development)
 - [License](#license)
 
@@ -48,9 +48,9 @@ uv run tracebase collect github \
   --to 2026-09-02T00:00:00+00:00
 ```
 
-### Sync GitHub Identity (Optional)
+### Sync GitHub Identity
 
-Identity sync is optional. It lets Context Output mark historical Git commits as `(tracked account)` when their author email matches the authenticated GitHub account. Regular `collect github` still calls `/user` only and does not automatically call `/user/emails`.
+Identity sync is not required for GitHub collection. It is required before generating Context Output that includes GitHub items, so historical Git commits can be marked as `(tracked account)` when their author email matches the authenticated GitHub account. Regular `collect github` still calls `/user` only and does not automatically call `/user/emails`.
 
 Identity sync requires a GitHub token with the `user:email` scope. For a GitHub CLI OAuth credential, refresh the scope and then sync using the explicit archive path:
 
@@ -67,7 +67,7 @@ The profile is stored at:
 <archive>/profiles/github/<login>.json
 ```
 
-The profile is archive-level mutable metadata. It is not part of `runs/`, a snapshot, or evidence. It contains associated GitHub email addresses, so protect it with the same care as the Raw Archive. Skipping identity sync does not affect collection or Context generation when no GitHub items are included. If Context includes GitHub items, the matching profile must exist and be valid; otherwise generation fails with the sync command needed to create it. Context Output never renders these private email addresses.
+The profile is archive-level mutable metadata. It is not part of `runs/`, a Snapshot, or Source-native Evidence. It contains associated GitHub email addresses, so protect it with the same care as the Raw Archive. Skipping identity sync does not affect collection or Context generation when no GitHub items are included. If Context includes GitHub items, the matching profile must exist and be valid; otherwise generation fails with the sync command needed to create it. Context Output never renders these private email addresses.
 
 ### Collect OpenCode Sessions
 
@@ -92,6 +92,8 @@ Successful collection prints one summary line to stdout; progress goes to stderr
 
 After collecting evidence, select a work time range to explore. Context extraction chooses one observation per Source Item: the earliest observation completed at or after the request end, or the latest available observation if all observations are earlier.
 
+If the selected Context includes GitHub items, the matching GitHub identity profile must already exist and be valid. Run the identity sync first when needed.
+
 ```bash
 uv run tracebase context \
   --archive "$HOME/.tracebase/archive" \
@@ -102,7 +104,7 @@ uv run tracebase context \
 
 Start with `index.md` in the output directory. This range selects work records, not collector observation times. Context Output is disposable and does **not** redact sensitive data: treat it with the same confidentiality as the Raw Archive. Third-party or AI-service use requires a separate scope and sanitization decision.
 
-For all options, run `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, or `uv run tracebase context --help`.
+For all options, run `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
 
 ### Generate a Work Summary
 

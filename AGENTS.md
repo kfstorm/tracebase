@@ -6,7 +6,7 @@ Tracebase collects private work evidence, derives offline Context Output, and pr
 
 - Before exploring implementation, read [CONTEXT.md](CONTEXT.md) and relevant ADRs under `docs/adr/` if present. Follow [domain guidance](docs/agents/domain.md) when changing terminology or architectural decisions.
 - For issues and specs, follow [issue tracker conventions](docs/agents/issue-tracker.md); for triage, read [triage labels](docs/agents/triage-labels.md).
-- When changing collection orchestration, diagnostics, or publication, read the [Collection CLI Contract](docs/collection-cli-contract.md). It supersedes the historical failure-output clause in issue #14.
+- When changing collection orchestration, diagnostics, or publication, read the [Collection CLI Contract](docs/collection-cli-contract.md). It supersedes the historical failure-output clause.
 
 ## Development Checks
 
@@ -34,6 +34,7 @@ Preserve evidence needed to reconstruct professional work and its necessary coll
 - Before adding an acquisition step with material complexity or operational cost, identify its unique work evidence and expected long-term-memory value. Include it only when that value justifies the cost.
 - Require every Collection Run to declare ISO 8601 `--from` and `--to` timestamps with explicit offsets; retain successful empty runs and reject known range overlap for the same logical source.
 - Keep the v0 archive in user-controlled private storage and preserve source-native content unchanged. Archive privacy and synchronization are caller preconditions; any third-party or AI-service use requires a separate derived-data scope and sanitization decision.
+- Source identity profiles live under `profiles/<source>/` as archive-level mutable metadata outside `runs/`, Snapshots, and Source-native Evidence. GitHub collection must not require or automatically refresh profiles; Context generation that selects GitHub items requires the matching profile.
 - For OpenCode, use `--instance-id` to scope overlap detection and prevent duplicate collection. Keep it unique across machines and stable on the same machine; a machine name is valid if it meets both conditions.
 - Derive Context Output offline without mutating the Raw Archive. Context Output is disposable and not redacted; apply the same confidentiality as the archive.
-- Use synthetic evidence in tests and keep real archives, session exports, Context Output, Summary Output, and debug output outside the repository. Progress and exceptions must not expose credentials or source-native sensitive content. Debug output must exclude credentials and secrets, but may contain sensitive work evidence; treat it with the same confidentiality as the Raw Archive.
+- Use synthetic evidence in tests and keep real archives, session exports, Context Output, Summary Output, and debug output outside the repository. Progress, diagnostics, and Context Output must not expose private identity emails. Debug output must exclude credentials and secrets, but may contain sensitive work evidence; treat it with the same confidentiality as the Raw Archive.

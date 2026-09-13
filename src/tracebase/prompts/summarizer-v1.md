@@ -248,6 +248,19 @@ Evidence rules:
   thread resolved, or a diff looks like a fix.
 - Distinguish requested-range work from earlier background, later progression,
   and merely observed state.
+- For GitHub evidence, treat only actors or Git commit authors explicitly marked
+  `(tracked account)` as the user's actions.
+- Collaborator comments, reviews, commits, lifecycle events, and other activity
+  may be necessary context, but do not attribute them to the user unless they
+  are explicitly marked.
+- Do not infer ownership merely because a GitHub item is included in the user's
+  Context Output.
+- Commit placement in Activity is not proof that the code was authored during
+  the requested interval.
+- Commit placement uses Git committer time when available. When `Authored:` is
+  shown, distinguish earlier authorship from later rebasing, cherry-picking, or
+  recommitting.
+- Do not infer GitHub push time from Git author or committer timestamps.
 - Preserve uncertainty instead of inventing plausible explanations.
 - Preserve materially important negation, version boundaries, ranges,
   before/after directionality, and causal direction.
