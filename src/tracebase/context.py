@@ -15,6 +15,7 @@ from .archive import (
     PublishedSnapshot,
     load_published_archive,
 )
+from .attribution import AttributionError, AttributionMode, source_attribution_mode
 from .github_context import GitHubProjection, project_github
 from .github_identity import GitHubIdentity, require_github_identity
 from .opencode_context import (
@@ -78,6 +79,7 @@ class ContextRequest:
 class ContextItem:
     snapshot: PublishedSnapshot
     path: str
+    attribution_mode: AttributionMode
     github: GitHubProjection | None = None
     opencode: OpenCodeProjection | None = None
 
@@ -227,6 +229,10 @@ def _session_first_in_range(projection: OpenCodeProjection) -> datetime:
 
 def _validate_context_source(snapshot: PublishedSnapshot) -> None:
     source_kind = snapshot.manifest["source_kind"]
+    try:
+        source_attribution_mode(source_kind)
+    except AttributionError as error:
+        raise ContextError(str(error)) from None
     supported_kinds = _SUPPORTED_CONTEXT_OBJECT_KINDS.get(source_kind)
     if (
         supported_kinds is None
@@ -310,7 +316,13 @@ def extract_context(
             )
         except ArchiveError as error:
             raise ContextError(str(error)) from None
-        all_items.append(ContextItem(selected_snapshot, "", github, opencode))
+        try:
+            attribution_mode = source_attribution_mode(key[0])
+        except AttributionError as error:
+            raise ContextError(str(error)) from None
+        all_items.append(
+            ContextItem(selected_snapshot, "", attribution_mode, github, opencode)
+        )
     # Child sessions remain archive evidence but are intentionally excluded from
     # Context Output; the public document scope is root sessions only.
     all_items = [

@@ -89,6 +89,107 @@ def _occurrence_times(value: dict[str, Any]) -> tuple[datetime, ...]:
     )
 
 
+def _record_values(record: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        value
+        for representation in record.get("representations", ())
+        if isinstance(representation, dict)
+        for value in (representation.get("value"),)
+        if isinstance(value, dict)
+    )
+
+
+def github_actor_login(value: dict[str, Any]) -> str | None:
+    for key in ("user", "actor", "author"):
+        actor = value.get(key)
+        login = actor.get("login") if isinstance(actor, dict) else None
+        if isinstance(login, str):
+            return login
+    return None
+
+
+def github_logins_match(login: Any, tracked_login: str | None) -> bool:
+    return (
+        isinstance(login, str)
+        and tracked_login is not None
+        and login.casefold() == tracked_login.casefold()
+    )
+
+
+def _record_is_in_range(record: dict[str, Any], start: datetime, end: datetime) -> bool:
+    return any(
+        start <= timestamp < end
+        for value in _record_values(record)
+        for timestamp in _occurrence_times(value)
+    )
+
+
+def _commit_is_user_authored(
+    value: dict[str, Any], tracked_login: str | None, identity: GitHubIdentity | None
+) -> bool:
+    author = value.get("author")
+    if isinstance(author, dict) and github_logins_match(
+        author.get("login"), tracked_login
+    ):
+        return True
+    email = author.get("email") if isinstance(author, dict) else None
+    return identity is not None and identity.matches_commit_email(email)
+
+
+def github_user_work_record_ids(
+    projection: GitHubProjection, start: datetime, end: datetime
+) -> frozenset[tuple[str, str]]:
+    """Select GitHub records that can enter the user's work projection.
+
+    The source item itself is not ownership evidence. Object records therefore
+    count only when the tracked account authored the object during the range;
+    collaborator updates remain context-only evidence.
+    """
+    selected: set[tuple[str, str]] = set()
+    for record in projection.records:
+        kind = record.get("kind")
+        native_id = record.get("native_id")
+        values = _record_values(record)
+        if not isinstance(kind, str) or not isinstance(native_id, str) or not values:
+            continue
+        user_work = False
+        if kind in {"issue", "pull-request", "pull-request-payload"}:
+            user_work = any(
+                github_logins_match(
+                    value.get("user", {}).get("login"), projection.tracked_login
+                )
+                and (
+                    (created := _timestamp(value.get("created_at"))) is not None
+                    and start <= created < end
+                )
+                for value in values
+                if isinstance(value.get("user"), dict)
+            )
+        elif kind == "timeline" and any(
+            value.get("event") == "committed" for value in values
+        ):
+            user_work = any(
+                _commit_is_user_authored(
+                    value, projection.tracked_login, projection.tracked_identity
+                )
+                and _record_is_in_range(
+                    {"representations": [{"value": value}]}, start, end
+                )
+                for value in values
+            )
+        elif kind not in {"aggregate-diff", "review-thread", "ordinary-comment-alias"}:
+            user_work = any(
+                github_logins_match(github_actor_login(value), projection.tracked_login)
+                and _record_is_in_range(
+                    {"representations": [{"value": value}]}, start, end
+                )
+                for value in values
+            )
+        if user_work:
+            selected.add((kind, native_id))
+    return frozenset(selected)
+
+
 def _record(
     kind: str,
     native_id: str,

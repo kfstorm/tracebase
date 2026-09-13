@@ -17,6 +17,7 @@ Tracebase preserves private work evidence in a replayable local archive, generat
 - **OpenCode collection:** Preserve source-native session exports with collection metadata.
 - **Explicit coverage:** Record time ranges and source boundaries, retain successful empty runs, and reject overlapping published ranges for the same logical source.
 - **Offline context:** Generate a disposable, browsable directory from archived evidence without querying the sources again.
+- **Explicit attribution:** Context declares `personal` or `actor_scoped` semantics per source; Summary projects user work before synthesis.
 - **Work summaries:** Run the production Summarizer against an archive or existing Context Output and publish a validated Markdown summary with provenance.
 
 Coverage records what the collector observed, not a guarantee of complete historical account activity. Tracebase preserves evidence; it does not generate long-term AI memory.
@@ -106,7 +107,7 @@ uv run tracebase context \
   --output "$HOME/.tracebase/context-2026-09-01"
 ```
 
-Start with `index.md` in the output directory. This range selects work records, not collector observation times. Context Output is disposable and does **not** redact sensitive data: treat it with the same confidentiality as the Raw Archive. Third-party or AI-service use requires a separate scope and sanitization decision.
+Start with `index.md` in the output directory. This range selects work records, not collector observation times. Each source item declares its attribution mode: OpenCode is `personal`, so delegated agent/subagent work belongs to the user; GitHub is `actor_scoped`, so only explicitly marked tracked-account actions and authorship are eligible for the user's Summary. Collaborator evidence remains context-only. Context Output is disposable and does **not** redact sensitive data: treat it with the same confidentiality as the Raw Archive. Third-party or AI-service use requires a separate scope and sanitization decision.
 
 For all options, run `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
 
@@ -145,7 +146,7 @@ uv run tracebase summary \
   --output "$HOME/.tracebase/summary-2026-09-01"
 ```
 
-Summary Output, retained Context Output, and debug output may contain sensitive work evidence and should be handled like the Raw Archive. The selected model provider may receive the Context Output; make a separate derived-data scope and sanitization decision before using a third-party or AI service. The summary is published only after its required shard reports pass validation; failed summaries are not published. For all options, run `uv run tracebase summary --help`.
+Summary Output, retained Context Output, and debug output may contain sensitive work evidence and should be handled like the Raw Archive. The final Summary is a projection of the user's work, not a summary of all activity in Context. Shard workers separate `User work` from `Context-only evidence`, and root synthesis only promotes the former. The selected model provider may receive the Context Output; make a separate derived-data scope and sanitization decision before using a third-party or AI service. The summary is published only after its required shard reports pass validation; failed summaries are not published. For all options, run `uv run tracebase summary --help`.
 
 ## Development
 

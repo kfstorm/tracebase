@@ -97,6 +97,8 @@ def _render_index(
         "Requested interval: "
         f"`{result.request.from_text} <= t < {result.request.to_text}`",
         "Times are displayed in the requested interval offset.",
+        "Attribution mode is declared for every source item; Summary projects "
+        "user work before synthesizing workstreams.",
         "",
         "## GitHub",
         "",
@@ -127,6 +129,7 @@ def _render_index(
         links = [path for path, _ in files]
         lines.append(
             f"- **{projection.repository} {kind} #{projection.number}**: {title} "
+            f"[attribution mode: `{item.attribution_mode.value}`] "
             f"({_link_list(links)})"
         )
     lines.extend(["", "## OpenCode", ""])
@@ -164,7 +167,9 @@ def _render_index(
             )
             span = _session_span(item, result) or "No in-range time"
             lines.append(
-                f"- **{span} - {title}** ({_link_list([path for path, _ in files])})"
+                f"- **{span} - {title}** [attribution mode: "
+                f"`{item.attribution_mode.value}`] "
+                f"({_link_list([path for path, _ in files])})"
             )
         lines.append("")
     write_markdown(staging / "index.md", lines)

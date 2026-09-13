@@ -42,7 +42,10 @@ class FakeRunner:
             if not self.recover or "--session" in arguments:
                 work = self.output / "work"
                 (work / "shards").mkdir(exist_ok=True)
-                (work / "shards/repo.md").write_text("evidence", encoding="utf-8")
+                (work / "shards/repo.md").write_text(
+                    "## User work\n\nevidence\n",
+                    encoding="utf-8",
+                )
                 status = "failed" if self.incomplete else "complete"
                 (work / "NOTES.md").write_text(
                     "<!-- SHARD_STATUS_BEGIN -->\n"
@@ -51,7 +54,8 @@ class FakeRunner:
                             "shards": [
                                 {
                                     "id": "repo",
-                                    "scope": "repo",
+                                    "scope": "/context/repo",
+                                    "attribution_modes": ["personal"],
                                     "status": status,
                                     "retry_count": 0,
                                     "report": "/work/shards/repo.md",
@@ -77,7 +81,8 @@ def context(tmp_path: Path) -> Path:
     (result / "index.md").write_text(
         "# Context Output\n\n"
         "Requested interval: `2026-01-01T01:00:00+01:00 <= t < "
-        "2026-01-01T03:00:00+01:00`\n",
+        "2026-01-01T03:00:00+01:00`\n"
+        "- **repo** [attribution mode: `personal`](repo/overview.md)\n",
         encoding="utf-8",
     )
     return result
@@ -126,6 +131,19 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     assert len(runner.calls) == 2
 
 
+def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> None:
+    prompt = (
+        Path(__file__).parents[1] / "src/tracebase/prompts/summarizer-v1.md"
+    ).read_text(encoding="utf-8")
+
+    assert "final Summary is a projection of the user's work" in prompt
+    assert "`personal`" in prompt and "`actor_scoped`" in prompt
+    assert "## User work" in prompt
+    assert "## Context-only evidence" in prompt
+    assert "Only `User work` may be promoted" in prompt
+    assert "Repository ownership" in prompt
+
+
 def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
@@ -168,6 +186,7 @@ def test_debug_retains_existing_runtime_artifacts_without_extra_calls(
     assert (debug / "work/TASK.md").is_file()
     assert (debug / "work/NOTES.md").is_file()
     assert (debug / "work/shards/repo.md").is_file()
+    assert "## Context-only evidence" in (debug / "work/shards/repo.md").read_text()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "runtime/stderr.log").is_file()
     assert not (debug / ".opencode-data").exists()
@@ -279,13 +298,65 @@ def test_archive_mode_rejects_outputs_overlapping_archive(tmp_path: Path) -> Non
 def test_shard_validation_rejects_retry_above_one(tmp_path: Path) -> None:
     (tmp_path / "NOTES.md").write_text(
         '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"a","status":"complete",'
-        '"retry_count":2,"report":"/work/shards/a.md"}]}<!-- SHARD_STATUS_END -->',
+        '"attribution_modes":["personal"],"retry_count":2,'
+        '"report":"/work/shards/a.md"}]}<!-- SHARD_STATUS_END -->',
         encoding="utf-8",
     )
     (tmp_path / "shards").mkdir()
     (tmp_path / "shards/a.md").write_text("report", encoding="utf-8")
 
     assert "retried more than once" in inspect_shards(tmp_path).errors[0]
+
+
+def test_shard_validation_rejects_context_attribution_mismatch(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **repo** [attribution mode: `personal`](repo/overview.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "NOTES.md").write_text(
+        '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"repo",'
+        '"scope":"/context/repo","attribution_modes":["actor_scoped"],'
+        '"status":"complete","retry_count":0,"report":"/work/shards/repo.md"}]}'
+        "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+    (tmp_path / "shards/repo.md").write_text(
+        "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    assert "do not match Context" in inspect_shards(tmp_path, context_dir).errors[0]
+
+
+def test_shard_validation_does_not_match_context_scope_prefixes(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **repo-tools** [attribution mode: `actor_scoped`](repo-tools/overview.md)\n"
+        "- **repo** [attribution mode: `personal`](repo/overview.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "NOTES.md").write_text(
+        '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"repo",'
+        '"scope":"/context/repo","attribution_modes":["personal"],'
+        '"status":"complete","retry_count":0,"report":"/work/shards/repo.md"}]}'
+        "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+    (tmp_path / "shards/repo.md").write_text(
+        "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
 
 
 def test_cli_rejects_conflicting_inputs(capsys: pytest.CaptureFixture[str]) -> None:

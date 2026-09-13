@@ -1,5 +1,25 @@
 You are producing a durable work summary from a Tracebase Context Output.
 
+The final Summary is a projection of the user's work, not a summary of all
+activity present in Context. Apply the source attribution mode shown in
+`index.md` and every source-specific child view before identifying workstreams:
+
+- `personal`: materially meaningful work recorded by the source belongs to the
+  user. This includes OpenCode work delegated to an agent or subagent, such as
+  investigation, design, implementation, debugging, validation, and decisions.
+- `actor_scoped`: only explicitly marked tracked-account actions or authorship
+  belong to the user. For GitHub, this means `(tracked account)` actors and Git
+  commit authors. Repository ownership, Item inclusion, PR or Issue presence,
+  merge status, and authorship by collaborators are not ownership evidence.
+
+Collaborator evidence may explain the user's own action or the resulting state,
+but it is context-only evidence. It must not itself become Summary content. Do
+not summarize or enumerate collaborator implementation, commits, findings,
+investigation, fixes, decisions, or other authored work. Do not replace a
+missing attribution with actorless or collective wording such as "the PR
+implemented" or "the team fixed". Use only the minimum neutral state needed to
+explain a user's attributed action or outcome.
+
 `/work/TASK.md` is the authoritative task specification for the entire session.
 It is durable state, not an optional prompt. If the session is compacted, or you
 are uncertain about your progress, reread `/work/TASK.md` and
@@ -59,19 +79,38 @@ that they are one group. Every Context item that could contain materially
 meaningful requested-interval work must belong to exactly one shard, and no shard
 may overlap another.
 
+For each shard, first make a user-work projection using the attribution mode of
+each item. A GitHub Item with only collaborator activity is not a personal
+Summary workstream, even when its context is technically important. A shard
+report must have these explicit sections, including an empty section when that
+category has no evidence:
+
+```markdown
+## User work
+<only work eligible for the user's Summary>
+
+## Context-only evidence
+<collaborator or other evidence used only to explain user work or state>
+```
+
+Only `User work` may be promoted into the root workstream inventory. Keep
+`Context-only evidence` available for interpretation, but never promote it as a
+workstream or restate it as the user's work.
+
 Create `/work/shards/` and maintain the following machine-readable block in
 `/work/NOTES.md` as the orchestration state. Use safe stable shard IDs and the
 exact canonical report path shown below. Update the block after each worker
 returns, after a retry, and before final synthesis:
 
 <!-- SHARD_STATUS_BEGIN -->
-{"shards":[{"id":"example","scope":"...","status":"pending","retry_count":0,"report":"/work/shards/example.md"}]}
+{"shards":[{"id":"example","scope":"...","attribution_modes":["personal"],"status":"pending","retry_count":0,"report":"/work/shards/example.md"}]}
 <!-- SHARD_STATUS_END -->
 
 The example is a schema, not a required shard. At completion every entry must
 be `complete` or `failed`, `retry_count` must be 0 or 1, and `report` must be
-`/work/shards/<id>.md`. A failed or missing report must never be omitted from
-the status block or the final synthesis.
+`/work/shards/<id>.md`. `attribution_modes` must preserve the explicit modes of
+all source items assigned to that shard. A failed or missing report must never
+be omitted from the status block or the final synthesis.
 
 For each independent shard, issue one foreground `task` call with the shard ID
 and its exact Context paths/scope in the task prompt. Dispatch all independent
@@ -94,14 +133,22 @@ the same scope, then verify again. Record `retry_count` and `status` in the
 status block. Never synthesize from an incomplete shard set. If a shard remains
 failed, record the failure and do not silently treat its evidence as reviewed.
 
-For the reduce phase, primarily read the completed shard reports, in stable
-inventory order, to merge workstreams and decide major versus other work. Do
-not infer a relationship merely because reports are adjacent. A workstream may
-span shards only when the Context evidence establishes that relationship. Do
-not re-traverse the complete Context in normal operation. Only perform a
-targeted fallback for a specific unresolved report when the missing evidence
-is necessary to resolve a material conclusion, and record that fallback in
-NOTES. Preserve unresolved uncertainty when it cannot be resolved.
+For the reduce phase, primarily read only the `User work` sections of completed
+shard reports, in stable inventory order, to merge workstreams and decide major
+versus other work. `Context-only evidence` is not root-synthesis input; it may be
+consulted only to understand an explicitly attributed user-work fact, and must
+never be copied, paraphrased, or used to fill an attribution gap. Do not infer a
+relationship merely because reports are adjacent. A workstream may span shards
+only when the Context evidence establishes that relationship. Do not re-traverse
+the complete Context in normal operation. Only perform a targeted fallback for a
+specific unresolved report when the missing evidence is necessary to resolve a
+material conclusion, and record that fallback in NOTES. Preserve unresolved
+uncertainty when it cannot be resolved.
+
+The reduce phase may merge user work from `personal` and `actor_scoped` sources
+when the evidence establishes one real workstream. It must not carry
+`Context-only evidence` across that boundary or use it to fill in an
+unattributed implementation, finding, or decision.
 
 Before writing `/results/summary.md`, reconcile the shard inventory and status
 block against `/context/index.md`, ensure every declared report was considered,
