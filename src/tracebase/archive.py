@@ -289,6 +289,17 @@ def _is_removed_run_directory(run_root: Path) -> bool:
     )
 
 
+def _load_snapshotless_published_run(
+    run_root: Path, entry_names: set[str]
+) -> PublishedRun | None:
+    if entry_names != {"run.json"}:
+        return None
+    run = _validate_published_run(run_root)
+    if run["snapshots"]:
+        raise ArchiveError("published run contains unregistered entries")
+    return PublishedRun(run, ())
+
+
 def _published_snapshot_path(entry: Any) -> PurePosixPath:
     if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
         raise ArchiveError("run snapshot entry is invalid")
@@ -446,7 +457,12 @@ def load_published_archive(root: str | Path) -> tuple[PublishedRun, ...]:
             raise ArchiveError("published run is not a regular directory")
         if _is_removed_run_directory(run_root):
             continue
-        if {path.name for path in run_root.iterdir()} != {"run.json", "snapshots"}:
+        entry_names = {path.name for path in run_root.iterdir()}
+        snapshotless_run = _load_snapshotless_published_run(run_root, entry_names)
+        if snapshotless_run is not None:
+            loaded.append(snapshotless_run)
+            continue
+        if entry_names != {"run.json", "snapshots"}:
             raise ArchiveError("published run contains unregistered entries")
         run = _validate_published_run(run_root)
         entries = run["snapshots"]
