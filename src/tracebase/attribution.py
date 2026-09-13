@@ -22,6 +22,7 @@ class AttributionMode(StrEnum):
 SOURCE_ATTRIBUTION_MODES: Final[Mapping[str, AttributionMode]] = MappingProxyType(
     {
         "opencode": AttributionMode.PERSONAL,
+        "chatgpt": AttributionMode.PERSONAL,
         "github": AttributionMode.ACTOR_SCOPED,
     }
 )

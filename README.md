@@ -1,6 +1,6 @@
 # Tracebase
 
-Tracebase preserves private work evidence in a replayable local archive, generates offline context, and produces work summaries. GitHub and OpenCode are the currently supported sources; additional sources may be added.
+Tracebase preserves private work evidence in a replayable local archive, generates offline context, and produces work summaries. GitHub, OpenCode, and ordinary personal ChatGPT conversations are the currently supported sources; additional sources may be added.
 
 ## Contents
 
@@ -15,6 +15,7 @@ Tracebase preserves private work evidence in a replayable local archive, generat
 
 - **GitHub collection:** Archive Issues and Pull Requests you authored, commented on, or submitted reviews for, including collaboration context and raw PR diffs.
 - **OpenCode collection:** Preserve source-native session exports with collection metadata.
+- **ChatGPT collection:** Preserve ordinary personal conversations using the authenticated ChatGPT web session.
 - **Explicit coverage:** Record time ranges and source boundaries, retain successful empty runs, and reject overlapping published ranges for the same logical source.
 - **Offline context:** Generate a disposable, browsable directory from archived evidence without querying the sources again.
 - **Explicit attribution:** Context declares `personal` or `actor_scoped` semantics per source; Summary projects user work before synthesis.
@@ -89,9 +90,53 @@ uv run tracebase collect opencode \
   --to 2026-09-02T00:00:00+00:00
 ```
 
-Both collectors require whole-second ISO 8601 timestamps with explicit offsets and `from < to`. Collection Ranges are half-open: `[from, to)`. A published range cannot be collected again for the same logical source; use the previous `--to` as the next `--from` for adjacent runs.
+All source collectors require whole-second ISO 8601 timestamps with explicit offsets and `from < to`. Collection Ranges are half-open: `[from, to)`. A published range cannot be collected again for the same logical source; use the previous `--to` as the next `--from` for adjacent runs.
 
 Successful collection prints one summary line to stdout; progress goes to stderr. Published runs live under `archive/runs/`, each with a `run.json` manifest and snapshots. Failed runs remain unpublished; any staging directories already created remain available for inspection. See the [Collection CLI Contract](docs/collection-cli-contract.md) for failure behavior.
+
+### Collect ChatGPT Conversations
+
+ChatGPT auth and collection require a system Chromium installation. Tracebase uses the same system Chromium executable and persistent profile for authentication and collection. Interactive authentication launches Chromium directly; collection and status use it through Playwright. Playwright's bundled browser binary is not used. On Linux, install the `chromium` system package before using this collector.
+
+Interactive ChatGPT authentication and collection use the same system Chromium browser and Tracebase-owned profile. This keeps one browser engine and one persistent profile for cookies, OAuth state, and session probing.
+
+Launch the Tracebase-owned persistent browser profile for interactive authentication. This command does not inject Playwright or inspect the session while the browser is open: complete login yourself and close Chromium; the command then checks the saved session automatically. The profile contains credential-equivalent sensitive browser state; it is kept outside the Raw Archive and must remain private:
+
+```bash
+uv run tracebase auth chatgpt
+```
+
+Check the saved account without displaying a browser:
+
+```bash
+uv run tracebase auth chatgpt status
+```
+
+Reset the Tracebase-owned ChatGPT browser/authentication state:
+
+```bash
+uv run tracebase auth chatgpt reset
+```
+
+Reset is the supported account-switching flow: run `reset`, then run `auth chatgpt` again. It deletes only the dedicated browser profile, including its cookies, local storage, and provider login state; it does not delete previously collected ChatGPT Raw Archive data. Reset is refused while another Tracebase ChatGPT browser operation is using the profile.
+
+During interactive authentication, Tracebase leaves Google, Microsoft, Apple, MFA, CAPTCHA, Cloudflare, and other provider verification flows to the user. It does not automate or bypass passwords, account selection, MFA, CAPTCHA, Cloudflare, or browser verification. The launched Chromium process is not controlled by Playwright; close it after completing the normal third-party login flow, and Tracebase automatically inspects the shared profile.
+
+Collect ordinary personal ChatGPT conversations with an explicit browser mode:
+
+```bash
+uv run tracebase collect chatgpt \
+  --archive "$HOME/.tracebase/archive" \
+  --browser-mode headless \
+  --from 2026-09-01T00:00:00+00:00 \
+  --to 2026-09-02T00:00:00+00:00
+```
+
+`--browser-mode` accepts `headless` (the default) or `headed`. Headless collection may receive ChatGPT browser verification and then fails cleanly rather than switching modes or bypassing verification. Tracebase does not start, manage, or detect Xvfb or another virtual display. A deployment wrapper may provide one for scheduled headed collection, for example with external `xvfb-run`; that is deployment-layer behavior, not collector behavior. Synthetic automated tests are hermetic and offline-safe: they do not launch Chromium or access provider networks. Manual Linux real-account E2E has passed for direct system-Chromium authentication, Google OAuth, post-exit session verification, `status`, and `reset`; macOS and Windows remain unvalidated and deferred.
+
+ChatGPT discovery uses conversation `update_time` and the same half-open Collection Range `[from, to)`. Discovery `update_time` is validated for message/edit content changes but is not known to advance for every conversation metadata mutation; it is not a complete conversation mutation log. Message-level work-time selection belongs to a later Context projection, not collection. Authentication failures, browser verification, rate limits, or incomplete hydration prevent a successful run from being published.
+
+Known ChatGPT source limitations include mutable offset pagination, provider responses that do not guarantee complete branch history, Canvas/textdocs outside the v1 representation, and conversations deleted before discovery being unavailable for retrospective collection. Discovery excludes Project and Custom GPT conversations when the provider item has a non-null `gizmo_id`; this predicate was validated against synthetic ordinary, Project, and Custom GPT conversations. Other provider metadata may still be incomplete or change without notice.
 
 ### Generate Context Offline
 
@@ -109,7 +154,7 @@ uv run tracebase context \
 
 Start with `index.md` in the output directory. This range selects work records, not collector observation times. Each source item declares its attribution mode: OpenCode is `personal`, so delegated agent/subagent work belongs to the user; GitHub is `actor_scoped`, so only explicitly marked tracked-account actions and authorship are eligible for the user's Summary. Collaborator evidence remains context-only. Context Output is disposable and does **not** redact sensitive data: treat it with the same confidentiality as the Raw Archive. Third-party or AI-service use requires a separate scope and sanitization decision.
 
-For all options, run `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
+For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
 
 ### Generate a Work Summary
 

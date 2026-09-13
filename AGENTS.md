@@ -1,6 +1,6 @@
 # Agent Guide
 
-Tracebase collects private work evidence, derives offline Context Output, and produces Summary Output. GitHub and OpenCode are the currently supported sources; additional sources may be added. See [README.md](README.md) for setup and CLI usage.
+Tracebase collects private work evidence, derives offline Context Output, and produces Summary Output. GitHub, OpenCode, and ordinary personal ChatGPT conversations are the currently supported sources; additional sources may be added. See [README.md](README.md) for setup and CLI usage.
 
 ## Task Context
 
@@ -37,4 +37,7 @@ Preserve evidence needed to reconstruct professional work and its necessary coll
 - Source identity profiles live under `profiles/<source>/` as archive-level mutable metadata outside `runs/`, Snapshots, and Source-native Evidence. GitHub profiles are keyed by the stable source scope from `/user.node_id`, matching GitHub `Collection Run.source.scope_id`. GitHub collection must not require or automatically refresh profiles; Context generation that selects GitHub items requires the matching profile.
 - For OpenCode, use `--instance-id` to scope overlap detection and prevent duplicate collection. Keep it unique across machines and stable on the same machine; a machine name is valid if it meets both conditions.
 - Derive Context Output offline without mutating the Raw Archive. Context Output is disposable and not redacted; apply the same confidentiality as the archive.
-- Use synthetic evidence in tests and keep real archives, session exports, Context Output, Summary Output, and debug output outside the repository. Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output does not perform redaction. Debug output must exclude credentials and secrets, but may contain sensitive work evidence; treat it with the same confidentiality as the Raw Archive.
+- Use synthetic evidence in tests and keep real archives, session exports, Context Output, Summary Output, and debug output outside the repository. Progress and exceptions must not expose credentials or source-native sensitive content. Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output does not perform redaction. Debug output must exclude credentials and secrets, but may contain sensitive work evidence; treat it with the same confidentiality as the Raw Archive.
+- Source collectors must not provision or manage virtual displays, schedulers, or similar deployment infrastructure; deployment orchestration is caller-owned.
+- ChatGPT tests and fixtures must use synthetic conversations. Real ChatGPT conversations, archives, browser profiles, cookies, and tokens must remain outside the repository.
+- Keep provider-native evidence separate from credential-equivalent browser profile state; authentication state must never enter the Raw Archive.

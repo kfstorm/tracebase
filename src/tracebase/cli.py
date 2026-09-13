@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
+from .chatgpt import authenticate as authenticate_chatgpt
+from .chatgpt import collect as collect_chatgpt
+from .chatgpt import reset as reset_chatgpt
+from .chatgpt import resolve_context as resolve_chatgpt_context
+from .chatgpt import status as status_chatgpt
 from .collector import CollectionContext, CollectionResult
 from .context import ContextError, ContextRequest, generate_context
 from .github import collect as collect_github
@@ -75,16 +80,28 @@ def _new_run(
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="tracebase", add_help=True, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
+    auth = commands.add_parser("auth", add_help=True, allow_abbrev=False)
+    auth_sources = auth.add_subparsers(dest="source", required=True)
+    chatgpt_auth = auth_sources.add_parser("chatgpt", add_help=True, allow_abbrev=False)
+    chatgpt_actions = chatgpt_auth.add_subparsers(dest="auth_action")
+    chatgpt_actions.add_parser("status", add_help=True, allow_abbrev=False)
+    chatgpt_actions.add_parser("reset", add_help=True, allow_abbrev=False)
     collect = commands.add_parser("collect", add_help=True, allow_abbrev=False)
     source_commands = collect.add_subparsers(dest="source", required=True)
 
-    for source in ("github", "opencode"):
+    for source in ("chatgpt", "github", "opencode"):
         source_parser = source_commands.add_parser(
             source, add_help=True, allow_abbrev=False
         )
         source_parser.add_argument("--archive", required=True)
         source_parser.add_argument("--from", dest="from_text", required=True)
         source_parser.add_argument("--to", dest="to_text", required=True)
+        if source == "chatgpt":
+            source_parser.add_argument(
+                "--browser-mode",
+                choices=("headless", "headed"),
+                default="headless",
+            )
         if source == "opencode":
             source_parser.add_argument("--instance-id", required=True)
     context = commands.add_parser("context", add_help=True, allow_abbrev=False)
@@ -137,6 +154,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ArchiveError as error:
         print(str(error), file=sys.stderr)
         return 1
+    if arguments.command == "auth":
+        if arguments.source != "chatgpt":
+            raise AssertionError("unsupported authentication source")
+        try:
+            if arguments.auth_action == "status":
+                session = status_chatgpt()
+                if session is None:
+                    print("Not authenticated")
+                    return 1
+                print(f"Authenticated as {session.label}")
+                return 0
+            if arguments.auth_action == "reset":
+                reset_chatgpt()
+                print("ChatGPT browser profile reset")
+                return 0
+            authenticate_chatgpt()
+        except ArchiveError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        return 0
     if arguments.command == "identity":
         return _sync_github_identity(arguments.archive)
     if arguments.command == "context":
@@ -200,6 +237,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     with sink:
         progress = ProgressReporter(sink)
+        context: CollectionContext
+        if arguments.source == "chatgpt":
+            try:
+                progress.emit(
+                    ProgressEvent(
+                        kind="start",
+                        task_id="prepare",
+                        label="Preparing ChatGPT collection",
+                    )
+                )
+                context = resolve_chatgpt_context(arguments.browser_mode)
+                run = _new_run(archive, collection_range, run_id, context)
+                progress.emit(ProgressEvent(kind="finish", task_id="prepare"))
+                result = collect_chatgpt(run, progress, arguments.browser_mode)
+                published = _publish(run, result, progress)
+            except ArchiveError as error:
+                print(str(error), file=sys.stderr)
+                return 1
+            print(
+                f"collected run {run.run_id} with {run.snapshot_count} snapshots "
+                f"at {archive.root / 'runs' / run.run_id}"
+            )
+            return 0
+
         if arguments.source == "opencode":
             progress.emit(
                 ProgressEvent(
