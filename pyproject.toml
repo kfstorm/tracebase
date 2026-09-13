@@ -7,6 +7,8 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "playwright>=1.52.0",
+    "playwright-stealth>=2.0.0",
     "rich>=13.7.0",
 ]
 
@@ -85,7 +87,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["PLR2004"]
-"src/tracebase/cli.py" = ["PLR0911"]
+"src/tracebase/cli.py" = ["PLR0911", "PLR0915"]
 "src/tracebase/summary.py" = ["PLR0915"]
 "src/tracebase/summary_shards.py" = ["PLR0915"]
 

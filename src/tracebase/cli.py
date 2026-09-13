@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Never
 
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
+from .chatgpt import authenticate as authenticate_chatgpt
+from .chatgpt import collect as collect_chatgpt
+from .chatgpt import resolve_context as resolve_chatgpt_context
 from .collector import CollectionContext, CollectionResult
 from .context import ContextError, ContextRequest, generate_context
 from .github import collect as collect_github
@@ -74,10 +77,13 @@ def _new_run(
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="tracebase", add_help=True, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
+    auth = commands.add_parser("auth", add_help=True, allow_abbrev=False)
+    auth_sources = auth.add_subparsers(dest="source", required=True)
+    auth_sources.add_parser("chatgpt", add_help=True, allow_abbrev=False)
     collect = commands.add_parser("collect", add_help=True, allow_abbrev=False)
     source_commands = collect.add_subparsers(dest="source", required=True)
 
-    for source in ("github", "opencode"):
+    for source in ("chatgpt", "github", "opencode"):
         source_parser = source_commands.add_parser(
             source, add_help=True, allow_abbrev=False
         )
@@ -114,6 +120,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ArchiveError as error:
         print(str(error), file=sys.stderr)
         return 1
+    if arguments.command == "auth":
+        if arguments.source != "chatgpt":
+            raise AssertionError("unsupported authentication source")
+        try:
+            authenticate_chatgpt()
+        except ArchiveError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        print("ChatGPT authentication complete")
+        return 0
     if arguments.command == "context":
         try:
             request = ContextRequest.parse(arguments.from_text, arguments.to_text)
@@ -175,6 +191,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     with sink:
         progress = ProgressReporter(sink)
+        context: CollectionContext
+        if arguments.source == "chatgpt":
+            try:
+                progress.emit(
+                    ProgressEvent(
+                        kind="start",
+                        task_id="prepare",
+                        label="Preparing ChatGPT collection",
+                    )
+                )
+                context = resolve_chatgpt_context()
+                run = _new_run(archive, collection_range, run_id, context)
+                progress.emit(ProgressEvent(kind="finish", task_id="prepare"))
+                result = collect_chatgpt(run, progress)
+                published = _publish(run, result, progress)
+            except ArchiveError as error:
+                print(str(error), file=sys.stderr)
+                return 1
+            print(
+                f"collected run {run.run_id} with {run.snapshot_count} snapshots "
+                f"at {archive.root / 'runs' / run.run_id}"
+            )
+            return 0
+
         if arguments.source == "opencode":
             progress.emit(
                 ProgressEvent(

@@ -1,0 +1,348 @@
+import json
+from io import StringIO
+from pathlib import Path
+
+import pytest
+
+from tracebase.archive import Archive, ArchiveError, CollectionRange, CollectionRun
+from tracebase.chatgpt import (
+    ChatGPTAuthenticationError,
+    ChatGPTError,
+    _Candidate,
+    _ChatGPTAPI,
+    _collect_api,
+    _discover,
+    _hydrate,
+    _ProfileLock,
+    _Response,
+    profile_path,
+)
+from tracebase.cli import _parser, main
+from tracebase.progress import LineProgressSink, ProgressEvent, ProgressReporter
+
+RANGE = CollectionRange.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")
+
+
+def response(value: object, status: int = 200) -> _Response:
+    return _Response(
+        json.dumps(value).encode(),
+        status,
+        {"content-type": "application/json"},
+        "2026-09-13T00:00:00Z",
+    )
+
+
+def reporter() -> ProgressReporter:
+    return ProgressReporter(LineProgressSink(StringIO()))
+
+
+def item(
+    source_id: str,
+    update_time: str,
+    *,
+    archived: bool,
+    starred: bool,
+    automation: bool = False,
+    temporary: bool = False,
+) -> dict[str, object]:
+    return {
+        "id": source_id,
+        "update_time": update_time,
+        "is_archived": archived,
+        "is_starred": starred,
+        "is_automation_conversation": automation,
+        "is_temporary_chat": temporary,
+    }
+
+
+class DiscoveryAPI:
+    account_id = "account-1"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, str]]] = []
+        self.pages = {
+            (False, False): [
+                item(
+                    "active-conversation",
+                    "2026-01-01T00:30:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+                item(
+                    "at-start",
+                    "2026-01-01T00:00:00Z",
+                    archived=False,
+                    starred=False,
+                ),
+            ],
+            (False, True): [
+                item(
+                    "active-conversation",
+                    "2026-01-01T00:30:00Z",
+                    archived=False,
+                    starred=True,
+                ),
+                item(
+                    "automation",
+                    "2026-01-01T00:30:00Z",
+                    archived=False,
+                    starred=True,
+                    automation=True,
+                ),
+            ],
+            (True, False): [
+                item(
+                    "archived-conversation",
+                    "2026-01-01T00:30:00Z",
+                    archived=True,
+                    starred=False,
+                ),
+                item(
+                    "at-end",
+                    "2026-01-01T01:00:00Z",
+                    archived=True,
+                    starred=False,
+                ),
+            ],
+            (True, True): [],
+        }
+
+    def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+        self.calls.append((endpoint, params))
+        key = (params["is_archived"] == "true", params["is_starred"] == "true")
+        offset = int(params["offset"])
+        page = self.pages[key] if offset == 0 else []
+        return response({"items": page, "limit": 2, "total": 999_999})
+
+    @staticmethod
+    def json(value: _Response) -> dict[str, object] | list[object]:
+        return json.loads(value.body)
+
+
+def test_discovery_covers_four_partitions_and_stabilizes() -> None:
+    api = DiscoveryAPI()
+    progress = reporter()
+    progress.emit(ProgressEvent(kind="start", task_id="chatgpt.discover"))
+    candidates, coverage, passes = _discover(api, RANGE, progress)
+
+    assert set(candidates) == {
+        "active-conversation",
+        "at-start",
+        "archived-conversation",
+    }
+    assert passes == 2
+    assert len(coverage) == 8
+    assert {
+        (call[1]["is_archived"], call[1]["is_starred"])
+        for call in api.calls
+        if call[1]["offset"] == "0"
+    } == {("false", "false"), ("false", "true"), ("true", "false"), ("true", "true")}
+    assert all(call[1]["offset"] in {"0", "2"} for call in api.calls)
+
+
+class HydrationAPI:
+    account_id = "account-1"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+        self.calls.append((endpoint, params))
+        if endpoint.endswith("/messages"):
+            if params["before"] == "cursor-1":
+                return response(
+                    {
+                        "messages": [{"id": "old-1"}],
+                        "page_info": {
+                            "start_cursor": "cursor-2",
+                            "has_previous_page": True,
+                            "has_next_page": True,
+                        },
+                    }
+                )
+            return response(
+                {
+                    "messages": [{"id": "old-2"}],
+                    "page_info": {
+                        "start_cursor": None,
+                        "has_previous_page": False,
+                        "has_next_page": True,
+                    },
+                }
+            )
+        return response(
+            {
+                "messages": [{"id": "current"}],
+                "page_info": {
+                    "start_cursor": "cursor-1",
+                    "has_previous_page": True,
+                    "has_next_page": False,
+                },
+            }
+        )
+
+    @staticmethod
+    def json(value: _Response) -> dict[str, object] | list[object]:
+        return json.loads(value.body)
+
+
+def test_hydration_preserves_detail_and_all_older_raw_pages(tmp_path: Path) -> None:
+    run = CollectionRun(
+        Archive(tmp_path / "archive"),
+        "chatgpt",
+        "account-1",
+        RANGE,
+        collector_version="test",
+        effective_options={},
+    )
+    api = HydrationAPI()
+    candidate = _Candidate("conversation/1", RANGE.start, ())
+
+    _hydrate(run, api, candidate)
+    published = run.publish({"selected_conversations": 1})
+    snapshot = next((published / "snapshots/conversation").iterdir())
+    manifest = json.loads((snapshot / "snapshot.json").read_text())
+
+    assert [entry["path"] for entry in manifest["evidence_files"]] == [
+        "conversation.json",
+        "messages.001.json",
+        "messages.002.json",
+    ]
+    assert (snapshot / "conversation.json").read_bytes() == json.dumps(
+        {
+            "messages": [{"id": "current"}],
+            "page_info": {
+                "start_cursor": "cursor-1",
+                "has_previous_page": True,
+                "has_next_page": False,
+            },
+        }
+    ).encode()
+    assert all(
+        entry["request"]["hydration_id"]
+        == manifest["evidence_files"][0]["request"]["hydration_id"]
+        for entry in manifest["evidence_files"]
+    )
+    assert [call[1].get("before") for call in api.calls] == [
+        None,
+        "cursor-1",
+        "cursor-2",
+    ]
+
+
+def test_empty_discovery_publishes_an_empty_successful_run(tmp_path: Path) -> None:
+    api = DiscoveryAPI()
+    api.pages = {key: [] for key in api.pages}
+    run = CollectionRun(
+        Archive(tmp_path / "archive"),
+        "chatgpt",
+        "account-1",
+        RANGE,
+        collector_version="test",
+        effective_options={},
+    )
+
+    result = _collect_api(run, reporter(), api)
+    published = run.publish(result.coverage)
+
+    assert json.loads((published / "run.json").read_text())["snapshots"] == []
+    assert result.coverage["selected_conversations"] == 0
+
+
+def test_provider_failure_leaves_staging_and_never_publishes(tmp_path: Path) -> None:
+    class FailingAPI(DiscoveryAPI):
+        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+            raise ChatGPTError("ChatGPT request failed after retries: status=429")
+
+    archive = Archive(tmp_path / "archive")
+    run = CollectionRun(
+        archive,
+        "chatgpt",
+        "account-1",
+        RANGE,
+        collector_version="test",
+        effective_options={},
+    )
+
+    with pytest.raises(ChatGPTError, match="429"):
+        _collect_api(run, reporter(), FailingAPI())
+
+    assert run.staging.exists()
+    assert not (archive.root / "runs").exists()
+
+
+class Page:
+    def __init__(self, status: int, body: str = "{}") -> None:
+        self.status = status
+        self.body = body
+        self.calls = 0
+
+    def evaluate(self, _expression: str, _arg: object) -> dict[str, object]:
+        self.calls += 1
+        return {"status": self.status, "headers": {}, "body": self.body}
+
+
+def test_auth_session_derives_scope_without_exposing_token() -> None:
+    token = "access-token-that-must-stay-in-memory"
+    api = _ChatGPTAPI(
+        Page(
+            200,
+            json.dumps({"accessToken": token, "account": {"id": "account-1"}}),
+        )
+    )
+
+    session = api.session()
+
+    assert session.account_id == "account-1"
+    assert token not in repr(session)
+
+
+def test_401_is_a_clean_auth_failure() -> None:
+    api = _ChatGPTAPI(Page(401))
+
+    with pytest.raises(ChatGPTAuthenticationError, match="expired"):
+        api.session()
+
+
+def test_profile_path_uses_platform_state_directories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tracebase.chatgpt.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("tracebase.chatgpt.Path.home", lambda: Path("/home/tester"))
+    assert profile_path() == Path(
+        "/home/tester/Library/Application Support/tracebase/chatgpt-browser"
+    )
+
+    monkeypatch.setattr("tracebase.chatgpt.platform.system", lambda: "Linux")
+    monkeypatch.setenv("XDG_STATE_HOME", "/tmp/tester-state")
+    assert profile_path() == Path("/tmp/tester-state/tracebase/chatgpt-browser")
+
+
+def test_profile_lock_rejects_concurrent_use(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    second = _ProfileLock(profile)
+    with _ProfileLock(profile), pytest.raises(ArchiveError, match="already in use"):
+        second.__enter__()
+
+
+def test_cli_registers_chatgpt_collection_and_auth_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collect_args = _parser().parse_args(
+        [
+            "collect",
+            "chatgpt",
+            "--archive",
+            "/tmp/archive",
+            "--from",
+            "2026-01-01T00:00:00Z",
+            "--to",
+            "2026-01-01T01:00:00Z",
+        ]
+    )
+    auth_args = _parser().parse_args(["auth", "chatgpt"])
+
+    assert collect_args.source == "chatgpt"
+    assert auth_args.command == "auth"
+    monkeypatch.setattr("tracebase.cli.authenticate_chatgpt", lambda: None)
+    assert main(["auth", "chatgpt"]) == 0
