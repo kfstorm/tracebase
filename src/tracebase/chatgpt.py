@@ -355,8 +355,8 @@ class _ChatGPTSessionProbe:
             raise _FatalSessionProbeError(
                 "ChatGPT authentication session response is invalid"
             )
-        account = value.get("account") if isinstance(value, dict) else None
-        token = value.get("accessToken") if isinstance(value, dict) else None
+        account = value.get("account")
+        token = value.get("accessToken")
         account_id = account.get("id") if isinstance(account, dict) else None
         if (
             not isinstance(token, str)
@@ -365,21 +365,9 @@ class _ChatGPTSessionProbe:
             or not account_id
         ):
             return _SessionProbeResult(_SessionState.UNAUTHENTICATED)
-        user = value.get("user") if isinstance(value, dict) else None
-        email = (
-            account.get("email")
-            if isinstance(account, dict)
-            else user.get("email")
-            if isinstance(user, dict)
-            else None
-        )
-        display_name = (
-            account.get("name")
-            if isinstance(account, dict)
-            else user.get("name")
-            if isinstance(user, dict)
-            else None
-        )
+        user = value.get("user")
+        email = _first_nonempty_string(account, user, "email")
+        display_name = _first_nonempty_string(account, user, "name")
         return _SessionProbeResult(
             _SessionState.AUTHENTICATED,
             _Session(
@@ -392,6 +380,15 @@ class _ChatGPTSessionProbe:
                 ),
             ),
         )
+
+
+def _first_nonempty_string(primary: object, fallback: object, field: str) -> str | None:
+    for value in (primary, fallback):
+        if isinstance(value, dict):
+            candidate = value.get(field)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    return None
 
 
 def _observed_at() -> str:
