@@ -292,14 +292,18 @@ def assert_outputs_equal(one: Path, two: Path) -> None:
 
 
 def github_output(
-    archive: Archive, tmp_path: Path, evidence: dict[str, object | str]
+    archive: Archive,
+    tmp_path: Path,
+    evidence: dict[str, object | str],
+    pull_request: dict[str, object] | None = None,
 ) -> Path:
+    payload = {"node_id": "PR_1", **(pull_request or {})}
     publish_github(
         archive,
         "PR_1",
         {
             "issue.json": github_base(),
-            "pull-request.json": {"node_id": "PR_1"},
+            "pull-request.json": payload,
             **evidence,
         },
     )
@@ -945,6 +949,212 @@ def test_future_github_events_are_absent_and_background_is_separate(
     assert "today" in text(output, "activity.md")
     assert "cutoff" not in text(output, "activity.md")
     assert "future" not in text(output, "activity.md")
+
+
+def test_commits_use_commit_time_buckets_and_preserve_full_messages(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "COMMIT_BEFORE",
+                    "event": "committed",
+                    "sha": "before123456789",
+                    "author": {"date": "2025-12-31T15:00:00Z"},
+                    "committer": {"date": "2025-12-31T15:30:00Z"},
+                    "message": "Before subject\n\nBefore body",
+                },
+                {
+                    "id": 2,
+                    "node_id": "COMMIT_DURING",
+                    "event": "committed",
+                    "sha": "during123456789",
+                    "author": {"date": "2026-01-01T02:00:00Z"},
+                    "committer": {"date": "2026-01-01T01:00:00Z"},
+                    "message": "During subject\n\nWhy and how",
+                },
+                {
+                    "id": 3,
+                    "node_id": "COMMIT_CUTOFF",
+                    "event": "committed",
+                    "sha": "cutoff123456789",
+                    "committer": {"date": "2026-01-02T00:00:00Z"},
+                    "message": "At cutoff",
+                },
+                {
+                    "id": 4,
+                    "node_id": "COMMIT_FUTURE",
+                    "event": "committed",
+                    "sha": "future123456789",
+                    "committer": {"date": "2026-01-02T01:00:00Z"},
+                    "message": "Future",
+                },
+            ]
+        },
+    )
+
+    activity = text(output, "activity.md")
+    background = text(output, "background.md")
+    assert "Commit timestamps use Git committer time" in activity
+    assert activity.count("Commit timestamps use Git committer time") == 1
+    assert "2026-01-01 09:00 · during1" in activity
+    assert (
+        "- 2026-01-01 09:00 · during1\n  During subject\n\n  Why and how"
+    ) in activity
+    assert "During subject" in activity and "Why and how" in activity
+    assert "before1" not in activity
+    assert "cutoff1" not in activity
+    assert "future1" not in activity
+    assert "Commit timestamps use Git committer time" in background
+    assert "2025-12-31 23:30 · before1" in background
+    assert "Before subject" in background and "Before body" in background
+    assert "during1" not in background
+
+
+def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "COMMIT_AUTHOR",
+                    "event": "committed",
+                    "sha": "author123456789",
+                    "author": {"date": "2026-01-01T03:00:00Z"},
+                    "message": "Author time",
+                },
+                {
+                    "id": 2,
+                    "node_id": "COMMIT_UNKNOWN",
+                    "event": "committed",
+                    "sha": "unknown12345678",
+                    "message": "Must not be guessed",
+                },
+            ]
+        },
+    )
+
+    activity = text(output, "activity.md")
+    assert "2026-01-01 11:00 · author1" in activity
+    assert "Must not be guessed" not in activity
+
+
+def test_high_value_timeline_events_and_review_commit_are_rendered(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "FORCE",
+                    "event": "head_ref_force_pushed",
+                    "actor": {"login": "alice"},
+                    "created_at": "2026-01-01T04:00:00Z",
+                    "commit_id": "force123456789",
+                },
+                {
+                    "id": 2,
+                    "node_id": "RESTORED",
+                    "event": "head_ref_restored",
+                    "created_at": "2026-01-01T05:00:00Z",
+                    "ref": "feature",
+                },
+                {
+                    "id": 3,
+                    "node_id": "BASE",
+                    "event": "base_ref_changed",
+                    "created_at": "2026-01-01T06:00:00Z",
+                },
+                {
+                    "id": 4,
+                    "node_id": "RENAME",
+                    "event": "renamed",
+                    "created_at": "2026-01-01T07:00:00Z",
+                    "rename": {"from": "old title", "to": "new title"},
+                },
+                {
+                    "id": 5,
+                    "node_id": "DELETED",
+                    "event": "head_ref_deleted",
+                    "created_at": "2026-01-01T08:00:00Z",
+                },
+            ],
+            "reviews.001.json": [
+                {
+                    "id": 6,
+                    "user": {"login": "reviewer"},
+                    "submitted_at": "2026-01-01T09:00:00Z",
+                    "commit_id": "abcdef123456789",
+                    "state": "CHANGES_REQUESTED",
+                    "body": "Please revise this.",
+                }
+            ],
+        },
+    )
+
+    activity = text(output, "activity.md")
+    assert "Head ref force-pushed" in activity
+    assert "commit force1" in activity
+    assert "before" not in activity and "after" not in activity
+    assert "Head ref restored" in activity
+    assert "Base ref changed" in activity
+    assert "Renamed old title -> new title" in activity
+    assert (
+        "Review by @reviewer · 2026-01-01 17:00 · on abcdef1 (CHANGES_REQUESTED)"
+        in activity
+    )
+    assert "head_ref_deleted" not in activity
+
+
+def test_force_push_does_not_remove_existing_timeline_commit_and_warns_at_limit(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "OLD_COMMIT",
+                    "event": "committed",
+                    "sha": "oldcommit123456",
+                    "committer": {"date": "2026-01-01T01:00:00Z"},
+                    "message": "Old commit retained",
+                },
+                {
+                    "id": 2,
+                    "node_id": "FORCE",
+                    "event": "head_ref_force_pushed",
+                    "created_at": "2026-01-01T02:00:00Z",
+                },
+            ]
+        },
+        pull_request={"commits": 251},
+    )
+
+    activity = text(output, "activity.md")
+    assert "Old commit retained" in activity
+    assert "GitHub may truncate PR commit history at 250 entries" in activity
 
 
 def test_github_event_with_earlier_and_in_range_times_has_one_canonical_bucket(

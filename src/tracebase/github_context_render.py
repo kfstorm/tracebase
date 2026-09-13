@@ -8,6 +8,8 @@ from typing import Any
 from .context import ContextExtractionResult, ContextItem
 from .context_render import format_timestamp, parse_timestamp
 
+GITHUB_COMMIT_LIMIT = 250
+
 
 def _representations(record: dict[str, Any]) -> list[dict[str, Any]]:
     values = record.get("representations")
@@ -43,6 +45,19 @@ def _times(value: dict[str, Any]) -> tuple[datetime, ...]:
         for key in keys
         if (parsed := parse_timestamp(value.get(key))) is not None
     )
+
+
+def _commit_time(value: dict[str, Any]) -> datetime | None:
+    for key in ("committer", "author"):
+        person = value.get(key)
+        date = person.get("date") if isinstance(person, dict) else None
+        if (parsed := parse_timestamp(date)) is not None:
+            return parsed
+    return None
+
+
+def _short_sha(value: Any) -> str | None:
+    return value[:7] if isinstance(value, str) and value else None
 
 
 def _actor(value: dict[str, Any]) -> str | None:
@@ -112,6 +127,21 @@ def _event_bucket(value: dict[str, Any], start: datetime, end: datetime) -> str 
     return None
 
 
+def _timeline_event_time(value: dict[str, Any]) -> datetime | None:
+    return parse_timestamp(value.get("created_at"))
+
+
+def _timeline_event_bucket(
+    value: dict[str, Any], start: datetime, end: datetime
+) -> str | None:
+    timestamp = _timeline_event_time(value)
+    if timestamp is None:
+        return None
+    if start <= timestamp < end:
+        return "activity"
+    return "background" if timestamp < start else None
+
+
 def _selected_observation_is_after_request_end(
     item: ContextItem, result: ContextExtractionResult
 ) -> bool:
@@ -130,7 +160,9 @@ def _location(value: dict[str, Any]) -> str | None:
     return path if isinstance(path, str) else None
 
 
-def _lifecycle(value: dict[str, Any], tracked_login: str | None) -> str | None:
+def _timeline_event_label(
+    value: dict[str, Any], tracked_login: str | None
+) -> str | None:
     event = value.get("event")
     if event not in {
         "closed",
@@ -138,10 +170,37 @@ def _lifecycle(value: dict[str, Any], tracked_login: str | None) -> str | None:
         "merged",
         "ready_for_review",
         "converted_to_draft",
+        "head_ref_force_pushed",
+        "head_ref_restored",
+        "base_ref_changed",
+        "renamed",
     }:
         return None
+    if event == "renamed":
+        rename = value.get("rename")
+        old_name = rename.get("from") if isinstance(rename, dict) else None
+        new_name = rename.get("to") if isinstance(rename, dict) else None
+        if not isinstance(old_name, str) or not isinstance(new_name, str):
+            return None
+        rendered = f"Renamed {old_name} -> {new_name}"
+    else:
+        rendered = str(event).replace("_", " ").capitalize()
+        if event == "head_ref_force_pushed":
+            rendered = "Head ref force-pushed"
+        if event in {"head_ref_force_pushed", "head_ref_restored"}:
+            details: list[str] = []
+            for key in ("ref", "commit_id", "before", "after"):
+                detail = value.get(key)
+                if isinstance(detail, str):
+                    if key == "ref":
+                        details.append(detail)
+                    elif key == "commit_id":
+                        details.append(f"commit {_short_sha(detail) or detail}")
+                    else:
+                        details.append(f"{key} {detail}")
+            if details:
+                rendered += f" ({'; '.join(details)})"
     actor = _actor(value)
-    rendered = str(event).replace("_", " ").capitalize()
     return f"{rendered}{f' by {_actor_label(value, tracked_login)}' if actor else ''}"
 
 
@@ -180,7 +239,9 @@ def _review_lines(
     timestamp = _time(value, timezone)
     state_suffix = f" ({state})" if isinstance(state, str) else ""
     suffix = f" · {timestamp}" if timestamp else ""
-    lines = [f"Review by {actor}{suffix}{state_suffix}", ""]
+    commit_id = _short_sha(value.get("commit_id"))
+    commit_suffix = f" · on {commit_id}" if commit_id else ""
+    lines = [f"Review by {actor}{suffix}{commit_suffix}{state_suffix}", ""]
     if isinstance(body, str) and body:
         lines.extend([body, ""])
     return lines
@@ -359,18 +420,12 @@ def _event_entries(  # noqa: PLR0915
             value = _value(record)
             if not isinstance(value, dict):
                 continue
-            label = _lifecycle(value, projection.tracked_login)
-            if _event_bucket(value, start, end) != bucket:
+            label = _timeline_event_label(value, projection.tracked_login)
+            if _timeline_event_bucket(value, start, end) != bucket:
                 continue
-            event_time = _in_range_time(value, start, end)
-            if label is None:
+            event_time = _timeline_event_time(value)
+            if label is None or event_time is None:
                 continue
-            if event_time is None:
-                event_time = min(
-                    (time for time in _times(value) if time < start), default=None
-                )
-                if event_time is None:
-                    continue
             rendered_time = format_timestamp(event_time.isoformat(), timezone)
             entries.append(
                 (
@@ -399,15 +454,99 @@ def _event_entries(  # noqa: PLR0915
     return sorted(entries, key=lambda entry: (entry[0], entry[1]))
 
 
+def _commit_limit_warning(records: tuple[dict[str, Any], ...]) -> str | None:
+    for record in records:
+        if record.get("kind") != "pull-request-payload":
+            continue
+        value = _value(record)
+        commits = value.get("commits") if isinstance(value, dict) else None
+        if (
+            isinstance(commits, int)
+            and not isinstance(commits, bool)
+            and commits > GITHUB_COMMIT_LIMIT
+        ):
+            return (
+                "GitHub may truncate PR commit history at 250 entries; this section "
+                "may be incomplete."
+            )
+    return None
+
+
+def _commit_section(
+    records: tuple[dict[str, Any], ...],
+    start: datetime,
+    end: datetime,
+    bucket: str,
+    timezone: tzinfo,
+    warn_without_commits: bool,
+) -> list[str]:
+    commits: list[tuple[datetime, str, str]] = []
+    for record in records:
+        if record.get("kind") != "timeline":
+            continue
+        value = _value(record)
+        if not isinstance(value, dict) or value.get("event") != "committed":
+            continue
+        timestamp = _commit_time(value)
+        sha = _short_sha(value.get("sha"))
+        if timestamp is None or sha is None:
+            continue
+        if bucket == "activity" and not start <= timestamp < end:
+            continue
+        if bucket == "background" and not timestamp < start:
+            continue
+        message = value.get("message")
+        commits.append((timestamp, sha, message if isinstance(message, str) else ""))
+    warning = _commit_limit_warning(records)
+    if not commits and (warning is None or not warn_without_commits):
+        return []
+
+    lines = ["## Commits", ""]
+    if commits:
+        lines.extend(
+            [
+                "Commit timestamps use Git committer time (falling back to author "
+                "time), not GitHub push time.",
+                "",
+            ]
+        )
+    for timestamp, sha, message in sorted(
+        commits, key=lambda entry: (entry[0], entry[1])
+    ):
+        rendered_time = format_timestamp(timestamp.isoformat(), timezone)
+        if rendered_time is None:
+            continue
+        lines.append(f"- {rendered_time} · {sha}")
+        if message:
+            lines.extend(f"  {line}" if line else "" for line in message.split("\n"))
+        lines.append("")
+    if warning is not None:
+        lines.extend([warning, ""])
+    return lines
+
+
 def _activity(
     item: ContextItem, result: ContextExtractionResult, bucket: str
 ) -> list[str]:
+    assert item.github is not None
     entries = _event_entries(item, result, bucket)
-    if not entries:
-        return []
     lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
     for _, _, entry_lines in entries:
         lines.extend(entry_lines)
+    timezone = result.request.start.tzinfo
+    assert timezone is not None
+    lines.extend(
+        _commit_section(
+            item.github.records,
+            result.request.start,
+            result.request.end,
+            bucket,
+            timezone,
+            bucket == "activity",
+        )
+    )
+    if lines == [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]:
+        return []
     return lines
 
 
