@@ -203,6 +203,25 @@ def publish_github(
     current.publish({"selected_artifacts": 1, "pagination_complete": True})
 
 
+def publish_chatgpt(archive: Archive, source_id: str = "conversation-1") -> None:
+    current = run(archive, "chatgpt-run", "chatgpt")
+    snapshot = current.write_snapshot(
+        Snapshot(
+            "chatgpt",
+            "conversation",
+            source_id,
+            current.collection_range.as_manifest(),
+            ({"path": "conversation.json"},),
+        )
+    )
+    current.write_evidence(
+        snapshot,
+        "conversation.json",
+        json.dumps({"id": source_id, "title": "Private conversation"}).encode(),
+    )
+    current.publish({"selected_conversation_count": 1})
+
+
 def files(output: Path) -> set[str]:
     return {
         path.relative_to(output).as_posix()
@@ -546,6 +565,68 @@ def test_selection_contract_is_shared_by_github_and_opencode(
         for item in result.items
     }
     assert selected == {"github": "github-new", "opencode": "opencode-new"}
+
+
+def test_context_skips_known_chatgpt_source_without_projector(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_github(
+        archive,
+        "PR_1",
+        {
+            "issue.json": github_base(),
+            "pull-request.json": {"node_id": "PR_1"},
+            **activity_evidence(),
+        },
+    )
+    publish_opencode(
+        archive,
+        session("root", messages=[message("session-message", "2026-01-01T01:00:00Z")]),
+        "opencode-run",
+    )
+    publish_chatgpt(archive)
+
+    output = tmp_path / "output"
+    result = extract_context(request(), load_archive(archive.root))
+    generate_context(archive.root, request(), output)
+
+    assert {item.snapshot.manifest["source_kind"] for item in result.items} == {
+        "github",
+        "opencode",
+    }
+    assert "github/example/project/pull/1/overview.md" in files(output)
+    assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
+        output
+    )
+    assert not any(path.startswith("chatgpt/") for path in files(output))
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "object_kind"),
+    (("unknown", "snapshot"), ("github", "conversation")),
+)
+def test_context_rejects_archive_unknown_source_or_object_kind(
+    tmp_path: Path, source_kind: str, object_kind: str
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    current = run(archive, "invalid-run", source_kind)
+    snapshot = current.write_snapshot(
+        Snapshot(
+            source_kind,
+            object_kind,
+            "source-1",
+            current.collection_range.as_manifest(),
+            ({"path": "evidence.json"},),
+        )
+    )
+    current.write_evidence(snapshot, "evidence.json", b"{}")
+    current.publish({})
+
+    with pytest.raises(ContextError, match="unsupported context source"):
+        extract_context(request(), load_archive(archive.root))
 
 
 def test_selection_tie_break_is_independent_of_input_order(tmp_path: Path) -> None:

@@ -27,7 +27,6 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and use Py
 
 ```bash
 uv sync
-uv run playwright install chromium
 uv run tracebase --help
 ```
 
@@ -69,6 +68,12 @@ All source collectors require whole-second ISO 8601 timestamps with explicit off
 Successful collection prints one summary line to stdout; progress goes to stderr. Published runs live under `archive/runs/`, each with a `run.json` manifest and snapshots. Failed runs remain unpublished; any staging directories already created remain available for inspection. See the [Collection CLI Contract](docs/collection-cli-contract.md) for failure behavior.
 
 ### Collect ChatGPT Conversations
+
+ChatGPT auth and collection require the Playwright Chromium browser binary. Install it only if you use this collector:
+
+```bash
+uv run playwright install chromium
+```
 
 Authenticate the Tracebase-owned persistent browser profile interactively. The profile contains credential-equivalent sensitive browser state; it is kept outside the Raw Archive and must remain private:
 
