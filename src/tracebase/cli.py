@@ -11,7 +11,9 @@ from typing import Never
 from .archive import Archive, ArchiveError, CollectionRange, CollectionRun
 from .chatgpt import authenticate as authenticate_chatgpt
 from .chatgpt import collect as collect_chatgpt
+from .chatgpt import reset as reset_chatgpt
 from .chatgpt import resolve_context as resolve_chatgpt_context
+from .chatgpt import status as status_chatgpt
 from .collector import CollectionContext, CollectionResult
 from .context import ContextError, ContextRequest, generate_context
 from .github import collect as collect_github
@@ -80,7 +82,10 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     auth = commands.add_parser("auth", add_help=True, allow_abbrev=False)
     auth_sources = auth.add_subparsers(dest="source", required=True)
-    auth_sources.add_parser("chatgpt", add_help=True, allow_abbrev=False)
+    chatgpt_auth = auth_sources.add_parser("chatgpt", add_help=True, allow_abbrev=False)
+    chatgpt_actions = chatgpt_auth.add_subparsers(dest="auth_action")
+    chatgpt_actions.add_parser("status", add_help=True, allow_abbrev=False)
+    chatgpt_actions.add_parser("reset", add_help=True, allow_abbrev=False)
     collect = commands.add_parser("collect", add_help=True, allow_abbrev=False)
     source_commands = collect.add_subparsers(dest="source", required=True)
 
@@ -153,11 +158,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.source != "chatgpt":
             raise AssertionError("unsupported authentication source")
         try:
+            if arguments.auth_action == "status":
+                session = status_chatgpt()
+                if session is None:
+                    print("Not authenticated")
+                    return 1
+                print(f"Authenticated as {session.label}")
+                return 0
+            if arguments.auth_action == "reset":
+                reset_chatgpt()
+                print("ChatGPT browser profile reset")
+                return 0
             authenticate_chatgpt()
         except ArchiveError as error:
             print(str(error), file=sys.stderr)
             return 1
-        print("ChatGPT authentication complete")
         return 0
     if arguments.command == "identity":
         return _sync_github_identity(arguments.archive)

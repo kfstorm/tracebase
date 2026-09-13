@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
 import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote, urlencode
@@ -58,13 +60,27 @@ class _Page(Protocol):
 
     def goto(self, url: str, **_kwargs: Any) -> Any: ...
 
+    def is_closed(self) -> bool: ...
+
+
+class _APIResponse(Protocol):
+    status: int
+    headers: dict[str, str]
+
+    def body(self) -> bytes: ...
+
 
 class _BrowserContext(Protocol):
     pages: list[_Page]
+    request: _RequestContext
 
     def new_page(self) -> _Page: ...
 
     def close(self) -> None: ...
+
+
+class _RequestContext(Protocol):
+    def get(self, url: str, **_kwargs: Any) -> _APIResponse: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +103,23 @@ class _Response:
 @dataclass(frozen=True, slots=True)
 class _Session:
     account_id: str
+    email: str | None = None
+    display_name: str | None = None
+
+    @property
+    def label(self) -> str:
+        return self.email or self.display_name or f"account {self.account_id}"
+
+
+class _SessionState(Enum):
+    AUTHENTICATED = "authenticated"
+    UNAUTHENTICATED = "unauthenticated"
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionProbeResult:
+    state: _SessionState
+    session: _Session | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +152,14 @@ class ChatGPTBrowserVerificationError(ChatGPTAuthenticationError):
     """ChatGPT returned a browser-verification response."""
 
 
+class _TransientSessionProbeError(ChatGPTError):
+    """A session probe failure that may recover during interactive login."""
+
+
+class _FatalSessionProbeError(ChatGPTError):
+    """A session probe response that cannot be treated as unauthenticated."""
+
+
 def profile_path() -> Path:
     """Return the Tracebase-owned profile path, outside any archive root."""
 
@@ -143,14 +184,20 @@ def _absolute_env_path(name: str, fallback: Path) -> Path:
 class _ProfileLock:
     """Process lock preventing two browser contexts from sharing one profile."""
 
-    def __init__(self, profile: Path):
+    def __init__(self, profile: Path, *, create: bool = True):
         self._profile = profile
+        self._create = create
         self._path = profile.with_name(profile.name + ".lock")
         self._file: Any = None
 
     def __enter__(self) -> _ProfileLock:
         _secure_directory(self._path.parent)
-        _secure_directory(self._profile)
+        if self._create:
+            _secure_directory(self._profile)
+        elif self._profile.exists() and (
+            self._profile.is_symlink() or not self._profile.is_dir()
+        ):
+            raise ArchiveError("ChatGPT browser profile directory is invalid")
         if self._path.is_symlink() or (
             self._path.exists() and not self._path.is_file()
         ):
@@ -271,6 +318,80 @@ class _Browser:
         if self._lock is not None:
             self._lock.__exit__(None, None, None)
             self._lock = None
+
+
+class _ChatGPTSessionProbe:
+    """Probe the shared persistent browser session without using the visible page."""
+
+    def __init__(self, context: _BrowserContext):
+        self.context = context
+
+    def check(self) -> _SessionProbeResult:
+        try:
+            response = self.context.request.get(
+                f"{_API_BASE}/api/auth/session",
+                timeout=_REQUEST_TIMEOUT_MS,
+            )
+            body = response.body()
+        except Exception as error:
+            raise _TransientSessionProbeError(
+                "ChatGPT authentication session probe failed"
+            ) from error
+        if response.status == _AUTH_FAILURE_STATUS:
+            return _SessionProbeResult(_SessionState.UNAUTHENTICATED)
+        if response.status == _BROWSER_VERIFICATION_STATUS:
+            raise _FatalSessionProbeError("ChatGPT browser verification is required")
+        if response.status != _SUCCESS_STATUS:
+            raise _TransientSessionProbeError(
+                f"ChatGPT authentication session probe failed: status={response.status}"
+            )
+        try:
+            value = json.loads(body)
+        except json.JSONDecodeError as error:
+            raise _FatalSessionProbeError(
+                "ChatGPT authentication session response is invalid"
+            ) from error
+        if not isinstance(value, dict):
+            raise _FatalSessionProbeError(
+                "ChatGPT authentication session response is invalid"
+            )
+        account = value.get("account") if isinstance(value, dict) else None
+        token = value.get("accessToken") if isinstance(value, dict) else None
+        account_id = account.get("id") if isinstance(account, dict) else None
+        if (
+            not isinstance(token, str)
+            or not token
+            or not isinstance(account_id, str)
+            or not account_id
+        ):
+            return _SessionProbeResult(_SessionState.UNAUTHENTICATED)
+        user = value.get("user") if isinstance(value, dict) else None
+        email = (
+            account.get("email")
+            if isinstance(account, dict)
+            else user.get("email")
+            if isinstance(user, dict)
+            else None
+        )
+        display_name = (
+            account.get("name")
+            if isinstance(account, dict)
+            else user.get("name")
+            if isinstance(user, dict)
+            else None
+        )
+        return _SessionProbeResult(
+            _SessionState.AUTHENTICATED,
+            _Session(
+                account_id,
+                email=email if isinstance(email, str) and email else None,
+                display_name=(
+                    display_name
+                    if isinstance(display_name, str) and display_name
+                    else None
+                ),
+            ),
+        )
 
 
 def _observed_at() -> str:
@@ -879,29 +1000,74 @@ def _validate_browser_mode(browser_mode: str) -> None:
         )
 
 
-def _session_is_valid(api: _ChatGPTAPI) -> bool:
-    try:
-        api.session()
-    except ChatGPTAuthenticationError:
-        return False
-    return True
+def _probe_existing_session() -> _SessionProbeResult:
+    profile = profile_path()
+    if not profile.exists():
+        return _SessionProbeResult(_SessionState.UNAUTHENTICATED)
+    with _Browser(profile, headless=True, stealth=False) as browser:
+        if browser.context is None:
+            raise ChatGPTError("ChatGPT browser context is unavailable")
+        return _ChatGPTSessionProbe(browser.context).check()
+
+
+def _session_label(session: _Session) -> str:
+    return session.label
+
+
+def status() -> _Session | None:
+    """Check the saved session without opening a visible browser."""
+
+    result = _probe_existing_session()
+    return result.session if result.state is _SessionState.AUTHENTICATED else None
+
+
+def reset() -> None:
+    """Delete only the Tracebase-owned ChatGPT browser profile."""
+
+    profile = profile_path()
+    with _ProfileLock(profile, create=False):
+        if not profile.exists():
+            return
+        try:
+            shutil.rmtree(profile)
+        except OSError as error:
+            raise ChatGPTError("ChatGPT browser profile could not be reset") from error
 
 
 def authenticate() -> None:
-    """Open the headed profile and wait for the user to complete authentication."""
+    """Check the saved session, then wait for interactive authentication if needed."""
+
+    existing = _probe_existing_session()
+    if existing.state is _SessionState.AUTHENTICATED and existing.session is not None:
+        print(f"Already authenticated as {_session_label(existing.session)}")
+        return
 
     with _Browser(profile_path(), headless=False, stealth=False) as browser:
-        if browser.page is None:
-            raise ChatGPTError("ChatGPT browser page is unavailable")
-        api = _ChatGPTAPI(browser.page)
+        if browser.page is None or browser.context is None:
+            raise ChatGPTError("ChatGPT browser is unavailable")
+        main_page = browser.page
+        probe = _ChatGPTSessionProbe(browser.context)
         deadline = _monotonic() + _AUTH_WAIT_SECONDS
+        consecutive_failures = 0
         while _monotonic() < deadline:
-            if _session_is_valid(api):
-                return
+            if main_page.is_closed():
+                raise ChatGPTAuthenticationError("ChatGPT authentication cancelled")
+            try:
+                result = probe.check()
+            except _TransientSessionProbeError as error:
+                consecutive_failures += 1
+                if consecutive_failures >= _REQUEST_RETRIES + 1:
+                    raise ChatGPTError(str(error)) from error
+            else:
+                consecutive_failures = 0
+                if (
+                    result.state is _SessionState.AUTHENTICATED
+                    and result.session is not None
+                ):
+                    print(f"Authenticated as {_session_label(result.session)}")
+                    return
             _sleep(_AUTH_POLL_SECONDS)
-    raise ChatGPTAuthenticationError(
-        "ChatGPT authentication was not completed before the timeout"
-    )
+    raise ChatGPTAuthenticationError("ChatGPT authentication timed out")
 
 
 __all__ = [
@@ -912,11 +1078,14 @@ __all__ = [
     "_Candidate",
     "_ChatGPTAPI",
     "_Response",
+    "_Session",
     "_collect_api",
     "_discover",
     "_hydrate",
     "authenticate",
     "collect",
     "profile_path",
+    "reset",
     "resolve_context",
+    "status",
 ]

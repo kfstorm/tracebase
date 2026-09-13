@@ -101,11 +101,27 @@ ChatGPT auth and collection require the Playwright Chromium browser binary. Inst
 uv run playwright install chromium
 ```
 
-Authenticate the Tracebase-owned persistent browser profile interactively. The profile contains credential-equivalent sensitive browser state; it is kept outside the Raw Archive and must remain private:
+Authenticate the Tracebase-owned persistent browser profile interactively. Tracebase first checks the saved session and opens a visible browser only when login is required. The profile contains credential-equivalent sensitive browser state; it is kept outside the Raw Archive and must remain private:
 
 ```bash
 uv run tracebase auth chatgpt
 ```
+
+Check the saved account without displaying a browser:
+
+```bash
+uv run tracebase auth chatgpt status
+```
+
+Reset the Tracebase-owned ChatGPT browser/authentication state:
+
+```bash
+uv run tracebase auth chatgpt reset
+```
+
+Reset is the supported account-switching flow: run `reset`, then run `auth chatgpt` again. It deletes only the dedicated browser profile, including its cookies, local storage, and provider login state; it does not delete previously collected ChatGPT Raw Archive data. Reset is refused while another Tracebase ChatGPT browser operation is using the profile.
+
+During interactive authentication, Tracebase leaves Google, Microsoft, Apple, MFA, CAPTCHA, Cloudflare, and other provider verification flows to the user. It does not automate or bypass passwords, account selection, MFA, CAPTCHA, Cloudflare, or browser verification. The visible page may navigate through these normal third-party login pages while Tracebase checks the shared browser session independently.
 
 Collect ordinary personal ChatGPT conversations with an explicit browser mode:
 
