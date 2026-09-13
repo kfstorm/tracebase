@@ -7,6 +7,7 @@ from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
 from .context_render import format_timestamp, parse_timestamp
+from .github_identity import normalize_email
 
 GITHUB_COMMIT_LIMIT = 250
 
@@ -47,13 +48,18 @@ def _times(value: dict[str, Any]) -> tuple[datetime, ...]:
     )
 
 
-def _commit_time(value: dict[str, Any]) -> datetime | None:
-    for key in ("committer", "author"):
-        person = value.get(key)
-        date = person.get("date") if isinstance(person, dict) else None
-        if (parsed := parse_timestamp(date)) is not None:
-            return parsed
-    return None
+def _commit_dates(
+    value: dict[str, Any],
+) -> tuple[datetime | None, datetime | None]:
+    author = value.get("author")
+    committer = value.get("committer")
+    author_date = (
+        parse_timestamp(author.get("date")) if isinstance(author, dict) else None
+    )
+    committer_date = (
+        parse_timestamp(committer.get("date")) if isinstance(committer, dict) else None
+    )
+    return author_date, committer_date
 
 
 def _short_sha(value: Any) -> str | None:
@@ -72,6 +78,26 @@ def _actor(value: dict[str, Any]) -> str | None:
 def _actor_label(value: dict[str, Any], tracked_login: str | None) -> str:
     actor = _actor(value) or "unknown"
     return f"@{actor} (tracked account)" if actor == tracked_login else f"@{actor}"
+
+
+def _commit_author(
+    value: dict[str, Any], tracked_commit_identities: frozenset[str]
+) -> str:
+    author = value.get("author")
+    committer = value.get("committer")
+    author_name = author.get("name") if isinstance(author, dict) else None
+    committer_name = committer.get("name") if isinstance(committer, dict) else None
+    if isinstance(author_name, str) and author_name:
+        name = author_name
+    elif isinstance(committer_name, str) and committer_name:
+        name = committer_name
+    else:
+        name = "unknown"
+    author_email = author.get("email") if isinstance(author, dict) else None
+    normalized_email = normalize_email(author_email)
+    if normalized_email in tracked_commit_identities:
+        return f"{name} (tracked account)"
+    return name
 
 
 def _time(value: dict[str, Any], timezone: tzinfo) -> str | None:
@@ -455,6 +481,18 @@ def _event_entries(  # noqa: PLR0915
 
 
 def _commit_limit_warning(records: tuple[dict[str, Any], ...]) -> str | None:
+    observed_commits = 0
+    for record in records:
+        if record.get("kind") != "timeline":
+            continue
+        value = _value(record)
+        if isinstance(value, dict) and value.get("event") == "committed":
+            observed_commits += 1
+    if observed_commits >= GITHUB_COMMIT_LIMIT:
+        return (
+            "Observed GitHub Timeline commit events reached 250 entries; this "
+            "section may be incomplete."
+        )
     for record in records:
         if record.get("kind") != "pull-request-payload":
             continue
@@ -479,15 +517,18 @@ def _commit_section(
     bucket: str,
     timezone: tzinfo,
     warn_without_commits: bool,
+    tracked_commit_identities: frozenset[str],
 ) -> list[str]:
-    commits: list[tuple[datetime, str, str]] = []
+    commits: list[tuple[datetime, str, str, str, datetime | None, int]] = []
+    fallback_order = 0
     for record in records:
         if record.get("kind") != "timeline":
             continue
         value = _value(record)
         if not isinstance(value, dict) or value.get("event") != "committed":
             continue
-        timestamp = _commit_time(value)
+        author_date, committer_date = _commit_dates(value)
+        timestamp = committer_date or author_date
         sha = _short_sha(value.get("sha"))
         if timestamp is None or sha is None:
             continue
@@ -496,7 +537,23 @@ def _commit_section(
         if bucket == "background" and not timestamp < start:
             continue
         message = value.get("message")
-        commits.append((timestamp, sha, message if isinstance(message, str) else ""))
+        source_order = record.get("source_order")
+        order = source_order if isinstance(source_order, int) else fallback_order
+        fallback_order += 1
+        commits.append(
+            (
+                timestamp,
+                sha,
+                message if isinstance(message, str) else "",
+                _commit_author(value, tracked_commit_identities),
+                author_date
+                if author_date is not None
+                and committer_date is not None
+                and author_date != committer_date
+                else None,
+                order,
+            )
+        )
     warning = _commit_limit_warning(records)
     if not commits and (warning is None or not warn_without_commits):
         return []
@@ -505,18 +562,23 @@ def _commit_section(
     if commits:
         lines.extend(
             [
-                "Commit timestamps use Git committer time (falling back to author "
-                "time), not GitHub push time.",
+                "Commit placement uses Git committer time, falling back to author "
+                "time when absent. Differing author times are shown separately. "
+                "Neither timestamp is GitHub push time.",
                 "",
             ]
         )
-    for timestamp, sha, message in sorted(
-        commits, key=lambda entry: (entry[0], entry[1])
+    for timestamp, sha, message, author, author_date, _order in sorted(
+        commits, key=lambda entry: entry[-1]
     ):
         rendered_time = format_timestamp(timestamp.isoformat(), timezone)
         if rendered_time is None:
             continue
-        lines.append(f"- {rendered_time} · {sha}")
+        lines.append(f"- {rendered_time} · `{sha}` · {author}")
+        if author_date is not None:
+            rendered_author_time = format_timestamp(author_date.isoformat(), timezone)
+            if rendered_author_time is not None:
+                lines.append(f"  Authored: {rendered_author_time}")
         if message:
             lines.extend(f"  {line}" if line else "" for line in message.split("\n"))
         lines.append("")
@@ -543,6 +605,7 @@ def _activity(
             bucket,
             timezone,
             bucket == "activity",
+            item.github.tracked_commit_identities,
         )
     )
     if lines == [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]:
@@ -570,6 +633,18 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
     )
     title = value.get("title") or projection.title or "Untitled"
     lines = [f"# {projection.repository} {kind} #{projection.number} — {title}", ""]
+    lines.extend(
+        [
+            "## Tracked account",
+            "",
+            f"- GitHub: @{projection.tracked_login or 'unknown'}",
+            "- Git commit identities are marked `(tracked account)` only when they "
+            "match a locally synced identity profile.",
+            "- Activity and Background may include collaborators' work on tracked "
+            "Items; only explicitly marked actors are the tracked account.",
+            "",
+        ]
+    )
     author = _actor(value)
     if author:
         lines.append(f"- Author: {_actor_label(value, projection.tracked_login)}")

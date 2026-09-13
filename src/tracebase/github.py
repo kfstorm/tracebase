@@ -9,11 +9,13 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 from .archive import ArchiveError, CollectionRange, CollectionRun, Snapshot
 from .collector import CollectionContext, CollectionResult
+from .github_identity import save_github_identity
 from .progress import ProgressEvent, ProgressReporter
 
 
@@ -566,6 +568,43 @@ def _actor(github: _GitHub) -> tuple[str, str]:
     if not isinstance(node_id, str) or not isinstance(login, str):
         raise ArchiveError("GitHub actor response was invalid")
     return node_id, login
+
+
+def sync_identity() -> Path:
+    """Refresh the local GitHub identity profile without affecting collection."""
+
+    github = _GitHub()
+    response = github.request("/user")
+    user = github.json(response)
+    if not isinstance(user, dict):
+        raise ArchiveError("GitHub identity response was invalid")
+    login = user.get("login")
+    numeric_id = user.get("id")
+    if (
+        not isinstance(login, str)
+        or not login
+        or not isinstance(numeric_id, int)
+        or isinstance(numeric_id, bool)
+    ):
+        raise ArchiveError("GitHub identity response was invalid")
+    try:
+        emails_response = github.request("/user/emails")
+    except ArchiveError as error:
+        raise ArchiveError(
+            "GitHub identity sync could not read /user/emails; "
+            "check token permission or request access to associated emails"
+        ) from error
+    emails_value = github.json(emails_response)
+    if not isinstance(emails_value, list):
+        raise ArchiveError("GitHub identity email response was invalid")
+    emails = [
+        email
+        for entry in emails_value
+        if isinstance(entry, dict)
+        and isinstance(email := entry.get("email"), str)
+        and email.strip()
+    ]
+    return save_github_identity(login, numeric_id, emails)
 
 
 def resolve_context() -> GitHubContext:

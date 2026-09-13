@@ -9,9 +9,11 @@ import tempfile
 import uuid
 from io import StringIO
 from pathlib import Path
+from stat import S_IMODE
 
 import pytest
 
+from tracebase import cli
 from tracebase.archive import (
     Archive,
     ArchiveError,
@@ -154,6 +156,28 @@ def completed_github_response(
     )
 
 
+def build_identity_request(
+    emails: list[dict[str, str]] | None = None, *, fail_emails: bool = False
+) -> object:
+    def request(
+        _self: object, endpoint: str, _accept: str = "application/vnd.github+json"
+    ) -> _Response:
+        if endpoint == "/user":
+            payload: object = {
+                "id": 123,
+                "login": "tracked-user",
+                "node_id": "actor-node",
+            }
+        else:
+            assert endpoint == "/user/emails"
+            if fail_emails:
+                raise ArchiveError("GitHub request failed")
+            payload = emails or []
+        return _Response(json.dumps(payload).encode(), 200, {})
+
+    return request
+
+
 def run_github_request_with_attempts(
     monkeypatch: pytest.MonkeyPatch,
     attempts: list[subprocess.CompletedProcess[bytes]],
@@ -247,6 +271,48 @@ def test_github_request_reports_http_500_diagnostics_after_retries(
     assert "service unavailable" not in message
 
     assert delays == [0.5, 1.0]
+
+
+def test_github_identity_sync_persists_narrow_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    monkeypatch.setattr(
+        "tracebase.github._GitHub.request",
+        build_identity_request(
+            [{"email": "Kai@Example.com"}, {"email": "private@example.com"}]
+        ),
+    )
+
+    assert cli.main(["identity", "github", "sync"]) == 0
+
+    profile_path = tmp_path / "config" / "tracebase" / "github-identity.json"
+    profile = json.loads(profile_path.read_text())
+    assert profile["login"] == "tracked-user"
+    assert profile["numeric_id"] == 123
+    assert profile["emails"] == ["Kai@Example.com", "private@example.com"]
+    assert profile["noreply_aliases"] == [
+        "123+tracked-user@users.noreply.github.com",
+        "tracked-user@users.noreply.github.com",
+    ]
+    assert S_IMODE(profile_path.stat().st_mode) == 0o600
+    assert "private@example.com" not in capsys.readouterr().out
+
+
+def test_github_identity_sync_reports_email_permission_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    monkeypatch.setattr(
+        "tracebase.github._GitHub.request", build_identity_request(fail_emails=True)
+    )
+
+    assert cli.main(["identity", "github", "sync"]) == 1
+
+    assert "/user/emails" in capsys.readouterr().err
+    assert not (tmp_path / "config" / "tracebase" / "github-identity.json").exists()
 
 
 def test_github_request_retries_timeout_then_succeeds(

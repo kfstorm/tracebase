@@ -296,6 +296,7 @@ def github_output(
     tmp_path: Path,
     evidence: dict[str, object | str],
     pull_request: dict[str, object] | None = None,
+    effective_options: dict[str, object] | None = None,
 ) -> Path:
     payload = {"node_id": "PR_1", **(pull_request or {})}
     publish_github(
@@ -306,6 +307,7 @@ def github_output(
             "pull-request.json": payload,
             **evidence,
         },
+        effective_options=effective_options,
     )
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
@@ -682,7 +684,8 @@ def test_github_uses_natural_path_and_heading(tmp_path: Path) -> None:
     overview = text(output, "overview.md")
     assert "# example/project PR #1" in overview
     assert "PR_1" not in overview
-    assert "(tracked account)" not in overview
+    assert "## Tracked account" in overview
+    assert "locally synced identity profile" in overview
     assert "Tracked GitHub account:" not in (output / "index.md").read_text()
     assert "github/example/project" in (output / "index.md").read_text()
 
@@ -1001,20 +1004,112 @@ def test_commits_use_commit_time_buckets_and_preserve_full_messages(
 
     activity = text(output, "activity.md")
     background = text(output, "background.md")
-    assert "Commit timestamps use Git committer time" in activity
-    assert activity.count("Commit timestamps use Git committer time") == 1
-    assert "2026-01-01 09:00 · during1" in activity
+    assert "Commit placement uses Git committer time" in activity
+    assert activity.count("Commit placement uses Git committer time") == 1
+    assert "2026-01-01 09:00 · `during1` · unknown" in activity
     assert (
-        "- 2026-01-01 09:00 · during1\n  During subject\n\n  Why and how"
+        "- 2026-01-01 09:00 · `during1` · unknown\n"
+        "  Authored: 2026-01-01 10:00\n"
+        "  During subject\n\n  Why and how"
     ) in activity
     assert "During subject" in activity and "Why and how" in activity
     assert "before1" not in activity
     assert "cutoff1" not in activity
     assert "future1" not in activity
-    assert "Commit timestamps use Git committer time" in background
-    assert "2025-12-31 23:30 · before1" in background
+    assert "Commit placement uses Git committer time" in background
+    assert "2025-12-31 23:30 · `before1` · unknown" in background
     assert "Before subject" in background and "Before body" in background
     assert "during1" not in background
+
+
+def test_commits_keep_timeline_order_and_show_author_identity_and_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_home = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    profile_path = config_home / "tracebase" / "github-identity.json"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "provider": "github",
+                "login": "tracked-user",
+                "numeric_id": 123,
+                "emails": ["Kai@Example.com"],
+                "noreply_aliases": ["123+tracked-user@users.noreply.github.com"],
+                "synced_at": "2026-01-01T00:00:00Z",
+            }
+        )
+    )
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "COMMIT_Z",
+                    "event": "committed",
+                    "sha": "zzzzzzz1234567",
+                    "author": {
+                        "name": "Kai Yang",
+                        "email": "kai@example.com",
+                        "date": "2025-12-31T23:00:00Z",
+                    },
+                    "committer": {"name": "Rebaser", "date": "2026-01-01T01:00:00Z"},
+                    "message": "First in Timeline",
+                },
+                {
+                    "id": 2,
+                    "node_id": "COMMIT_A",
+                    "event": "committed",
+                    "sha": "aaaaaaa1234567",
+                    "author": {
+                        "name": "mubai",
+                        "email": "mubai@example.com",
+                        "date": "2026-01-01T01:00:00Z",
+                    },
+                    "committer": {"name": "mubai", "date": "2026-01-01T01:00:00Z"},
+                    "message": "Second in Timeline",
+                },
+            ]
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    activity = text(output, "activity.md")
+    assert activity.index("zzzzz") < activity.index("aaaaaaa")
+    assert "Kai Yang (tracked account)" in activity
+    assert "mubai" in activity
+    assert "kai@example.com" not in activity
+    assert "Authored: 2026-01-01 07:00" in activity
+    assert "Commit placement uses Git committer time" in activity
+    assert "Neither timestamp is GitHub push time" in activity
+
+
+def test_github_overview_always_names_tracked_account_without_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config"))
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {"comments.001.json": []},
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    overview = text(output, "overview.md")
+    assert "## Tracked account" in overview
+    assert "- GitHub: @tracked-user" in overview
+    assert (
+        "Git commit identities are marked `(tracked account)` only when they"
+        in overview
+    )
+    assert "private" not in overview.lower()
 
 
 def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
@@ -1047,7 +1142,8 @@ def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
     )
 
     activity = text(output, "activity.md")
-    assert "2026-01-01 11:00 · author1" in activity
+    assert "2026-01-01 11:00 · `author1` · unknown" in activity
+    assert "Authored:" not in activity
     assert "Must not be guessed" not in activity
 
 
@@ -1155,6 +1251,33 @@ def test_force_push_does_not_remove_existing_timeline_commit_and_warns_at_limit(
     activity = text(output, "activity.md")
     assert "Old commit retained" in activity
     assert "GitHub may truncate PR commit history at 250 entries" in activity
+
+
+def test_observed_timeline_commit_limit_warns_without_pull_count(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": index,
+                    "node_id": f"COMMIT_{index}",
+                    "event": "committed",
+                    "sha": f"{index:07x}1234567",
+                    "committer": {"date": "2026-01-01T01:00:00Z"},
+                    "message": f"Commit {index}",
+                }
+                for index in range(250)
+            ]
+        },
+    )
+
+    activity = text(output, "activity.md")
+    assert "Observed GitHub Timeline commit events reached 250 entries" in activity
 
 
 def test_github_event_with_earlier_and_in_range_times_has_one_canonical_bucket(

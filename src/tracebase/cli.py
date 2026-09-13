@@ -13,6 +13,7 @@ from .collector import CollectionContext, CollectionResult
 from .context import ContextError, ContextRequest, generate_context
 from .github import collect as collect_github
 from .github import resolve_context as resolve_github_context
+from .github import sync_identity as sync_github_identity
 from .opencode import (
     collect as collect_opencode,
 )
@@ -102,7 +103,25 @@ def _parser() -> argparse.ArgumentParser:
     summary.add_argument("--output", required=True)
     summary.add_argument("--context-output")
     summary.add_argument("--debug-output")
+    identity = commands.add_parser("identity", add_help=True, allow_abbrev=False)
+    identity_sources = identity.add_subparsers(dest="identity_source", required=True)
+    github_identity = identity_sources.add_parser(
+        "github", add_help=True, allow_abbrev=False
+    )
+    github_identity.add_subparsers(dest="identity_action", required=True).add_parser(
+        "sync", add_help=True, allow_abbrev=False
+    )
     return parser
+
+
+def _sync_github_identity() -> int:
+    try:
+        profile = sync_github_identity()
+    except ArchiveError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print(f"GitHub identity profile refreshed at {profile}")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -114,6 +133,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ArchiveError as error:
         print(str(error), file=sys.stderr)
         return 1
+    if arguments.command == "identity":
+        return _sync_github_identity()
     if arguments.command == "context":
         try:
             request = ContextRequest.parse(arguments.from_text, arguments.to_text)
