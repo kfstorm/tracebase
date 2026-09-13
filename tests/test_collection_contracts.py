@@ -357,6 +357,7 @@ def test_successful_sources_share_the_published_archive_contract(  # noqa: PLR09
 
     if source == "github":
         assert snapshot_manifest["source_kind"] == "github"
+        assert not (archive / "profiles" / "github").exists()
         assert (snapshot / "issue.json").read_bytes() == GITHUB_ISSUE_RESPONSE
         assert (snapshot / "comments.001.json").read_bytes() == GITHUB_COMMENTS_RESPONSE
         assert (snapshot / "timeline.001.json").read_bytes() == GITHUB_TIMELINE_RESPONSE

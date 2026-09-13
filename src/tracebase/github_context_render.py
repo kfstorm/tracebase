@@ -7,6 +7,9 @@ from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
 from .context_render import format_timestamp, parse_timestamp
+from .github_identity import GitHubIdentity
+
+GITHUB_COMMIT_LIMIT = 250
 
 
 def _representations(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -45,6 +48,24 @@ def _times(value: dict[str, Any]) -> tuple[datetime, ...]:
     )
 
 
+def _commit_dates(
+    value: dict[str, Any],
+) -> tuple[datetime | None, datetime | None]:
+    author = value.get("author")
+    committer = value.get("committer")
+    author_date = (
+        parse_timestamp(author.get("date")) if isinstance(author, dict) else None
+    )
+    committer_date = (
+        parse_timestamp(committer.get("date")) if isinstance(committer, dict) else None
+    )
+    return author_date, committer_date
+
+
+def _short_sha(value: Any) -> str | None:
+    return value[:7] if isinstance(value, str) and value else None
+
+
 def _actor(value: dict[str, Any]) -> str | None:
     for key in ("user", "actor", "author"):
         actor = value.get(key)
@@ -57,6 +78,23 @@ def _actor(value: dict[str, Any]) -> str | None:
 def _actor_label(value: dict[str, Any], tracked_login: str | None) -> str:
     actor = _actor(value) or "unknown"
     return f"@{actor} (tracked account)" if actor == tracked_login else f"@{actor}"
+
+
+def _commit_author(value: dict[str, Any], identity: GitHubIdentity | None) -> str:
+    author = value.get("author")
+    committer = value.get("committer")
+    author_name = author.get("name") if isinstance(author, dict) else None
+    committer_name = committer.get("name") if isinstance(committer, dict) else None
+    if isinstance(author_name, str) and author_name:
+        name = author_name
+    elif isinstance(committer_name, str) and committer_name:
+        name = committer_name
+    else:
+        name = "unknown"
+    author_email = author.get("email") if isinstance(author, dict) else None
+    if identity is not None and identity.matches_commit_email(author_email):
+        return f"{name} (tracked account)"
+    return name
 
 
 def _time(value: dict[str, Any], timezone: tzinfo) -> str | None:
@@ -112,6 +150,21 @@ def _event_bucket(value: dict[str, Any], start: datetime, end: datetime) -> str 
     return None
 
 
+def _timeline_event_time(value: dict[str, Any]) -> datetime | None:
+    return parse_timestamp(value.get("created_at"))
+
+
+def _timeline_event_bucket(
+    value: dict[str, Any], start: datetime, end: datetime
+) -> str | None:
+    timestamp = _timeline_event_time(value)
+    if timestamp is None:
+        return None
+    if start <= timestamp < end:
+        return "activity"
+    return "background" if timestamp < start else None
+
+
 def _selected_observation_is_after_request_end(
     item: ContextItem, result: ContextExtractionResult
 ) -> bool:
@@ -130,7 +183,9 @@ def _location(value: dict[str, Any]) -> str | None:
     return path if isinstance(path, str) else None
 
 
-def _lifecycle(value: dict[str, Any], tracked_login: str | None) -> str | None:
+def _timeline_event_label(
+    value: dict[str, Any], tracked_login: str | None
+) -> str | None:
     event = value.get("event")
     if event not in {
         "closed",
@@ -138,10 +193,37 @@ def _lifecycle(value: dict[str, Any], tracked_login: str | None) -> str | None:
         "merged",
         "ready_for_review",
         "converted_to_draft",
+        "head_ref_force_pushed",
+        "head_ref_restored",
+        "base_ref_changed",
+        "renamed",
     }:
         return None
+    if event == "renamed":
+        rename = value.get("rename")
+        old_name = rename.get("from") if isinstance(rename, dict) else None
+        new_name = rename.get("to") if isinstance(rename, dict) else None
+        if not isinstance(old_name, str) or not isinstance(new_name, str):
+            return None
+        rendered = f"Renamed {old_name} -> {new_name}"
+    else:
+        rendered = str(event).replace("_", " ").capitalize()
+        if event == "head_ref_force_pushed":
+            rendered = "Head ref force-pushed"
+        if event in {"head_ref_force_pushed", "head_ref_restored"}:
+            details: list[str] = []
+            for key in ("ref", "commit_id", "before", "after"):
+                detail = value.get(key)
+                if isinstance(detail, str):
+                    if key == "ref":
+                        details.append(detail)
+                    elif key == "commit_id":
+                        details.append(f"commit {_short_sha(detail) or detail}")
+                    else:
+                        details.append(f"{key} {detail}")
+            if details:
+                rendered += f" ({'; '.join(details)})"
     actor = _actor(value)
-    rendered = str(event).replace("_", " ").capitalize()
     return f"{rendered}{f' by {_actor_label(value, tracked_login)}' if actor else ''}"
 
 
@@ -180,7 +262,9 @@ def _review_lines(
     timestamp = _time(value, timezone)
     state_suffix = f" ({state})" if isinstance(state, str) else ""
     suffix = f" · {timestamp}" if timestamp else ""
-    lines = [f"Review by {actor}{suffix}{state_suffix}", ""]
+    commit_id = _short_sha(value.get("commit_id"))
+    commit_suffix = f" · on {commit_id}" if commit_id else ""
+    lines = [f"Review by {actor}{suffix}{commit_suffix}{state_suffix}", ""]
     if isinstance(body, str) and body:
         lines.extend([body, ""])
     return lines
@@ -359,18 +443,12 @@ def _event_entries(  # noqa: PLR0915
             value = _value(record)
             if not isinstance(value, dict):
                 continue
-            label = _lifecycle(value, projection.tracked_login)
-            if _event_bucket(value, start, end) != bucket:
+            label = _timeline_event_label(value, projection.tracked_login)
+            if _timeline_event_bucket(value, start, end) != bucket:
                 continue
-            event_time = _in_range_time(value, start, end)
-            if label is None:
+            event_time = _timeline_event_time(value)
+            if label is None or event_time is None:
                 continue
-            if event_time is None:
-                event_time = min(
-                    (time for time in _times(value) if time < start), default=None
-                )
-                if event_time is None:
-                    continue
             rendered_time = format_timestamp(event_time.isoformat(), timezone)
             entries.append(
                 (
@@ -399,15 +477,136 @@ def _event_entries(  # noqa: PLR0915
     return sorted(entries, key=lambda entry: (entry[0], entry[1]))
 
 
+def _commit_limit_warning(records: tuple[dict[str, Any], ...]) -> str | None:
+    observed_commits = 0
+    for record in records:
+        if record.get("kind") != "timeline":
+            continue
+        value = _value(record)
+        if isinstance(value, dict) and value.get("event") == "committed":
+            observed_commits += 1
+    if observed_commits >= GITHUB_COMMIT_LIMIT:
+        return (
+            "Observed GitHub Timeline commit events reached 250 entries; this "
+            "section may be incomplete."
+        )
+    for record in records:
+        if record.get("kind") != "pull-request-payload":
+            continue
+        value = _value(record)
+        commits = value.get("commits") if isinstance(value, dict) else None
+        if (
+            isinstance(commits, int)
+            and not isinstance(commits, bool)
+            and commits > GITHUB_COMMIT_LIMIT
+        ):
+            return (
+                "GitHub may truncate PR commit history at 250 entries; this section "
+                "may be incomplete."
+            )
+    return None
+
+
+def _commit_section(
+    records: tuple[dict[str, Any], ...],
+    start: datetime,
+    end: datetime,
+    bucket: str,
+    timezone: tzinfo,
+    warn_without_commits: bool,
+    identity: GitHubIdentity | None,
+) -> list[str]:
+    commits: list[tuple[datetime, str, str, str, datetime | None, int]] = []
+    fallback_order = 0
+    for record in records:
+        if record.get("kind") != "timeline":
+            continue
+        value = _value(record)
+        if not isinstance(value, dict) or value.get("event") != "committed":
+            continue
+        author_date, committer_date = _commit_dates(value)
+        timestamp = committer_date or author_date
+        sha = _short_sha(value.get("sha"))
+        if timestamp is None or sha is None:
+            continue
+        if bucket == "activity" and not start <= timestamp < end:
+            continue
+        if bucket == "background" and not timestamp < start:
+            continue
+        message = value.get("message")
+        source_order = record.get("source_order")
+        order = source_order if isinstance(source_order, int) else fallback_order
+        fallback_order += 1
+        commits.append(
+            (
+                timestamp,
+                sha,
+                message if isinstance(message, str) else "",
+                _commit_author(value, identity),
+                author_date
+                if author_date is not None
+                and committer_date is not None
+                and author_date != committer_date
+                else None,
+                order,
+            )
+        )
+    warning = _commit_limit_warning(records)
+    if not commits and (warning is None or not warn_without_commits):
+        return []
+
+    lines = ["## Commits", ""]
+    if commits:
+        lines.extend(
+            [
+                "Commit placement uses Git committer time, falling back to author "
+                "time when absent. Differing author times are shown separately. "
+                "Neither timestamp is GitHub push time.",
+                "",
+            ]
+        )
+    for timestamp, sha, message, author, author_date, _order in sorted(
+        commits, key=lambda entry: entry[-1]
+    ):
+        rendered_time = format_timestamp(timestamp.isoformat(), timezone)
+        if rendered_time is None:
+            continue
+        lines.append(f"- {rendered_time} · `{sha}` · {author}")
+        if author_date is not None:
+            rendered_author_time = format_timestamp(author_date.isoformat(), timezone)
+            if rendered_author_time is not None:
+                lines.append(f"  Authored: {rendered_author_time}")
+        if message:
+            lines.extend(f"  {line}" if line else "" for line in message.split("\n"))
+        lines.append("")
+    if warning is not None:
+        lines.extend([warning, ""])
+    return lines
+
+
 def _activity(
     item: ContextItem, result: ContextExtractionResult, bucket: str
 ) -> list[str]:
+    assert item.github is not None
     entries = _event_entries(item, result, bucket)
-    if not entries:
-        return []
     lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
     for _, _, entry_lines in entries:
         lines.extend(entry_lines)
+    timezone = result.request.start.tzinfo
+    assert timezone is not None
+    lines.extend(
+        _commit_section(
+            item.github.records,
+            result.request.start,
+            result.request.end,
+            bucket,
+            timezone,
+            bucket == "activity",
+            item.github.tracked_identity,
+        )
+    )
+    if lines == [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]:
+        return []
     return lines
 
 
@@ -431,6 +630,18 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
     )
     title = value.get("title") or projection.title or "Untitled"
     lines = [f"# {projection.repository} {kind} #{projection.number} — {title}", ""]
+    lines.extend(
+        [
+            "## Tracked account",
+            "",
+            f"- GitHub: @{projection.tracked_login or 'unknown'}",
+            "- Git commit identities are marked `(tracked account)` only when they "
+            "match a locally synced identity profile.",
+            "- Activity and Background may include collaborators' work on tracked "
+            "Items; only explicitly marked actors are the tracked account.",
+            "",
+        ]
+    )
     author = _actor(value)
     if author:
         lines.append(f"- Author: {_actor_label(value, projection.tracked_login)}")

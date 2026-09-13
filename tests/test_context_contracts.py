@@ -39,7 +39,7 @@ def run(
     return CollectionRun(
         archive,
         source_kind,
-        "instance-1" if source_kind == "opencode" else "tracked-actor",
+        "instance-1" if source_kind == "opencode" else "actor-node",
         CollectionRange.parse(from_text, to_text),
         "test",
         effective_options or {},
@@ -230,6 +230,47 @@ def github_base(source_id: str = "PR_1", number: int = 1) -> dict[str, object]:
     }
 
 
+def write_github_profile(
+    archive: Archive,
+    login: str = "tracked-user",
+    *,
+    scope_id: str = "actor-node",
+    emails: list[str] | None = None,
+    email_pages: list[list[str]] | None = None,
+    profile: dict[str, object] | None = None,
+) -> Path:
+    profile_root = archive.root / "profiles" / "github" / encode_path_id(scope_id)
+    profile_root.mkdir(parents=True, exist_ok=True)
+    user = profile or {
+        "id": 123,
+        "login": login,
+        "node_id": scope_id,
+        "profile_field": "preserved",
+    }
+    pages = email_pages or [emails or ["private@example.com"]]
+    response_files = ["user.json"] + [
+        f"emails.{index:03d}.json" for index in range(1, len(pages) + 1)
+    ]
+    (profile_root / "profile.json").write_text(
+        json.dumps(
+            {
+                "format_version": 2,
+                "provider": "github",
+                "response_files": response_files,
+                "scope_id": scope_id,
+                "synced_at": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (profile_root / "user.json").write_text(json.dumps(user), encoding="utf-8")
+    for index, page in enumerate(pages, start=1):
+        (profile_root / f"emails.{index:03d}.json").write_text(
+            json.dumps([{"email": email} for email in page]), encoding="utf-8"
+        )
+    return profile_root
+
+
 def activity_evidence() -> dict[str, object]:
     return {
         "comments.001.json": [
@@ -292,17 +333,30 @@ def assert_outputs_equal(one: Path, two: Path) -> None:
 
 
 def github_output(
-    archive: Archive, tmp_path: Path, evidence: dict[str, object | str]
+    archive: Archive,
+    tmp_path: Path,
+    evidence: dict[str, object | str],
+    pull_request: dict[str, object] | None = None,
+    effective_options: dict[str, object] | None = None,
+    with_profile: bool = True,
 ) -> Path:
+    payload = {"node_id": "PR_1", **(pull_request or {})}
     publish_github(
         archive,
         "PR_1",
         {
             "issue.json": github_base(),
-            "pull-request.json": {"node_id": "PR_1"},
+            "pull-request.json": payload,
             **evidence,
         },
+        effective_options=effective_options,
     )
+    if with_profile:
+        profile_root = (
+            archive.root / "profiles" / "github" / encode_path_id("actor-node")
+        )
+        if not profile_root.exists():
+            write_github_profile(archive)
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     return output
@@ -357,7 +411,7 @@ def test_selection_chooses_first_observation_at_or_after_request_end(
             },
         )
 
-    result = extract_context(request(), load_archive(archive.root))
+    result = extract_context(request(), load_archive(archive.root), archive.root)
     item = result.items[0]
     assert item.snapshot.run["run_id"] == "first-future"
     assert item.opencode is not None
@@ -400,7 +454,7 @@ def test_selection_chooses_latest_observation_before_request_end(
             },
         )
 
-    result = extract_context(request(), load_archive(archive.root))
+    result = extract_context(request(), load_archive(archive.root), archive.root)
     assert result.items[0].snapshot.run["run_id"] == "latest"
 
 
@@ -540,7 +594,8 @@ def test_selection_contract_is_shared_by_github_and_opencode(
                 observation_window=window,
             )
 
-    result = extract_context(request(), load_archive(archive.root))
+    write_github_profile(archive)
+    result = extract_context(request(), load_archive(archive.root), archive.root)
     selected = {
         item.snapshot.manifest["source_kind"]: item.snapshot.run["run_id"]
         for item in result.items
@@ -692,7 +747,8 @@ def test_github_uses_natural_path_and_heading(tmp_path: Path) -> None:
     overview = text(output, "overview.md")
     assert "# example/project PR #1" in overview
     assert "PR_1" not in overview
-    assert "(tracked account)" not in overview
+    assert "## Tracked account" in overview
+    assert "locally synced identity profile" in overview
     assert "Tracked GitHub account:" not in (output / "index.md").read_text()
     assert "github/example/project" in (output / "index.md").read_text()
 
@@ -709,6 +765,7 @@ def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None
         },
         object_kind="issue",
     )
+    write_github_profile(archive)
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     overview = text(output, "overview.md")
@@ -961,6 +1018,474 @@ def test_future_github_events_are_absent_and_background_is_separate(
     assert "future" not in text(output, "activity.md")
 
 
+def test_commits_use_commit_time_buckets_and_preserve_full_messages(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "COMMIT_BEFORE",
+                    "event": "committed",
+                    "sha": "before123456789",
+                    "author": {"date": "2025-12-31T15:00:00Z"},
+                    "committer": {"date": "2025-12-31T15:30:00Z"},
+                    "message": "Before subject\n\nBefore body",
+                },
+                {
+                    "id": 2,
+                    "node_id": "COMMIT_DURING",
+                    "event": "committed",
+                    "sha": "during123456789",
+                    "author": {"date": "2026-01-01T02:00:00Z"},
+                    "committer": {"date": "2026-01-01T01:00:00Z"},
+                    "message": "During subject\n\nWhy and how",
+                },
+                {
+                    "id": 3,
+                    "node_id": "COMMIT_CUTOFF",
+                    "event": "committed",
+                    "sha": "cutoff123456789",
+                    "committer": {"date": "2026-01-02T00:00:00Z"},
+                    "message": "At cutoff",
+                },
+                {
+                    "id": 4,
+                    "node_id": "COMMIT_FUTURE",
+                    "event": "committed",
+                    "sha": "future123456789",
+                    "committer": {"date": "2026-01-02T01:00:00Z"},
+                    "message": "Future",
+                },
+            ]
+        },
+    )
+
+    activity = text(output, "activity.md")
+    background = text(output, "background.md")
+    assert "Commit placement uses Git committer time" in activity
+    assert activity.count("Commit placement uses Git committer time") == 1
+    assert "2026-01-01 09:00 · `during1` · unknown" in activity
+    assert (
+        "- 2026-01-01 09:00 · `during1` · unknown\n"
+        "  Authored: 2026-01-01 10:00\n"
+        "  During subject\n\n  Why and how"
+    ) in activity
+    assert "During subject" in activity and "Why and how" in activity
+    assert "before1" not in activity
+    assert "cutoff1" not in activity
+    assert "future1" not in activity
+    assert "Commit placement uses Git committer time" in background
+    assert "2025-12-31 23:30 · `before1` · unknown" in background
+    assert "Before subject" in background and "Before body" in background
+    assert "during1" not in background
+
+
+def test_commits_keep_timeline_order_and_show_author_identity_and_time(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(archive, emails=["Kai@Example.com", "private@example.com"])
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "COMMIT_Z",
+                    "event": "committed",
+                    "sha": "zzzzzzz1234567",
+                    "author": {
+                        "name": "Kai Yang",
+                        "email": "kai@example.com",
+                        "date": "2025-12-31T23:00:00Z",
+                    },
+                    "committer": {"name": "Rebaser", "date": "2026-01-01T01:00:00Z"},
+                    "message": (
+                        "First in Timeline\n\n"
+                        "Co-authored-by: Name <private@example.com>"
+                    ),
+                },
+                {
+                    "id": 2,
+                    "node_id": "COMMIT_A",
+                    "event": "committed",
+                    "sha": "aaaaaaa1234567",
+                    "author": {
+                        "name": "mubai",
+                        "email": "mubai@example.com",
+                        "date": "2026-01-01T01:00:00Z",
+                    },
+                    "committer": {"name": "mubai", "date": "2026-01-01T01:00:00Z"},
+                    "message": "Second in Timeline",
+                },
+                {
+                    "id": 3,
+                    "node_id": "COMMIT_SAME_NAME",
+                    "event": "committed",
+                    "sha": "same0001234567",
+                    "author": {
+                        "name": "Kai Yang",
+                        "email": "someone-else@example.com",
+                        "date": "2026-01-01T02:00:00Z",
+                    },
+                    "committer": {"name": "Rebaser", "date": "2026-01-01T02:00:00Z"},
+                    "message": "Same name, different identity",
+                },
+            ]
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    activity = text(output, "activity.md")
+    assert activity.index("zzzzz") < activity.index("aaaaaaa")
+    assert "Kai Yang (tracked account)" in activity
+    assert activity.count("Kai Yang (tracked account)") == 1
+    assert "`same000` · Kai Yang\n" in activity
+    assert "mubai" in activity
+    assert "kai@example.com" not in activity
+    assert "Co-authored-by: Name <private@example.com>" in activity
+    assert "Authored: 2026-01-01 07:00" in activity
+    assert "Commit placement uses Git committer time" in activity
+    assert "Neither timestamp is GitHub push time" in activity
+
+
+def test_commit_attribution_uses_email_evidence_and_stable_numeric_identity(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(
+        archive,
+        email_pages=[["first-page@example.com"], ["known@example.com"]],
+    )
+    commits = [
+        ("page-two", "known@example.com", "Page two email"),
+        ("modern", "123+renamed-user@users.noreply.github.com", "Modern"),
+        ("wrong", "999+tracked-user@users.noreply.github.com", "Wrong ID"),
+        ("legacy", "tracked-user@users.noreply.github.com", "Legacy"),
+        ("other", "other-user@users.noreply.github.com", "Other login"),
+        ("same-name", "unrelated@example.com", "Same Name"),
+    ]
+    timeline = [
+        {
+            "id": index,
+            "node_id": node_id,
+            "event": "committed",
+            "sha": f"{index:07d}1234567",
+            "author": {
+                "name": "Same Name",
+                "email": email,
+                "date": "2026-01-01T01:00:00Z",
+            },
+            "committer": {"name": "Same Name", "date": "2026-01-01T01:00:00Z"},
+            "message": label,
+        }
+        for index, (node_id, email, label) in enumerate(commits, start=1)
+    ]
+    output = github_output(
+        archive,
+        tmp_path,
+        {"timeline.001.json": timeline},
+        effective_options={"actor_login": "tracked-user"},
+    )
+    activity = text(output, "activity.md")
+    assert activity.count("Same Name (tracked account)") == 3
+    assert "Wrong ID" in activity and "Modern" in activity
+    assert "Modern" in activity
+    assert "Page two email" in activity
+    assert "Wrong ID" in activity
+    assert "`0000002`" in activity
+    assert "`0000004`" in activity
+    assert "`0000005`" in activity
+
+
+def test_github_context_with_profile_generates_normally(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(archive)
+    output = github_output(
+        archive,
+        tmp_path,
+        {"comments.001.json": []},
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    overview = text(output, "overview.md")
+    assert "## Tracked account" in overview
+    assert "- GitHub: @tracked-user" in overview
+
+
+def test_github_context_fails_when_profile_is_missing(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    profile_path = archive.root / "profiles" / "github" / encode_path_id("actor-node")
+
+    with pytest.raises(ContextError) as error:
+        github_output(
+            archive,
+            tmp_path,
+            {"comments.001.json": []},
+            effective_options={"actor_login": "tracked-user"},
+            with_profile=False,
+        )
+
+    message = str(error.value)
+    assert "source scope actor-node was not found" in message
+    assert str(profile_path) in message
+    assert "tracebase identity github sync --archive" in message
+    assert "private@example.com" not in message
+
+
+def test_github_context_fails_when_profile_json_is_invalid(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    profile_path = write_github_profile(archive)
+    (profile_path / "profile.json").write_text(
+        '{"response_files":["user.json"]', encoding="utf-8"
+    )
+    with pytest.raises(ContextError, match="is invalid") as error:
+        github_output(
+            archive,
+            tmp_path,
+            {"comments.001.json": []},
+            effective_options={"actor_login": "tracked-user"},
+        )
+    assert "private@example.com" not in str(error.value)
+
+
+def test_github_context_fails_when_profile_schema_is_invalid(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(
+        archive,
+        profile={"id": "not-an-id", "login": "tracked-user", "node_id": "actor-node"},
+    )
+
+    with pytest.raises(ContextError, match="is invalid") as error:
+        github_output(
+            archive,
+            tmp_path,
+            {"comments.001.json": []},
+            effective_options={"actor_login": "tracked-user"},
+        )
+    assert "private@example.com" not in str(error.value)
+
+
+def test_github_context_uses_stable_scope_when_login_changes(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(archive, login="current-user")
+    output = github_output(
+        archive,
+        tmp_path,
+        {"comments.001.json": []},
+        effective_options={"actor_login": "tracked-user"},
+    )
+    assert "- GitHub: @tracked-user" in text(output, "overview.md")
+
+
+def test_github_context_without_selected_items_does_not_require_profile(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_github(
+        archive,
+        "PR_1",
+        {
+            "issue.json": {
+                **github_base(),
+                "created_at": "2025-12-31T15:00:00Z",
+                "updated_at": "2025-12-31T15:00:00Z",
+            },
+            "pull-request.json": {"node_id": "PR_1"},
+            "comments.001.json": [],
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    assert files(output) == {"index.md"}
+
+
+def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "COMMIT_AUTHOR",
+                    "event": "committed",
+                    "sha": "author123456789",
+                    "author": {"date": "2026-01-01T03:00:00Z"},
+                    "message": "Author time",
+                },
+                {
+                    "id": 2,
+                    "node_id": "COMMIT_UNKNOWN",
+                    "event": "committed",
+                    "sha": "unknown12345678",
+                    "message": "Must not be guessed",
+                },
+            ]
+        },
+    )
+
+    activity = text(output, "activity.md")
+    assert "2026-01-01 11:00 · `author1` · unknown" in activity
+    assert "Authored:" not in activity
+    assert "Must not be guessed" not in activity
+
+
+def test_high_value_timeline_events_and_review_commit_are_rendered(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "FORCE",
+                    "event": "head_ref_force_pushed",
+                    "actor": {"login": "alice"},
+                    "created_at": "2026-01-01T04:00:00Z",
+                    "commit_id": "force123456789",
+                },
+                {
+                    "id": 2,
+                    "node_id": "RESTORED",
+                    "event": "head_ref_restored",
+                    "created_at": "2026-01-01T05:00:00Z",
+                    "ref": "feature",
+                },
+                {
+                    "id": 3,
+                    "node_id": "BASE",
+                    "event": "base_ref_changed",
+                    "created_at": "2026-01-01T06:00:00Z",
+                },
+                {
+                    "id": 4,
+                    "node_id": "RENAME",
+                    "event": "renamed",
+                    "created_at": "2026-01-01T07:00:00Z",
+                    "rename": {"from": "old title", "to": "new title"},
+                },
+                {
+                    "id": 5,
+                    "node_id": "DELETED",
+                    "event": "head_ref_deleted",
+                    "created_at": "2026-01-01T08:00:00Z",
+                },
+            ],
+            "reviews.001.json": [
+                {
+                    "id": 6,
+                    "user": {"login": "reviewer"},
+                    "submitted_at": "2026-01-01T09:00:00Z",
+                    "commit_id": "abcdef123456789",
+                    "state": "CHANGES_REQUESTED",
+                    "body": "Please revise this.",
+                }
+            ],
+        },
+    )
+
+    activity = text(output, "activity.md")
+    assert "Head ref force-pushed" in activity
+    assert "commit force1" in activity
+    assert "before" not in activity and "after" not in activity
+    assert "Head ref restored" in activity
+    assert "Base ref changed" in activity
+    assert "Renamed old title -> new title" in activity
+    assert (
+        "Review by @reviewer · 2026-01-01 17:00 · on abcdef1 (CHANGES_REQUESTED)"
+        in activity
+    )
+    assert "head_ref_deleted" not in activity
+
+
+def test_force_push_does_not_remove_existing_timeline_commit_and_warns_at_limit(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "node_id": "OLD_COMMIT",
+                    "event": "committed",
+                    "sha": "oldcommit123456",
+                    "committer": {"date": "2026-01-01T01:00:00Z"},
+                    "message": "Old commit retained",
+                },
+                {
+                    "id": 2,
+                    "node_id": "FORCE",
+                    "event": "head_ref_force_pushed",
+                    "created_at": "2026-01-01T02:00:00Z",
+                },
+            ]
+        },
+        pull_request={"commits": 251},
+    )
+
+    activity = text(output, "activity.md")
+    assert "Old commit retained" in activity
+    assert "GitHub may truncate PR commit history at 250 entries" in activity
+
+
+def test_observed_timeline_commit_limit_warns_without_pull_count(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": index,
+                    "node_id": f"COMMIT_{index}",
+                    "event": "committed",
+                    "sha": f"{index:07x}1234567",
+                    "committer": {"date": "2026-01-01T01:00:00Z"},
+                    "message": f"Commit {index}",
+                }
+                for index in range(250)
+            ]
+        },
+    )
+
+    activity = text(output, "activity.md")
+    assert "Observed GitHub Timeline commit events reached 250 entries" in activity
+
+
 def test_github_event_with_earlier_and_in_range_times_has_one_canonical_bucket(
     tmp_path: Path,
 ) -> None:
@@ -990,6 +1515,7 @@ def test_github_tracked_actor_is_annotated_without_hard_coding(
 ) -> None:
     tracked_archive = Archive(tmp_path / "tracked-archive")
     tracked_archive.root.mkdir()
+    write_github_profile(tracked_archive, "tracked-user")
     publish_github(
         tracked_archive,
         "PR_1",
@@ -1567,6 +2093,7 @@ def test_github_does_not_merge_later_body_comment_or_diff(
         },
     )
 
+    write_github_profile(archive)
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     overview = text(output, "overview.md")
