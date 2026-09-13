@@ -786,9 +786,9 @@ def test_context_records_explicit_browser_mode(
 
     context = resolve_context("headed")
 
-    assert modes == [(False, True)]
+    assert modes == [(False, False)]
     assert context.effective_options["browser_mode"] == "headed"
-    assert context.effective_options["browser_execution"] == "stealth-headed"
+    assert context.effective_options["browser_execution"] == "native-headed"
 
 
 def test_browser_verification_does_not_fallback_from_headless(

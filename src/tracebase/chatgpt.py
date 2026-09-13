@@ -270,7 +270,8 @@ class _Browser:
     def __init__(self, profile: Path, *, headless: bool, stealth: bool):
         self.profile = profile
         self.headless = headless
-        self.stealth = stealth
+        # Provider login pages should see a normal headed browser fingerprint.
+        self.stealth = stealth and headless
         self._lock: _ProfileLock | None = None
         self._playwright: Any = None
         self.context: _BrowserContext | None = None
@@ -854,7 +855,9 @@ def resolve_context(browser_mode: str = "headless") -> ChatGPTContext:
 
 def _resolve_context_with_browser(browser_mode: str) -> ChatGPTContext:
     with _Browser(
-        profile_path(), headless=browser_mode == "headless", stealth=True
+        profile_path(),
+        headless=browser_mode == "headless",
+        stealth=browser_mode == "headless",
     ) as browser:
         if browser.page is None:
             raise ChatGPTError("ChatGPT browser page is unavailable")
@@ -865,7 +868,9 @@ def _resolve_context_with_browser(browser_mode: str) -> ChatGPTContext:
         collector_version="0.1.0",
         effective_options={
             "browser_mode": browser_mode,
-            "browser_execution": f"stealth-{browser_mode}",
+            "browser_execution": (
+                "stealth-headless" if browser_mode == "headless" else "native-headed"
+            ),
             "discovery_limit": _DISCOVERY_LIMIT,
             "message_page_size": _NUM_TURNS,
         },
@@ -984,7 +989,9 @@ def _collect_with_browser(
     run: CollectionRun, reporter: ProgressReporter, browser_mode: str
 ) -> CollectionResult:
     with _Browser(
-        profile_path(), headless=browser_mode == "headless", stealth=True
+        profile_path(),
+        headless=browser_mode == "headless",
+        stealth=browser_mode == "headless",
     ) as browser:
         api = _authenticated_api(browser)
         return _collect_api(run, reporter, api)
