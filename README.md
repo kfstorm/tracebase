@@ -67,7 +67,7 @@ The profile is stored at:
 <archive>/profiles/github/<login>.json
 ```
 
-The profile is archive-level mutable metadata. It is not part of `runs/`, a snapshot, or evidence. It contains associated GitHub email addresses, so protect it with the same care as the Raw Archive. Skipping identity sync does not affect collection or Context generation; it only prevents Tracebase from using Git commit author email to determine whether a commit belongs to the tracked account. Context Output never renders these private email addresses.
+The profile is archive-level mutable metadata. It is not part of `runs/`, a snapshot, or evidence. It contains associated GitHub email addresses, so protect it with the same care as the Raw Archive. Skipping identity sync does not affect collection or Context generation when no GitHub items are included. If Context includes GitHub items, the matching profile must exist and be valid; otherwise generation fails with the sync command needed to create it. Context Output never renders these private email addresses.
 
 ### Collect OpenCode Sessions
 

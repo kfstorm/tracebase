@@ -230,6 +230,33 @@ def github_base(source_id: str = "PR_1", number: int = 1) -> dict[str, object]:
     }
 
 
+def write_github_profile(
+    archive: Archive,
+    login: str = "tracked-user",
+    *,
+    profile: dict[str, object] | None = None,
+) -> Path:
+    profile_path = archive.root / "profiles" / "github" / f"{login}.json"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(
+        json.dumps(
+            profile
+            or {
+                "provider": "github",
+                "login": login,
+                "numeric_id": 123,
+                "emails": ["private@example.com"],
+                "noreply_aliases": [
+                    f"123+{login}@users.noreply.github.com",
+                ],
+                "synced_at": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return profile_path
+
+
 def activity_evidence() -> dict[str, object]:
     return {
         "comments.001.json": [
@@ -1116,11 +1143,10 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
     assert "Neither timestamp is GitHub push time" in activity
 
 
-def test_github_overview_always_names_tracked_account_without_profile(
-    tmp_path: Path,
-) -> None:
+def test_github_context_with_profile_generates_normally(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
+    write_github_profile(archive)
     output = github_output(
         archive,
         tmp_path,
@@ -1131,11 +1157,122 @@ def test_github_overview_always_names_tracked_account_without_profile(
     overview = text(output, "overview.md")
     assert "## Tracked account" in overview
     assert "- GitHub: @tracked-user" in overview
-    assert (
-        "Git commit identities are marked `(tracked account)` only when they"
-        in overview
+
+
+def test_github_context_fails_when_profile_is_missing(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    profile_path = archive.root / "profiles" / "github" / "tracked-user.json"
+
+    with pytest.raises(ContextError) as error:
+        github_output(
+            archive,
+            tmp_path,
+            {"comments.001.json": []},
+            effective_options={"actor_login": "tracked-user"},
+        )
+
+    message = str(error.value)
+    assert "@tracked-user was not found" in message
+    assert str(profile_path) in message
+    assert "tracebase identity github sync --archive" in message
+    assert "private@example.com" not in message
+
+
+def test_github_context_fails_when_profile_json_is_invalid(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    profile_path = write_github_profile(archive)
+    profile_path.write_text('{"emails":["private@example.com"', encoding="utf-8")
+    with pytest.raises(ContextError, match="contains invalid JSON") as error:
+        github_output(
+            archive,
+            tmp_path,
+            {"comments.001.json": []},
+            effective_options={"actor_login": "tracked-user"},
+        )
+    assert "private@example.com" not in str(error.value)
+
+
+def test_github_context_fails_when_profile_schema_is_invalid(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    profile_path = write_github_profile(archive)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "provider": "github",
+                "login": "tracked-user",
+                "numeric_id": "not-an-id",
+                "emails": ["private@example.com"],
+                "noreply_aliases": [],
+                "synced_at": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
     )
-    assert "private" not in overview.lower()
+
+    with pytest.raises(ContextError, match="schema is invalid") as error:
+        github_output(
+            archive,
+            tmp_path,
+            {"comments.001.json": []},
+            effective_options={"actor_login": "tracked-user"},
+        )
+    assert "private@example.com" not in str(error.value)
+
+
+def test_github_context_fails_when_profile_login_does_not_match(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    profile_path = write_github_profile(
+        archive,
+        profile={
+            "provider": "github",
+            "login": "another-user",
+            "numeric_id": 123,
+            "emails": ["private@example.com"],
+            "noreply_aliases": [],
+            "synced_at": "2026-01-01T00:00:00Z",
+        },
+    )
+
+    with pytest.raises(ContextError, match="schema is invalid") as error:
+        github_output(
+            archive,
+            tmp_path,
+            {"comments.001.json": []},
+            effective_options={"actor_login": "tracked-user"},
+        )
+
+    assert str(profile_path) in str(error.value)
+    assert "private@example.com" not in str(error.value)
+
+
+def test_github_context_without_selected_items_does_not_require_profile(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_github(
+        archive,
+        "PR_1",
+        {
+            "issue.json": {
+                **github_base(),
+                "created_at": "2025-12-31T15:00:00Z",
+                "updated_at": "2025-12-31T15:00:00Z",
+            },
+            "pull-request.json": {"node_id": "PR_1"},
+            "comments.001.json": [],
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    assert files(output) == {"index.md"}
 
 
 def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
@@ -1335,6 +1472,7 @@ def test_github_tracked_actor_is_annotated_without_hard_coding(
 ) -> None:
     tracked_archive = Archive(tmp_path / "tracked-archive")
     tracked_archive.root.mkdir()
+    write_github_profile(tracked_archive, "tracked-user")
     publish_github(
         tracked_archive,
         "PR_1",

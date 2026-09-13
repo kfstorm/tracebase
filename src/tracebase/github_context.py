@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Any
 
 from .archive import ArchiveError, PublishedSnapshot
-from .github_identity import load_github_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +228,6 @@ def project_github(  # noqa: PLR0915
     selected_snapshot: PublishedSnapshot,
     start: datetime,
     end: datetime,
-    archive_root: str | None = None,
 ) -> GitHubProjection:
     """Project archived GitHub payloads without inferring causal history."""
     records: dict[tuple[str, str], dict[str, Any]] = {}
@@ -470,9 +468,6 @@ def project_github(  # noqa: PLR0915
     selected = [
         record for record in ordered if "in_range_work" in _roles(record, start, end)
     ]
-    identity = (
-        load_github_identity(archive_root, tracked_login) if archive_root else None
-    )
     return GitHubProjection(
         bool(selected),
         ordered,
@@ -484,5 +479,4 @@ def project_github(  # noqa: PLR0915
         number,
         title,
         tracked_login,
-        identity.commit_identities if identity is not None else frozenset(),
     )

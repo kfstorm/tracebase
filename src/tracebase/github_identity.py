@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -47,20 +48,7 @@ def normalize_email(value: Any) -> str | None:
     return normalized or None
 
 
-def load_github_identity(
-    archive_root: str | Path, login: str | None
-) -> GitHubIdentity | None:
-    if login is None:
-        return None
-    requested_login = login
-    try:
-        path = identity_profile_path(archive_root, login)
-    except ArchiveError:
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, UnicodeDecodeError, json.JSONDecodeError:
-        return None
+def _parse_identity(value: Any, requested_login: str) -> GitHubIdentity | None:
     if not isinstance(value, dict):
         return None
     login = value.get("login")
@@ -69,14 +57,17 @@ def load_github_identity(
     emails = value.get("emails")
     aliases = value.get("noreply_aliases")
     if (
-        not isinstance(login, str)
+        value.get("provider") != "github"
+        or not isinstance(login, str)
         or not login
         or login != requested_login
         or not isinstance(numeric_id, int)
         or isinstance(numeric_id, bool)
         or not isinstance(synced_at, str)
         or not isinstance(emails, list)
+        or not all(isinstance(email, str) for email in emails)
         or not isinstance(aliases, list)
+        or not all(isinstance(alias, str) for alias in aliases)
     ):
         return None
     normalized_emails = frozenset(
@@ -96,6 +87,49 @@ def load_github_identity(
         normalized_aliases,
         synced_at,
     )
+
+
+def _sync_command(archive_root: str | Path) -> str:
+    return "tracebase identity github sync --archive " + shlex.quote(
+        str(Path(archive_root))
+    )
+
+
+def require_github_identity(archive_root: str | Path, login: str) -> GitHubIdentity:
+    """Load one archive-bound profile or raise an actionable archive error."""
+    try:
+        path = identity_profile_path(archive_root, login)
+    except ArchiveError:
+        raise ArchiveError(
+            f"GitHub identity profile for @{login} has an invalid login.\n\n"
+            f"Run:\n  {_sync_command(archive_root)}"
+        ) from None
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise ArchiveError(
+            f"GitHub identity profile for @{login} was not found in this archive:\n"
+            f"  {path}\n\nRun:\n  {_sync_command(archive_root)}"
+        ) from None
+    except OSError, UnicodeDecodeError:
+        raise ArchiveError(
+            f"GitHub identity profile for @{login} could not be read:\n"
+            f"  {path}\n\nRun:\n  {_sync_command(archive_root)}"
+        ) from None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ArchiveError(
+            f"GitHub identity profile for @{login} contains invalid JSON:\n"
+            f"  {path}\n\nRun:\n  {_sync_command(archive_root)}"
+        ) from None
+    identity = _parse_identity(value, login)
+    if identity is None:
+        raise ArchiveError(
+            f"GitHub identity profile for @{login} schema is invalid:\n"
+            f"  {path}\n\nRun:\n  {_sync_command(archive_root)}"
+        )
+    return identity
 
 
 def _write_profile(archive_root: str | Path, login: str, value: dict[str, Any]) -> Path:

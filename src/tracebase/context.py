@@ -16,6 +16,7 @@ from .archive import (
     load_published_archive,
 )
 from .github_context import GitHubProjection, project_github
+from .github_identity import require_github_identity
 from .opencode_context import (
     OpenCodeProjection,
     project_opencode,
@@ -234,6 +235,33 @@ def _validate_context_source(snapshot: PublishedSnapshot) -> None:
         raise ContextError("unsupported context source")
 
 
+def _require_github_profiles(
+    items: list[ContextItem], archive_root: str | Path | None
+) -> dict[str, frozenset[str]]:
+    logins = sorted(
+        {
+            item.github.tracked_login
+            for item in items
+            if item.github is not None and item.github.tracked_login is not None
+        }
+    )
+    if not logins:
+        return {}
+    if archive_root is None:
+        raise ContextError(
+            "GitHub identity profiles require an archive path during Context extraction"
+        )
+    identities: dict[str, frozenset[str]] = {}
+    for login in logins:
+        try:
+            identities[login] = require_github_identity(
+                archive_root, login
+            ).commit_identities
+        except ArchiveError as error:
+            raise ContextError(str(error)) from None
+    return identities
+
+
 def extract_context(
     request: ContextRequest,
     runs: tuple[PublishedRun, ...],
@@ -254,7 +282,6 @@ def extract_context(
                     selected_snapshot,
                     request.start,
                     request.end,
-                    str(archive_root) if archive_root is not None else None,
                 )
                 if key[0] == "github"
                 else None
@@ -278,6 +305,21 @@ def extract_context(
             or (item.opencode.selected and item.opencode.parent_id is None)
         )
     ]
+    github_items = [item for item in all_items if item.github is not None]
+    github_identities = _require_github_profiles(github_items, archive_root)
+    for item_index, item in enumerate(all_items):
+        if item.github is None:
+            continue
+        assert item.github is not None
+        login = item.github.tracked_login
+        if login is None:
+            continue
+        identity = github_identities.get(login)
+        if identity is not None:
+            all_items[item_index] = replace(
+                item,
+                github=replace(item.github, tracked_commit_identities=identity),
+            )
     github_items = [item for item in all_items if item.github is not None]
     for item in github_items:
         assert item.github is not None
