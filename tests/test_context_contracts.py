@@ -799,6 +799,7 @@ def test_empty_output_has_only_useful_index_without_front_matter(
     assert files(output) == {"index.md"}
     index = (output / "index.md").read_text()
     assert "Requested interval" in index
+    assert "No OpenCode root sessions are available.\n\n## ChatGPT" in index
     assert "source_scope_id" not in index
     assert "coverage" not in index.lower()
 

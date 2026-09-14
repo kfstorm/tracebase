@@ -160,7 +160,7 @@ def _render_index(
                 f"({_link_list([path for path, _ in files])})"
             )
         lines.append("")
-    lines.extend(["## ChatGPT", ""])
+    lines.extend(["", "## ChatGPT", ""])
     chatgpt_items = [(item, files) for item, files in items if item.chatgpt is not None]
     if not chatgpt_items:
         lines.append("No ChatGPT conversations are available.")
