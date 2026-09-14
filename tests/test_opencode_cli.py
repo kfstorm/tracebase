@@ -112,7 +112,7 @@ from urllib.parse import parse_qs, urlparse
 
 arguments = sys.argv[1:]
 if arguments == ["--version"]:
-    print("1.18.29")
+    print("test-host-version")
 elif arguments == [
     "serve", "--hostname", "127.0.0.1", "--port", "0", "--log-level", "ERROR"
 ]:
@@ -243,7 +243,7 @@ else:
             ).read_bytes()
             metadata = json.loads((snapshot / "snapshot.json").read_text())["metadata"]
             assert metadata["export_command"] == ["opencode", "export", source_id]
-            assert metadata["opencode_version"] == "1.18.29"
+            assert metadata["opencode_version"] == "test-host-version"
             assert metadata["effective_options"] == {
                 "instance_id": "opaque-global-instance"
             }
@@ -462,7 +462,7 @@ else:
     ) -> None:
         monkeypatch.setattr(
             "tracebase.opencode._run_opencode",
-            lambda arguments: b"1.18.29",
+            lambda arguments: b"test-host-version",
         )
         monkeypatch.setattr(
             "tracebase.opencode._run_opencode_to_file",
