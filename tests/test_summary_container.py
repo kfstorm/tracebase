@@ -52,3 +52,12 @@ def test_ensure_image_does_not_build_existing_image(
     ensure_image(IMAGE, tmp_path / "Dockerfile", OPENCODE_VERSION)
 
     assert calls == [["docker", "image", "inspect", IMAGE]]
+
+
+def test_dockerfile_requires_an_explicit_opencode_version() -> None:
+    dockerfile = (
+        Path(__file__).parents[1] / "src/tracebase/container/Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    assert 'ARG OPENCODE_VERSION\n\nRUN test -n "$OPENCODE_VERSION" \\\n' in dockerfile
+    assert "ARG OPENCODE_VERSION=" not in dockerfile
