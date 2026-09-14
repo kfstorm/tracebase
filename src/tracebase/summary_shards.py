@@ -98,7 +98,10 @@ def _source_scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
 def _scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
     cleaned = scope.split(" (", 1)[0].strip()
     if cleaned.startswith("/context/"):
-        return ((cleaned.removeprefix("/context/").rstrip("/"), True),)
+        selector = cleaned.removeprefix("/context/").rstrip("/")
+        return (
+            (selector, not (selector == "chatgpt" or selector.startswith("chatgpt/"))),
+        )
     if cleaned.startswith(("github/", "opencode/", "chatgpt/", "misc:")):
         return _source_scope_selectors(cleaned)
     github_scope = _GITHUB_SCOPE.match(cleaned)

@@ -131,6 +131,16 @@ def _write_single_chatgpt_index(context_dir: Path) -> None:
     )
 
 
+def _write_chatgpt_index(context_dir: Path, *conversation_ids: str) -> None:
+    context_dir.mkdir()
+    lines = "".join(
+        f"- **{conversation_id}** [attribution mode: `personal`]("
+        f"chatgpt/conversation/{conversation_id}/overview.md)\n"
+        for conversation_id in conversation_ids
+    )
+    (context_dir / "index.md").write_text(lines, encoding="utf-8")
+
+
 def bind_runner_to_staging(runner: FakeRunner, parent: Path) -> None:
     original_run = runner.run
 
@@ -772,6 +782,98 @@ def test_shard_partition_rejects_chatgpt_attribution_mismatch(
     errors = inspect_shards(tmp_path, context_dir).errors
 
     assert any("attribution modes do not match Context" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ["/context/chatgpt", "/context/chatgpt/conversation"],
+)
+def test_shard_partition_rejects_broad_chatgpt_scope(
+    tmp_path: Path, scope: str
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "chatgpt",
+                "scope": scope,
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("scope does not match Context items" in error for error in errors)
+
+
+def test_shard_partition_allows_exact_chatgpt_scope_without_broad_match(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "foo",
+                "scope": "/context/chatgpt/conversation/foo",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "bar",
+                "scope": "/context/chatgpt/conversation/bar",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_exact_chatgpt_scope_rejects_similar_prefix(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_chatgpt_index(context_dir, "foo", "foo-extra")
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "foo",
+                "scope": "/context/chatgpt/conversation/foo",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "foo-extra",
+                "scope": "/context/chatgpt/conversation/foo-extra",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_allows_explicit_chatgpt_misc_scope(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "misc",
+                "scope": ("misc: chatgpt/conversation/foo, chatgpt/conversation/bar"),
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
 
 
 def test_shard_partition_resolves_mixed_misc_chatgpt_scope_exactly(
