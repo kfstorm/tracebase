@@ -7,6 +7,8 @@ import pytest
 from tracebase import cli
 from tracebase.context import ContextRequest
 from tracebase.summary import (
+    IMAGE,
+    OPENCODE_VERSION,
     SummaryError,
     SummaryRequest,
     fingerprint_context,
@@ -41,7 +43,9 @@ class FakeRunner:
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append(arguments)
         if "--version" in arguments:
-            return subprocess.CompletedProcess(arguments, 0, "1.18.29\n", "")
+            return subprocess.CompletedProcess(
+                arguments, 0, OPENCODE_VERSION + "\n", ""
+            )
         if "run" in arguments:
             if not self.recover or "--session" in arguments:
                 work = self.output / "work"
@@ -171,7 +175,7 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["model"] == "openai/model"
     assert manifest["variant"] == "high"
-    assert manifest["opencode_version"] == "1.18.29"
+    assert manifest["opencode_version"] == OPENCODE_VERSION
     assert manifest["task_sha256"]
     assert manifest["context_input"] == fingerprint_context(source)
     assert manifest["requested_interval"] == {
@@ -233,6 +237,38 @@ def test_summary_rejects_mixed_context_when_chatgpt_item_is_not_sharded(
         summarize(SummaryRequest(source, "model", None, output), runner)
 
     assert not output.exists()
+
+
+def test_summarize_uses_same_version_for_image_tag_and_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(tmp_path)
+    bind_runner_to_staging(runner, tmp_path)
+    builds: list[tuple[str, Path, str]] = []
+
+    monkeypatch.setattr("tracebase.summary.prepare_state", lambda *_args: "{}")
+    monkeypatch.setattr(
+        "tracebase.summary.ensure_image",
+        lambda image, dockerfile, opencode_version: builds.append(
+            (image, dockerfile, opencode_version)
+        ),
+    )
+    monkeypatch.setattr(
+        "tracebase.summary.ContainerRunner", lambda _image, _mounts: runner
+    )
+
+    summarize(SummaryRequest(source, "model", None, output))
+
+    assert f"tracebase-opencode:{OPENCODE_VERSION}" == IMAGE
+    assert builds == [
+        (
+            IMAGE,
+            Path(__file__).parents[1] / "src/tracebase/container/Dockerfile",
+            OPENCODE_VERSION,
+        )
+    ]
 
 
 def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> None:
