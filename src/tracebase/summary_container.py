@@ -112,7 +112,7 @@ class ContainerRunner:
         )
 
 
-def ensure_image(image: str, dockerfile: Path) -> None:
+def ensure_image(image: str, dockerfile: Path, opencode_version: str) -> None:
     """Build the pinned local image once when it is not already available."""
     try:
         inspected = subprocess.run(
@@ -132,6 +132,8 @@ def ensure_image(image: str, dockerfile: Path) -> None:
             image,
             "--file",
             str(dockerfile),
+            "--build-arg",
+            f"OPENCODE_VERSION={opencode_version}",
             str(dockerfile.parent),
         ],
         capture_output=True,

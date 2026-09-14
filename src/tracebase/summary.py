@@ -18,7 +18,8 @@ from .summary_container import ContainerMounts, ContainerRunner, ensure_image
 from .summary_opencode import prepare_config, prepare_state
 from .summary_shards import inspect_shards
 
-IMAGE = "tracebase-opencode:1.18.29"
+OPENCODE_VERSION = "1.18.29"
+IMAGE = f"tracebase-opencode:{OPENCODE_VERSION}"
 RECOVERY_PROMPT = (
     "Canonical result recovery: reread /work/TASK.md and /work/NOTES.md, "
     "inspect every declared /work/shards/*.md report, and write the complete "
@@ -293,7 +294,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         dockerfile = Path(__file__).parent / "container/Dockerfile"
         if runner is None:
             config = prepare_state(state, request.model)
-            ensure_image(IMAGE, dockerfile)
+            ensure_image(IMAGE, dockerfile, OPENCODE_VERSION)
             runner = ContainerRunner(
                 IMAGE, ContainerMounts(context, work, results, state, task=task)
             )

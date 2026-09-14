@@ -1,8 +1,9 @@
 FROM node:22-bookworm-slim
 
-ARG OPENCODE_VERSION=1.18.29
+ARG OPENCODE_VERSION
 
-RUN npm install --global "opencode-ai@${OPENCODE_VERSION}" \
+RUN test -n "$OPENCODE_VERSION" \
+    && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
     && mkdir -p /home/eval/.local/share/opencode \
     && chmod 0777 /home/eval/.local/share/opencode
 
