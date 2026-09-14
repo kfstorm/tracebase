@@ -157,7 +157,7 @@ def _text_parts(message: dict[str, Any]) -> str | None:
             return None
         if text:
             texts.append(text)
-    return "".join(texts) or None
+    return "\n\n".join(texts) or None
 
 
 def project_opencode(

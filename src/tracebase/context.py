@@ -219,7 +219,7 @@ def _opencode_path(directory: str, session_number: int) -> str:
 
 
 def _session_first_in_range(projection: OpenCodeProjection) -> datetime:
-    return projection.dialogue.activity[0].timestamp
+    return min(turn.timestamp for turn in projection.dialogue.activity)
 
 
 def _context_projection_supported(snapshot: PublishedSnapshot) -> bool:

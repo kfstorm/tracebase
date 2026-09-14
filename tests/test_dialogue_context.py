@@ -19,7 +19,12 @@ from tracebase.context import (
     generate_context,
     load_archive,
 )
-from tracebase.dialogue import DialogueTurn, project_dialogue, render_dialogue
+from tracebase.dialogue import (
+    DialogueTurn,
+    project_dialogue,
+    render_dialogue,
+    write_dialogue_markdown,
+)
 from tracebase.opencode_context import project_opencode
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
@@ -173,6 +178,73 @@ def test_opencode_projects_text_only_and_uses_message_created_time() -> None:
     assert projection is not None
     assert [turn.text for turn in projection.dialogue.activity] == ["visible"]
     assert [turn.text for turn in projection.dialogue.background] == ["background"]
+
+
+def test_opencode_multiple_text_parts_preserve_boundaries_in_markdown(
+    tmp_path: Path,
+) -> None:
+    projection = project_opencode(
+        opencode_snapshot(
+            [
+                {
+                    "id": "current",
+                    "role": "user",
+                    "created": "2026-01-01T01:00:00Z",
+                    "parts": [
+                        {"type": "text", "text": "first text"},
+                        {"type": "tool", "tool": "bash"},
+                        {"type": "text", "text": "second text"},
+                    ],
+                }
+            ]
+        ),
+        START,
+        END,
+    )
+
+    assert projection is not None
+    assert [turn.text for turn in projection.dialogue.activity] == [
+        "first text\n\nsecond text"
+    ]
+    path = tmp_path / "activity.md"
+    write_dialogue_markdown(
+        path, render_dialogue(projection.dialogue, "activity", UTC, "personal")
+    )
+    assert path.read_text() == (
+        "# Activity\n\n"
+        "Attribution mode: `personal`\n\n"
+        "**User · 2026-01-01 01:00**\n\n"
+        "first text\n\nsecond text\n"
+    )
+
+
+def test_opencode_transcript_preserves_source_order_over_timestamp_order() -> None:
+    projection = project_opencode(
+        opencode_snapshot(
+            [
+                {
+                    "id": "first-in-source",
+                    "role": "assistant",
+                    "created": "2026-01-01T02:00:00Z",
+                    "parts": [{"type": "text", "text": "source first"}],
+                },
+                {
+                    "id": "second-in-source",
+                    "role": "user",
+                    "created": "2026-01-01T01:00:00Z",
+                    "parts": [{"type": "text", "text": "source second"}],
+                },
+            ]
+        ),
+        START,
+        END,
+    )
+
+    assert projection is not None
+    assert [turn.text for turn in projection.dialogue.activity] == [
+        "source first",
+        "source second",
+    ]
 
 
 def test_opencode_tool_only_activity_does_not_select_session() -> None:

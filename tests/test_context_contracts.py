@@ -41,11 +41,12 @@ def run(
     from_text: str = "2026-01-01T00:00:00+08:00",
     to_text: str = "2026-01-02T00:00:00+08:00",
     effective_options: dict[str, object] | None = None,
+    instance_id: str | None = None,
 ) -> CollectionRun:
     return CollectionRun(
         archive,
         source_kind,
-        "instance-1" if source_kind == "opencode" else "actor-node",
+        instance_id or ("instance-1" if source_kind == "opencode" else "actor-node"),
         CollectionRange.parse(from_text, to_text),
         "test",
         effective_options or {},
@@ -129,6 +130,7 @@ def publish_opencode(
     from_text: str | None = None,
     to_text: str | None = None,
     observation_window: dict[str, str] | None = None,
+    instance_id: str | None = None,
 ) -> None:
     current = run(
         archive,
@@ -145,6 +147,7 @@ def publish_opencode(
             if run_id == "child-run"
             else "2026-01-02T00:00:00+08:00"
         ),
+        instance_id=instance_id,
     )
     session_id = str(payload["id"])
     snapshot = current.write_snapshot(
@@ -2642,7 +2645,7 @@ def test_historical_tool_outcomes_are_not_rendered(
     assert not list(output.rglob("activity.md"))
 
 
-def test_opencode_cutoff_hides_later_text_when_tools_are_removed(
+def test_opencode_message_text_uses_created_time_for_all_text_parts(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -2683,11 +2686,49 @@ def test_opencode_cutoff_hides_later_text_when_tools_are_removed(
     ]
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T14:00:00Z")
 
-    assert "retained text" in activity
-    assert "future text" in activity
+    # Part-level timestamps do not split a message; message created time places
+    # every retained text part in the same dialogue turn.
+    assert "retained text\n\nfuture text" in activity
     assert "future task result" not in activity
     assert "future task error" not in activity
     assert "future answer" not in activity
+
+
+def test_opencode_session_order_uses_earliest_activity_timestamp(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session(
+            "alpha",
+            messages=[
+                message("alpha-source-first", "2026-01-01T02:00:00Z"),
+                message("alpha-earliest", "2026-01-01T01:00:00Z"),
+            ],
+        ),
+        "alpha-run",
+        instance_id="instance-alpha",
+    )
+    publish_opencode(
+        archive,
+        session(
+            "beta",
+            messages=[message("beta-first", "2026-01-01T01:30:00Z")],
+        ),
+        "beta-run",
+        instance_id="instance-beta",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    root = "opencode/home/tester/dev/example/project/session"
+    assert (output / f"{root}/01/overview.md").exists()
+    assert (output / f"{root}/02/overview.md").exists()
+    assert "alpha-earliest" in (output / f"{root}/01/activity.md").read_text()
+    assert "beta-first" in (output / f"{root}/02/activity.md").read_text()
 
 
 def test_opencode_in_range_tool_keeps_earlier_text_in_background(
