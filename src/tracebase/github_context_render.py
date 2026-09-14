@@ -265,6 +265,18 @@ def _object_events(
     ]
 
 
+def _object_event_is_user_work(
+    record: dict[str, Any],
+    event: str,
+    user_work_ids: frozenset[tuple[str, str]],
+) -> bool:
+    """Attribute only object creation; updated_at has no actor provenance."""
+    return (
+        event == "created"
+        and (str(record.get("kind")), str(record.get("native_id"))) in user_work_ids
+    )
+
+
 def _review_lines(
     value: dict[str, Any],
     timezone: tzinfo,
@@ -467,7 +479,7 @@ def _event_entries(  # noqa: PLR0915
                 rendered_time = format_timestamp(timestamp.isoformat(), timezone)
                 if rendered_time is not None:
                     attribution = _attribution(
-                        (kind, str(record.get("native_id"))) in user_work_ids
+                        _object_event_is_user_work(record, event, user_work_ids)
                     )
                     entries.append(
                         (

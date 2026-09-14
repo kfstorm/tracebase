@@ -92,8 +92,10 @@ partition: every projected Context item belongs to exactly one shard, no item
 belongs to two shards, and sources without a Context projector do not enter this
 partition. A repository or `misc` shard may resolve to multiple items. Use exact
 canonical paths in `scope` where practical, for example
-`github/owner/repository` or a comma-separated list of canonical item paths for
-`misc`; do not rely on human interpretation of a scope description.
+`github/owner/repository` or `github/owner/repository/issue/{1,2}`. Brace
+scopes are exact sets of the listed item paths, not wildcards; a comma-separated
+`misc` scope may combine such exact sets across sources. Do not rely on human
+interpretation of a scope description.
 
 For each shard, preserve the complete assigned Context evidence while making a
 user-work projection from the attribution annotation on each record. A GitHub

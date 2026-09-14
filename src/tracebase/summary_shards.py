@@ -23,6 +23,8 @@ _CONTEXT_LINK = re.compile(r"\]\(([^)]+)\)")
 _CONTEXT_ROOT = re.compile(r"(?:github|opencode)/[A-Za-z0-9._/-]+")
 _GITHUB_SCOPE = re.compile(r"(?:GitHub )?repository (?P<repo>[^,;:]+)")
 _OPENCODE_SCOPE = re.compile(r"OpenCode(?: project)? (?P<project>[^:;]+)")
+_BRACE_SCOPE = re.compile(r"(?P<prefix>[^{}]+?)/\{(?P<items>[^{}]+)\}\Z")
+_GITHUB_REPOSITORY_SEPARATOR_COUNT = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,29 +59,70 @@ def _context_items(index_lines: tuple[str, ...]) -> dict[str, str]:
     return items
 
 
-def _scope_prefixes(scope: str) -> tuple[str, ...]:
+def _scope_parts(scope: str) -> tuple[str, ...]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(scope):
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth = max(depth - 1, 0)
+        elif character == "," and depth == 0:
+            parts.append(scope[start:index].strip())
+            start = index + 1
+    parts.append(scope[start:].strip())
+    return tuple(part for part in parts if part)
+
+
+def _source_scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
+    selectors: list[tuple[str, bool]] = []
+    for part in _scope_parts(scope.removeprefix("misc:").strip()):
+        match = _BRACE_SCOPE.fullmatch(part)
+        if match is not None:
+            prefix = match.group("prefix").rstrip("/")
+            selectors.extend(
+                (f"{prefix}/{item.strip()}", False)
+                for item in match.group("items").split(",")
+                if item.strip()
+            )
+            continue
+        path = part.rstrip("/")
+        is_broad = (
+            path.startswith("github/")
+            and path.count("/") == _GITHUB_REPOSITORY_SEPARATOR_COUNT
+        ) or (path.startswith("opencode/") and "/session/" not in path)
+        selectors.append((path, is_broad))
+    return tuple(selectors)
+
+
+def _scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
     cleaned = scope.split(" (", 1)[0].strip()
     if cleaned.startswith("/context/"):
-        return (cleaned.removeprefix("/context/").split("/{", 1)[0],)
-    if cleaned.startswith(("github/", "opencode/")):
-        if "," in cleaned:
-            return tuple(_CONTEXT_ROOT.findall(cleaned))
-        return (cleaned.split("/{", 1)[0].rstrip("/"),)
+        return ((cleaned.removeprefix("/context/").rstrip("/"), True),)
+    if cleaned.startswith(("github/", "opencode/", "misc:")):
+        return _source_scope_selectors(cleaned)
     github_scope = _GITHUB_SCOPE.match(cleaned)
     if github_scope is not None:
-        return (f"github/{github_scope.group('repo').strip()}",)
+        return ((f"github/{github_scope.group('repo').strip()}", True),)
     opencode_scope = _OPENCODE_SCOPE.match(cleaned)
     if opencode_scope is not None:
-        return (f"opencode{opencode_scope.group('project').strip()}",)
-    return tuple(_CONTEXT_ROOT.findall(cleaned))
+        return ((f"opencode{opencode_scope.group('project').strip()}", True),)
+    selectors: list[tuple[str, bool]] = []
+    for part in _scope_parts(cleaned):
+        selectors.extend(_source_scope_selectors(part))
+    return tuple(selectors)
 
 
 def _scope_items(scope: str, item_roots: set[str]) -> frozenset[str]:
-    prefixes = _scope_prefixes(scope)
+    selectors = _scope_selectors(scope)
     return frozenset(
         root
         for root in item_roots
-        if any(root == prefix or root.startswith(f"{prefix}/") for prefix in prefixes)
+        if any(
+            root == selector or (broad and root.startswith(f"{selector}/"))
+            for selector, broad in selectors
+        )
     )
 
 

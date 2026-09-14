@@ -362,6 +362,7 @@ def github_output(
     tmp_path: Path,
     evidence: dict[str, object | str],
     pull_request: dict[str, object] | None = None,
+    object_kind: str = "pull-request",
     effective_options: dict[str, object] | None = None,
     with_profile: bool = True,
 ) -> Path:
@@ -374,6 +375,7 @@ def github_output(
             "pull-request.json": payload,
             **evidence,
         },
+        object_kind=object_kind,
         effective_options=effective_options,
     )
     if with_profile:
@@ -868,6 +870,44 @@ def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None
     assert "github/example/project/issue/7/overview.md" in files(output)
     assert "Author: @author" in overview
     assert "Actor" not in overview
+
+
+@pytest.mark.parametrize(
+    "object_kind, object_name", [("issue", "Issue"), ("pull-request", "PR")]
+)
+@pytest.mark.parametrize(
+    "author, created_attribution",
+    [("tracked-user", "[User work]"), ("collaborator", "[Context only]")],
+)
+def test_github_object_updated_event_has_no_actor_provenance(
+    tmp_path: Path,
+    object_kind: str,
+    object_name: str,
+    author: str,
+    created_attribution: str,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(archive)
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "issue.json": {
+                **github_base(),
+                "user": {"login": author},
+                "created_at": "2026-01-01T00:30:00Z",
+                "updated_at": "2026-01-01T01:00:00Z",
+            }
+        },
+        object_kind=object_kind,
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    activity = text(output, "activity.md")
+
+    assert f"{object_name} created · {created_attribution}" in activity
+    assert f"{object_name} updated · [Context only]" in activity
 
 
 def test_comment_aliases_render_once_and_equal_bodies_remain_distinct(
