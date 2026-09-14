@@ -12,6 +12,22 @@ activity present in Context. Apply the source attribution mode shown in
   commit authors. Repository ownership, Item inclusion, PR or Issue presence,
   merge status, and authorship by collaborators are not ownership evidence.
 
+ChatGPT conversations are the user's personal work evidence, but assistant text
+itself does not prove that real-world implementation, execution, deployment, or
+validation happened. Distinguish the completion supported by the conversation,
+such as discussion or exploration, investigation, design or decision, a plan or
+proposed change, an implementation claim, or a validation/result. An assistant
+proposal, command, patch, plan, or conclusion is not by itself evidence that the
+user actually performed, submitted, deployed, or validated it. User text,
+explicit assistant reports of actual work or results, and cross-source evidence
+may support a stronger completion state when the evidence warrants it.
+
+This same caution applies to text-only OpenCode. Tool, task, and other non-text
+evidence is not in conversational Context, so a proposal cannot establish
+execution. An explicit assistant report of actual execution or test results is
+conversation evidence and may be interpreted according to its strength. Do not
+weaken the existing `actor_scoped` GitHub attribution rules.
+
 Collaborator evidence may explain the user's own action or the resulting state,
 but it is context-only evidence. It must not itself become Summary content. Do
 not summarize or enumerate collaborator implementation, commits, findings,
@@ -78,12 +94,36 @@ final synthesizer. The Context Output remains the only permitted evidence
 source. Do not replace this protocol with a single root traversal of all
 Context files.
 
+OpenCode and ChatGPT conversational Context share these activity semantics:
+
+- `activity.md` contains the retained user/assistant text whose timestamp falls
+  in the requested `[from,to)` interval; it is candidate work evidence for that
+  interval.
+- `background.md` contains only bounded earlier dialogue used to explain that
+  activity. Background cannot independently create a requested-interval
+  workstream.
+- Later dialogue is not included in conversational Context.
+- A conversation or session appears in Context only when it has at least one
+  in-range retained text activity.
+
+Do not reintroduce tool, task, non-text, or other temporal semantics for these
+sources. In particular, do not look for internal structures such as
+`temporal_roles` that are not part of conversational Context.
+
 After reading `index.md`, build a stable shard inventory before investigating
 individual evidence. Group OpenCode evidence by `project_directory`; group
-GitHub evidence by `repository`. Small groups may be combined into one `misc`
-shard. Do not create a cross-source relationship from time proximity, similar
-names, or adjacent evidence. Combine scopes only when the index establishes
-that they are one group.
+GitHub evidence by `repository`.
+Each ChatGPT conversation is an independent projected Context item. By default,
+use one ChatGPT conversation per shard. Multiple small conversations may be
+combined into a `misc` shard, but
+only with the exact canonical conversation roots from the index. ChatGPT
+canonical roots have the form `chatgpt/conversation/<encoded-id>`; do not try to
+understand or decode `<encoded-id>`. Small groups may be combined into one
+`misc` shard. Do not create a relationship between conversations, or between
+ChatGPT and GitHub/OpenCode, merely because titles, content, or timestamps are
+similar or close. Do not create a cross-source relationship from time proximity
+or similar names. The reduce phase may merge evidence into one real workstream
+when the evidence explicitly establishes that relationship.
 
 Parse the canonical projected Context item roots from `/context/index.md` (the
 directory containing each linked `overview.md`) and resolve every declared shard
@@ -92,7 +132,8 @@ partition: every projected Context item belongs to exactly one shard, no item
 belongs to two shards, and sources without a Context projector do not enter this
 partition. A repository or `misc` shard may resolve to multiple items. Use exact
 canonical paths in `scope` where practical, for example
-`github/owner/repository` or `github/owner/repository/issue/{1,2}`. Brace
+`github/owner/repository`, `github/owner/repository/issue/{1,2}`, or
+`chatgpt/conversation/<encoded-id>`. Brace
 scopes are exact sets of the listed item paths, not wildcards; a comma-separated
 `misc` scope may combine such exact sets across sources. Do not rely on human
 interpretation of a scope description.

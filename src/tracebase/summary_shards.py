@@ -20,7 +20,6 @@ _CONTEXT_ONLY_SECTION = "## Context-only evidence"
 _ATTRIBUTION_MODE_VALUES = {mode.value for mode in AttributionMode}
 _ATTRIBUTION_MODE = re.compile(r"attribution mode: `([^`]+)`")
 _CONTEXT_LINK = re.compile(r"\]\(([^)]+)\)")
-_CONTEXT_ROOT = re.compile(r"(?:github|opencode)/[A-Za-z0-9._/-]+")
 _GITHUB_SCOPE = re.compile(r"(?:GitHub )?repository (?P<repo>[^,;:]+)")
 _OPENCODE_SCOPE = re.compile(r"OpenCode(?: project)? (?P<project>[^:;]+)")
 _BRACE_SCOPE = re.compile(r"(?P<prefix>[^{}]+?)/\{(?P<items>[^{}]+)\}\Z")
@@ -100,7 +99,7 @@ def _scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
     cleaned = scope.split(" (", 1)[0].strip()
     if cleaned.startswith("/context/"):
         return ((cleaned.removeprefix("/context/").rstrip("/"), True),)
-    if cleaned.startswith(("github/", "opencode/", "misc:")):
+    if cleaned.startswith(("github/", "opencode/", "chatgpt/", "misc:")):
         return _source_scope_selectors(cleaned)
     github_scope = _GITHUB_SCOPE.match(cleaned)
     if github_scope is not None:

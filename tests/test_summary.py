@@ -24,11 +24,13 @@ class FakeRunner:
         recover: bool = False,
         incomplete: bool = False,
         missing_context_section: bool = False,
+        shards: list[dict[str, object]] | None = None,
     ) -> None:
         self.output = output
         self.recover = recover
         self.incomplete = incomplete
         self.missing_context_section = missing_context_section
+        self.shards = shards
         self.calls: list[list[str]] = []
 
     def run(
@@ -44,15 +46,25 @@ class FakeRunner:
             if not self.recover or "--session" in arguments:
                 work = self.output / "work"
                 (work / "shards").mkdir(exist_ok=True)
-                (work / "shards/repo.md").write_text(
-                    "## User work\n\nevidence\n"
-                    + (
-                        ""
-                        if self.missing_context_section
-                        else "\n## Context-only evidence\n\nNone.\n"
-                    ),
-                    encoding="utf-8",
-                )
+                shard_specs = self.shards or [
+                    {
+                        "id": "repo",
+                        "scope": "/context/repo",
+                        "attribution_modes": ["personal"],
+                    }
+                ]
+                for shard in shard_specs:
+                    shard_id = shard["id"]
+                    assert isinstance(shard_id, str)
+                    (work / f"shards/{shard_id}.md").write_text(
+                        "## User work\n\nevidence\n"
+                        + (
+                            ""
+                            if self.missing_context_section
+                            else "\n## Context-only evidence\n\nNone.\n"
+                        ),
+                        encoding="utf-8",
+                    )
                 status = "failed" if self.incomplete else "complete"
                 (work / "NOTES.md").write_text(
                     "<!-- SHARD_STATUS_BEGIN -->\n"
@@ -60,13 +72,12 @@ class FakeRunner:
                         {
                             "shards": [
                                 {
-                                    "id": "repo",
-                                    "scope": "/context/repo",
-                                    "attribution_modes": ["personal"],
+                                    **shard,
                                     "status": status,
                                     "retry_count": 0,
-                                    "report": "/work/shards/repo.md",
+                                    "report": f"/work/shards/{shard['id']}.md",
                                 }
+                                for shard in shard_specs
                             ]
                         }
                     )
@@ -93,6 +104,31 @@ def context(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return result
+
+
+def multi_source_context(tmp_path: Path) -> Path:
+    result = tmp_path / "context"
+    result.mkdir()
+    (result / "index.md").write_text(
+        "# Context Output\n\n"
+        "Requested interval: `2026-01-01T01:00:00+01:00 <= t < "
+        "2026-01-01T03:00:00+01:00`\n"
+        "- **OpenCode session** [attribution mode: `personal`]("
+        "opencode/home/work/project/session/01/overview.md)\n"
+        "- **ChatGPT conversation** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        encoding="utf-8",
+    )
+    return result
+
+
+def _write_single_chatgpt_index(context_dir: Path) -> None:
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **conversation** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        encoding="utf-8",
+    )
 
 
 def bind_runner_to_staging(runner: FakeRunner, parent: Path) -> None:
@@ -138,10 +174,62 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     assert len(runner.calls) == 2
 
 
+def test_summary_publishes_mixed_opencode_and_chatgpt_context_partition(
+    tmp_path: Path,
+) -> None:
+    source = multi_source_context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path / ".unused",
+        shards=[
+            {
+                "id": "opencode",
+                "scope": "opencode/home/work/project/session/01",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "chatgpt",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    published = summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert published == output
+    assert (output / "summary.md").read_text() == "# Work summary\n"
+
+
+def test_summary_rejects_mixed_context_when_chatgpt_item_is_not_sharded(
+    tmp_path: Path,
+) -> None:
+    source = multi_source_context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path / ".unused",
+        shards=[
+            {
+                "id": "opencode",
+                "scope": "opencode/home/work/project/session/01",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="shard protocol"):
+        summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert not output.exists()
+
+
 def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> None:
     prompt = (
         Path(__file__).parents[1] / "src/tracebase/prompts/summarizer-v1.md"
     ).read_text(encoding="utf-8")
+    normalized_prompt = " ".join(prompt.split())
 
     assert "final Summary is a projection of the user's work" in prompt
     assert "`personal`" in prompt and "`actor_scoped`" in prompt
@@ -152,6 +240,29 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     assert "## Context-only evidence" in prompt
     assert "Only `User work` may be promoted" in prompt
     assert "Repository ownership" in prompt
+    assert (
+        "Each ChatGPT conversation is an independent projected Context item"
+        in normalized_prompt
+    )
+    assert "exact canonical conversation roots" in normalized_prompt
+    assert (
+        "Do not create a cross-source relationship from time proximity"
+        in normalized_prompt
+    )
+    assert (
+        "reduce phase" in normalized_prompt and "real workstream" in normalized_prompt
+    )
+    assert "`activity.md`" in normalized_prompt
+    assert "`background.md`" in normalized_prompt
+    assert (
+        "Background cannot independently create a requested-interval workstream"
+        in normalized_prompt
+    )
+    assert "Later dialogue" in normalized_prompt
+    assert "assistant text itself does not prove" in normalized_prompt
+    assert "assistant proposal" in normalized_prompt
+    assert "implementation, execution, deployment" in normalized_prompt
+    assert "validation happened" in normalized_prompt
 
 
 def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:
@@ -561,6 +672,163 @@ def test_shard_partition_resolves_mixed_misc_brace_scope_exactly(
             {
                 "id": "remaining",
                 "scope": "opencode/work/project/session/{05}",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_allows_exact_chatgpt_conversation_scope(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_single_chatgpt_index(context_dir)
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "conversation",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_rejects_uncovered_chatgpt_conversation(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n"
+        "- **two** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-beta/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("cgpt-beta" in error and "not covered" in error for error in errors)
+
+
+def test_shard_partition_rejects_overlapping_chatgpt_conversation(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_single_chatgpt_index(context_dir)
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "first",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "second",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("covered by multiple shards" in error for error in errors)
+
+
+def test_shard_partition_rejects_chatgpt_attribution_mismatch(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_single_chatgpt_index(context_dir)
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "conversation",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("attribution modes do not match Context" in error for error in errors)
+
+
+def test_shard_partition_resolves_mixed_misc_chatgpt_scope_exactly(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **issue** [attribution mode: `actor_scoped`]("
+        "github/acme/project/pull/1/overview.md)\n"
+        "- **session** [attribution mode: `personal`]("
+        "opencode/home/work/project/session/01/overview.md)\n"
+        "- **conversation** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "misc",
+                "scope": (
+                    "misc: github/acme/project/pull/1, "
+                    "opencode/home/work/project/session/01, "
+                    "chatgpt/conversation/cgpt-alpha"
+                ),
+                "attribution_modes": ["actor_scoped", "personal"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_does_not_match_chatgpt_root_prefixes(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **short** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n"
+        "- **long** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha-extended/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "short",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "long",
+                "scope": "chatgpt/conversation/cgpt-alpha-extended",
                 "attribution_modes": ["personal"],
             },
         ],
