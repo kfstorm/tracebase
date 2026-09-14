@@ -20,6 +20,7 @@ from tracebase.context import (
     load_archive,
 )
 from tracebase.dialogue import (
+    DialogueTranscript,
     DialogueTurn,
     project_dialogue,
     render_dialogue,
@@ -118,6 +119,29 @@ def opencode_snapshot(messages: list[dict[str, object]]) -> PublishedSnapshot:
     )
 
 
+def write_activity(path: Path, transcript: DialogueTranscript) -> None:
+    write_dialogue_markdown(
+        path, render_dialogue(transcript, "activity", UTC, "personal")
+    )
+
+
+def assert_activity_markdown(path: Path, expected_text: str) -> None:
+    assert path.read_text() == (
+        "# Activity\n\n"
+        "Attribution mode: `personal`\n\n"
+        "**User · 2026-01-01 01:00**\n\n"
+        f"{expected_text}\n"
+    )
+
+
+def assert_activity_output(
+    path: Path, transcript: DialogueTranscript, expected_text: str
+) -> None:
+    assert [turn.text for turn in transcript.activity] == [expected_text]
+    write_activity(path, transcript)
+    assert_activity_markdown(path, expected_text)
+
+
 def test_shared_dialogue_has_half_open_buckets_and_bounded_background() -> None:
     turns = [
         DialogueTurn("user", datetime(2025, 12, 1, tzinfo=UTC), "old-1"),
@@ -203,19 +227,8 @@ def test_opencode_multiple_text_parts_preserve_boundaries_in_markdown(
     )
 
     assert projection is not None
-    assert [turn.text for turn in projection.dialogue.activity] == [
-        "first text\n\nsecond text"
-    ]
     path = tmp_path / "activity.md"
-    write_dialogue_markdown(
-        path, render_dialogue(projection.dialogue, "activity", UTC, "personal")
-    )
-    assert path.read_text() == (
-        "# Activity\n\n"
-        "Attribution mode: `personal`\n\n"
-        "**User · 2026-01-01 01:00**\n\n"
-        "first text\n\nsecond text\n"
-    )
+    assert_activity_output(path, projection.dialogue, "first text\n\nsecond text")
 
 
 def test_opencode_transcript_preserves_source_order_over_timestamp_order() -> None:
@@ -291,6 +304,65 @@ def test_chatgpt_reconstructs_oldest_to_detail_without_timestamp_sort() -> None:
         "latest",
     ]
     assert [turn.text for turn in projection.dialogue.background] == ["old"]
+
+
+def test_chatgpt_multiple_string_parts_preserve_boundaries_in_activity(
+    tmp_path: Path,
+) -> None:
+    projection = project_chatgpt(
+        chat_snapshot(
+            [
+                chat_message(
+                    "parts",
+                    1767229200,
+                    parts=["first text", "second text"],
+                )
+            ]
+        ),
+        START,
+        END,
+    )
+
+    assert projection is not None
+    path = tmp_path / "activity.md"
+    assert_activity_output(path, projection.dialogue, "first text\n\nsecond text")
+
+    empty_middle = project_chatgpt(
+        chat_snapshot(
+            [
+                chat_message(
+                    "empty-middle",
+                    1767229200,
+                    parts=["first", "", "second"],
+                )
+            ]
+        ),
+        START,
+        END,
+    )
+
+    assert empty_middle is not None
+    assert [turn.text for turn in empty_middle.dialogue.activity] == [
+        "first\n\n\n\nsecond"
+    ]
+
+
+def test_chatgpt_mixed_string_and_non_string_parts_skip_message() -> None:
+    projection = project_chatgpt(
+        chat_snapshot(
+            [
+                chat_message(
+                    "mixed",
+                    1767229200,
+                    parts=["visible", {"image": "unsupported"}],
+                )
+            ]
+        ),
+        START,
+        END,
+    )
+
+    assert projection is None
 
 
 def test_chatgpt_reconstructs_multiple_older_pages_by_manifest_order() -> None:

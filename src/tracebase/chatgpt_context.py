@@ -163,7 +163,7 @@ def _text(message: dict[str, Any]) -> tuple[str, str, datetime] | None:
         # Mixed content is not safely reducible to plain text, so skip the
         # complete provider message rather than silently dropping a fragment.
         return None
-    text = "".join(parts)
+    text = "\n\n".join(parts)
     if not text:
         return None
     return role, text, _timestamp(message.get("create_time"))

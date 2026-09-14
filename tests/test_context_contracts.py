@@ -34,6 +34,17 @@ def request() -> ContextRequest:
     )
 
 
+SUPPORTING_PARTS = [
+    {"type": "text", "text": "synthetic-only", "synthetic": True},
+    {
+        "type": "text",
+        "text": "continuation-only",
+        "metadata": {"compaction_continue": True},
+    },
+    {"type": "text", "text": "ignored-only", "ignored": True},
+]
+
+
 def run(
     archive: Archive,
     run_id: str = "run-1",
@@ -2067,6 +2078,35 @@ def test_opencode_mixed_synthetic_text_keeps_real_text_and_selection(
     assert "Trace work" in (tmp_path / "output" / "index.md").read_text()
 
 
+def test_opencode_ignored_text_is_removed_from_mixed_message(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    activity = opencode_activity(
+        archive,
+        tmp_path,
+        [
+            {"type": "text", "text": "first visible"},
+            {
+                "type": "text",
+                "text": "top-level ignored",
+                "ignored": True,
+            },
+            {
+                "type": "text",
+                "value": {"text": "nested ignored", "ignored": True},
+            },
+            {"type": "text", "text": "second visible"},
+        ],
+        "2026-01-01T01:00:00Z",
+    )
+
+    assert "first visible\n\nsecond visible" in activity
+    assert "top-level ignored" not in activity
+    assert "nested ignored" not in activity
+
+
 def test_opencode_mixed_compaction_continuation_keeps_real_text(
     tmp_path: Path,
 ) -> None:
@@ -2092,14 +2132,7 @@ def test_opencode_mixed_compaction_continuation_keeps_real_text(
 
 @pytest.mark.parametrize(
     "supporting_part",
-    [
-        {"type": "text", "text": "synthetic-only", "synthetic": True},
-        {
-            "type": "text",
-            "text": "continuation-only",
-            "metadata": {"compaction_continue": True},
-        },
-    ],
+    SUPPORTING_PARTS,
 )
 def test_opencode_pure_supporting_message_is_not_selected(
     tmp_path: Path, supporting_part: dict[str, object]
@@ -2123,8 +2156,9 @@ def test_opencode_pure_supporting_message_is_not_selected(
     assert not list(output.rglob("background.md"))
 
 
+@pytest.mark.parametrize("supporting_part", SUPPORTING_PARTS)
 def test_opencode_pure_supporting_message_does_not_consume_background_user_limit(
-    tmp_path: Path,
+    tmp_path: Path, supporting_part: dict[str, object]
 ) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
@@ -2138,11 +2172,7 @@ def test_opencode_pure_supporting_message_does_not_consume_background_user_limit
     ]
     messages.extend(
         [
-            message(
-                "synthetic",
-                "2025-12-31T04:00:00Z",
-                [{"type": "text", "text": "synthetic-only", "synthetic": True}],
-            ),
+            message("supporting", "2025-12-31T04:00:00Z", [supporting_part]),
             message(
                 "current",
                 "2026-01-01T01:00:00Z",
@@ -2158,7 +2188,9 @@ def test_opencode_pure_supporting_message_does_not_consume_background_user_limit
     background = text(output, "background.md")
     for index in range(1, 4):
         assert f"background-{index}" in background
-    assert "synthetic-only" not in background
+    supporting_text = supporting_part["text"]
+    assert isinstance(supporting_text, str)
+    assert supporting_text not in background
 
 
 def test_opencode_non_compaction_assistant_keeps_dsml_like_text(

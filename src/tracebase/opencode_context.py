@@ -144,6 +144,8 @@ def _text_parts(message: dict[str, Any]) -> str | None:
         if (
             part.get("synthetic") is True
             or value.get("synthetic") is True
+            or part.get("ignored") is True
+            or value.get("ignored") is True
             or (
                 isinstance(metadata, dict)
                 and metadata.get("compaction_continue") is True
