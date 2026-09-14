@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import re
-from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -13,9 +12,11 @@ from .archive import (
     ArchiveError,
     PublishedRun,
     PublishedSnapshot,
+    encode_path_id,
     load_published_archive,
 )
 from .attribution import AttributionError, AttributionMode, source_attribution_mode
+from .chatgpt_context import ChatGPTProjection, project_chatgpt
 from .github_context import GitHubProjection, project_github
 from .github_identity import GitHubIdentity, require_github_identity
 from .opencode_context import (
@@ -35,6 +36,7 @@ _ARCHIVE_OBJECT_KINDS = {
 _SUPPORTED_CONTEXT_OBJECT_KINDS = {
     "github": {"issue", "pull-request"},
     "opencode": {"session"},
+    "chatgpt": {"conversation"},
 }
 
 
@@ -88,6 +90,7 @@ class ContextItem:
     attribution_mode: AttributionMode
     github: GitHubProjection | None = None
     opencode: OpenCodeProjection | None = None
+    chatgpt: ChatGPTProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,21 +219,7 @@ def _opencode_path(directory: str, session_number: int) -> str:
 
 
 def _session_first_in_range(projection: OpenCodeProjection) -> datetime:
-    candidates: list[datetime] = []
-    for message in projection.messages:
-        if "in_range_work" in message.get("temporal_roles", ()):
-            created = message.get("created")
-            if isinstance(created, str):
-                with suppress(ValueError):
-                    candidates.append(datetime.fromisoformat(created))
-        for part in message.get("parts", ()):
-            if "in_range_work" not in part.get("temporal_roles", ()):
-                continue
-            started = part.get("start")
-            if isinstance(started, str):
-                with suppress(ValueError):
-                    candidates.append(datetime.fromisoformat(started))
-    return min(candidates) if candidates else datetime.max.replace(tzinfo=UTC)
+    return projection.dialogue.activity[0].timestamp
 
 
 def _context_projection_supported(snapshot: PublishedSnapshot) -> bool:
@@ -322,14 +311,30 @@ def extract_context(
                 if key[0] == "opencode"
                 else None
             )
+            chatgpt = (
+                project_chatgpt(selected_snapshot, request.start, request.end)
+                if key[0] == "chatgpt"
+                else None
+            )
         except ArchiveError as error:
             raise ContextError(str(error)) from None
         try:
             attribution_mode = source_attribution_mode(key[0])
         except AttributionError as error:
             raise ContextError(str(error)) from None
+        if (key[0] == "opencode" and opencode is None) or (
+            key[0] == "chatgpt" and chatgpt is None
+        ):
+            continue
         all_items.append(
-            ContextItem(selected_snapshot, "", attribution_mode, github, opencode)
+            ContextItem(
+                selected_snapshot,
+                "",
+                attribution_mode,
+                github,
+                opencode,
+                chatgpt,
+            )
         )
     # Child sessions remain archive evidence but are intentionally excluded from
     # Context Output; the public document scope is root sessions only.
@@ -337,10 +342,7 @@ def extract_context(
         item
         for item in all_items
         if (item.github is None or item.github.selected)
-        and (
-            item.opencode is None
-            or (item.opencode.selected and item.opencode.parent_id is None)
-        )
+        and (item.opencode is None or item.opencode.parent_id is None)
     ]
     github_items = [item for item in all_items if item.github is not None]
     github_identities = _require_github_profiles(github_items, runs, archive_root)
@@ -384,6 +386,15 @@ def extract_context(
             all_items[item_index] = replace(
                 item, path=_opencode_path(directory, session_number)
             )
+    for item in (item for item in all_items if item.chatgpt is not None):
+        item_index = all_items.index(item)
+        all_items[item_index] = replace(
+            item,
+            path=(
+                "chatgpt/conversation/"
+                f"{encode_path_id(item.snapshot.manifest['source_id'])}"
+            ),
+        )
     return ContextExtractionResult(request, runs, tuple(all_items))
 
 

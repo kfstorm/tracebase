@@ -76,6 +76,16 @@ _Avoid_: Projection, synchronized view
 A disposable, self-contained directory assembled from one Context Extraction Result for consumer exploration. It is reproducible from selected Raw Archive evidence, the Context request, and required archive-level identity profile(s), owned by the caller, and not a durable derived store or a synchronized view of the source. Refreshing an identity profile may change tracked-account annotations without changing Source-native Evidence.
 _Avoid_: Cache, index, intermediate archive
 
+OpenCode and ChatGPT conversational Context is text-only: it contains only
+`user` and `assistant` text turns. Tool/task, system/developer, reasoning, code,
+multimodal, hidden, synthetic/compaction, attachment/citation metadata, and
+historical-version records do not enter the dialogue. OpenCode tool or other
+non-text activity cannot select a session. ChatGPT uses the provider-returned,
+page-ordered observed current stream; Context does not recover branch history,
+regenerations, or edits. ChatGPT `create_time` is the placement timestamp;
+`update_time` and edit mutations are not v1 activity semantics. Canvas/textdocs
+and attachment binaries remain unsupported.
+
 Context Markdown preserves source-native evidence type, temporal grouping,
 relationship, and order. Under `actor_scoped`, attribution is an orthogonal
 record-level annotation such as `[User work]` or `[Context only]`; it does not

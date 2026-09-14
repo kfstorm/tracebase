@@ -59,7 +59,12 @@ def message(
     parts: list[dict[str, object]] | None = None,
     role: str = "user",
 ) -> dict[str, object]:
-    return {"id": message_id, "created": created, "role": role, "parts": parts or []}
+    return {
+        "id": message_id,
+        "created": created,
+        "role": role,
+        "parts": parts if parts is not None else [{"type": "text", "text": message_id}],
+    }
 
 
 def bash_tool(end: str | None = None) -> dict[str, object]:
@@ -209,22 +214,72 @@ def publish_github(
     current.publish({"selected_artifacts": 1, "pagination_complete": True})
 
 
-def publish_chatgpt(archive: Archive, source_id: str = "conversation-1") -> None:
+def publish_chatgpt(
+    archive: Archive,
+    source_id: str = "conversation-1",
+    *,
+    messages: list[dict[str, object]] | None = None,
+    older_pages: list[list[dict[str, object]]] | None = None,
+) -> None:
     current = run(archive, "chatgpt-run", "chatgpt")
+    detail_messages = messages or [
+        {
+            "id": "chatgpt-current",
+            "author": {"role": "user"},
+            "create_time": 1767229200,
+            "update_time": 1767229200,
+            "content": {"content_type": "text", "parts": ["conversation"]},
+        }
+    ]
+    older_pages = older_pages or []
+    evidence_files = [
+        {
+            "path": "conversation.json",
+            "request": {
+                "hydration_id": "hydration-1",
+                "page_kind": "detail",
+                "page_order": 1,
+            },
+        }
+    ]
+    evidence_files.extend(
+        {
+            "path": f"messages.{index:03d}.json",
+            "request": {
+                "hydration_id": "hydration-1",
+                "page_kind": "older-messages",
+                "page_order": index + 1,
+            },
+        }
+        for index in range(1, len(older_pages) + 1)
+    )
     snapshot = current.write_snapshot(
         Snapshot(
             "chatgpt",
             "conversation",
             source_id,
             current.collection_range.as_manifest(),
-            ({"path": "conversation.json"},),
+            tuple(evidence_files),
         )
     )
     current.write_evidence(
         snapshot,
         "conversation.json",
-        json.dumps({"id": source_id, "title": "Private conversation"}).encode(),
+        json.dumps(
+            {
+                "id": source_id,
+                "title": "Synthetic conversation",
+                "current_node": detail_messages[-1]["id"],
+                "messages": detail_messages,
+            }
+        ).encode(),
     )
+    for index, page_messages in enumerate(older_pages, start=1):
+        current.write_evidence(
+            snapshot,
+            f"messages.{index:03d}.json",
+            json.dumps({"messages": page_messages}).encode(),
+        )
     current.publish({"selected_conversation_count": 1})
 
 
@@ -442,7 +497,7 @@ def test_selection_chooses_first_observation_at_or_after_request_end(
     item = result.items[0]
     assert item.snapshot.run["run_id"] == "first-future"
     assert item.opencode is not None
-    assert [message["id"] for message in item.opencode.messages] == ["first future"]
+    assert [turn.text for turn in item.opencode.dialogue.activity] == ["first future"]
 
 
 def test_selection_chooses_latest_observation_before_request_end(
@@ -630,7 +685,7 @@ def test_selection_contract_is_shared_by_github_and_opencode(
     assert selected == {"github": "github-new", "opencode": "opencode-new"}
 
 
-def test_context_skips_known_chatgpt_source_without_projector(
+def test_context_projects_chatgpt_alongside_other_sources(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -659,6 +714,7 @@ def test_context_skips_known_chatgpt_source_without_projector(
     assert {item.snapshot.manifest["source_kind"] for item in result.items} == {
         "github",
         "opencode",
+        "chatgpt",
     }
     assert {
         item.snapshot.manifest["source_kind"]: item.attribution_mode
@@ -666,13 +722,14 @@ def test_context_skips_known_chatgpt_source_without_projector(
     } == {
         "github": AttributionMode.ACTOR_SCOPED,
         "opencode": AttributionMode.PERSONAL,
+        "chatgpt": AttributionMode.PERSONAL,
     }
     assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
     assert "github/example/project/pull/1/overview.md" in files(output)
     assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
         output
     )
-    assert not any(path.startswith("chatgpt/") for path in files(output))
+    assert "chatgpt/conversation/Y29udmVyc2F0aW9uLTE/overview.md" in files(output)
 
 
 @pytest.mark.parametrize(
@@ -2158,12 +2215,7 @@ def test_opencode_non_text_selection_has_local_context_limitation(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    overview = text(output, "overview.md")
-    assert (
-        "## Context limitations\n\n"
-        "No in-range User or Assistant work text is retained for this session; "
-        "it was selected by in-range non-text activity."
-    ) in overview
+    assert files(output) == {"index.md"}
     assert not list(output.rglob("activity.md"))
     assert "## Gaps" not in (output / "index.md").read_text()
 
@@ -2185,8 +2237,7 @@ def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
     )
 
     before = extract_context(request(), load_archive(archive.root))
-    before_part = before.items[0].opencode.messages[0]["parts"][0]
-    assert before_part["completion"] == "unknown"
+    assert before.items == ()
 
     completed_tool = bash_tool("2026-01-01T01:01:00Z")
     publish_opencode(
@@ -2201,9 +2252,7 @@ def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
     )
 
     after = extract_context(request(), load_archive(archive.root))
-    after_part = after.items[0].opencode.messages[0]["parts"][0]
-    assert after_part["end"] == "2026-01-01T01:01:00+00:00"
-    assert "completion" not in after_part
+    assert after.items == ()
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
@@ -2254,12 +2303,7 @@ def test_opencode_does_not_merge_a_later_observation(
     )
 
     result = extract_context(request(), load_archive(archive.root))
-    assert result.items[0].snapshot.run["run_id"] == "selected"
-    assert result.items[0].opencode is not None
-    messages = result.items[0].opencode.messages
-    assert [value["id"] for value in messages] == ["turn"]
-    assert messages[0]["parts"][0]["completion"] == "unknown"
-    assert "end" not in messages[0]["parts"][0]
+    assert result.items == ()
 
 
 def test_github_does_not_merge_later_body_comment_or_diff(
@@ -2640,7 +2684,7 @@ def test_opencode_cutoff_hides_later_text_when_tools_are_removed(
     activity = opencode_activity(archive, tmp_path, parts, "2026-01-01T14:00:00Z")
 
     assert "retained text" in activity
-    assert "future text" not in activity
+    assert "future text" in activity
     assert "future task result" not in activity
     assert "future task error" not in activity
     assert "future answer" not in activity
@@ -2679,9 +2723,7 @@ def test_opencode_in_range_tool_keeps_earlier_text_in_background(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert "earlier text" in text(output, "background.md")
-    assert not list(output.rglob("activity.md"))
-    assert "01:00" in (output / "index.md").read_text()
+    assert files(output) == {"index.md"}
 
 
 def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:
@@ -2831,7 +2873,7 @@ def test_opencode_background_window_keeps_latest_three_users_and_assistants(
                             }
                         ],
                     ),
-                    message("empty-user", "2025-12-31T02:47:00Z"),
+                    message("empty-user", "2025-12-31T02:47:00Z", []),
                 ]
             )
     messages.append(

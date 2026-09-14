@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
-from .context_render import format_timestamp
+from .dialogue import render_dialogue_files, write_dialogue_markdown
 from .opencode_context import OpenCodeProjection
-
-_BACKGROUND_USER_TURN_LIMIT = 3
-_MINIMUM_RENDERED_LINES = 2
 
 
 def _session_context(projection: OpenCodeProjection) -> dict[str, str]:
@@ -24,93 +20,6 @@ def _session_context(projection: OpenCodeProjection) -> dict[str, str]:
     if "project_directory" not in context and "working_directory" in context:
         context["project_directory"] = context["working_directory"]
     return context
-
-
-def _part_value(part: dict[str, Any]) -> dict[str, Any]:
-    value = part.get("value")
-    return value if isinstance(value, dict) else part
-
-
-def _part_bucket(part: dict[str, Any], message: dict[str, Any]) -> str | None:
-    roles = part.get("temporal_roles", ())
-    bucket: str | None = None
-    if "later_progression" in roles:
-        return bucket
-    if "in_range_work" in roles:
-        bucket = "activity"
-    elif "earlier_background" in roles:
-        bucket = "background"
-    elif part.get("type") == "text":
-        message_roles = message.get("temporal_roles", ())
-        if "in_range_work" in message_roles:
-            bucket = "activity"
-        elif "earlier_background" in message_roles:
-            bucket = "background"
-    return bucket
-
-
-def _header(role: str, timestamp: str | None) -> str:
-    role = role.capitalize() if role else "Message"
-    return f"**{role}{f' · {timestamp}' if timestamp else ''}**"
-
-
-def _render_messages(
-    item: ContextItem, result: ContextExtractionResult, bucket: str
-) -> list[str]:
-    assert item.opencode is not None
-    projection = item.opencode
-    timezone = result.request.start.tzinfo
-    assert timezone is not None
-    lines: list[str] = []
-    messages: list[tuple[dict[str, Any], str, list[str]]] = []
-    for message in projection.messages:
-        if message.get("_supporting_message") is True:
-            continue
-        role = message.get("role")
-        role = role.lower() if isinstance(role, str) else ""
-        if role not in {"user", "assistant"}:
-            continue
-        texts: list[str] = []
-        for part in message.get("parts", ()):
-            if (
-                not isinstance(part, dict)
-                or _part_bucket(part, message) != bucket
-                or part.get("type") != "text"
-            ):
-                continue
-            value = _part_value(part)
-            text = value.get("text", part.get("text"))
-            if isinstance(text, str) and text:
-                texts.append(text)
-        if texts:
-            messages.append((message, role, texts))
-
-    if bucket == "background":
-        user_positions = [
-            index for index, (_, role, _) in enumerate(messages) if role == "user"
-        ]
-        if user_positions:
-            first_retained = user_positions[
-                max(0, len(user_positions) - _BACKGROUND_USER_TURN_LIMIT)
-            ]
-            messages = messages[first_retained:]
-
-    if not messages:
-        return []
-    lines.extend(
-        [
-            f"# {'Activity' if bucket == 'activity' else 'Background'}",
-            "",
-            f"Attribution mode: `{item.attribution_mode.value}`",
-            "",
-        ]
-    )
-    for message, role, texts in messages:
-        timestamp = format_timestamp(message.get("created"), timezone)
-        lines.extend([_header(str(role), timestamp), ""])
-        for text in texts:
-            lines.extend([text, ""])
-    return lines if len(lines) > _MINIMUM_RENDERED_LINES else []
 
 
 def render_opencode(
@@ -146,29 +55,14 @@ def render_opencode(
             "",
         ]
     )
-    files: dict[str, list[str]] = {"overview.md": overview}
-    activity = _render_messages(item, result, "activity")
-    background = _render_messages(item, result, "background")
-    if not activity:
-        overview.extend(
-            [
-                "## Context limitations",
-                "",
-                "No in-range User or Assistant work text is retained for this session; "
-                "it was selected by in-range non-text activity.",
-                "",
-            ]
-        )
-    if activity:
-        files["activity.md"] = activity
-    if background:
-        files["background.md"] = background
+    timezone = result.request.start.tzinfo
+    assert timezone is not None
+    files = render_dialogue_files(
+        projection.dialogue,
+        timezone,
+        item.attribution_mode.value,
+        overview,
+    )
     for name, lines in files.items():
-        write_opencode_markdown(output / name, lines)
+        write_dialogue_markdown(output / name, lines)
     return list(files)
-
-
-def write_opencode_markdown(path: Path, lines: list[str]) -> None:
-    """Write OpenCode text without changing Markdown trailing spaces."""
-    content_lines = lines[:-1] if lines and lines[-1] == "" else lines
-    path.write_text("\n".join(content_lines) + "\n", encoding="utf-8")

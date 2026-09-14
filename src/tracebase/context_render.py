@@ -51,6 +51,10 @@ def _render_item(
         from .opencode_context_render import render_opencode  # noqa: PLC0415
 
         names = render_opencode(item, result, item_root)
+    elif item.chatgpt is not None:
+        from .chatgpt_context_render import render_chatgpt  # noqa: PLC0415
+
+        names = render_chatgpt(item, result, item_root)
     else:
         raise ContextError("context item has no source projection")
     return [(f"{item.path}/{name}", name) for name in names]
@@ -62,23 +66,7 @@ def _link_list(paths: list[str]) -> str:
 
 def _session_span(item: ContextItem, result: ContextExtractionResult) -> str | None:
     assert item.opencode is not None
-    times: list[datetime] = []
-    for message in item.opencode.messages:
-        if "in_range_work" in message.get("temporal_roles", ()):
-            created = parse_timestamp(message.get("created"))
-            if created is not None:
-                times.append(created)
-        for part in message.get("parts", ()):
-            if "in_range_work" not in part.get("temporal_roles", ()):
-                continue
-            started = parse_timestamp(part.get("start"))
-            if started is not None:
-                times.append(started)
-            finished = parse_timestamp(part.get("end"))
-            if finished is not None and finished < result.request.end:
-                times.append(finished)
-    if not times:
-        return None
+    times = [turn.timestamp for turn in item.opencode.dialogue.activity]
     timezone = result.request.start.tzinfo
     assert timezone is not None
     first = min(times).astimezone(timezone).strftime("%H:%M")
@@ -172,6 +160,24 @@ def _render_index(
                 f"({_link_list([path for path, _ in files])})"
             )
         lines.append("")
+    lines.extend(["## ChatGPT", ""])
+    chatgpt_items = [(item, files) for item, files in items if item.chatgpt is not None]
+    if not chatgpt_items:
+        lines.append("No ChatGPT conversations are available.")
+    for item, files in sorted(
+        chatgpt_items,
+        key=lambda pair: (
+            pair[0].chatgpt.title if pair[0].chatgpt is not None else "",
+            pair[0].snapshot.manifest["source_id"],
+        ),
+    ):
+        assert item.chatgpt is not None
+        lines.append(
+            f"- **{item.chatgpt.title}** [attribution mode: "
+            f"`{item.attribution_mode.value}`] "
+            f"({_link_list([path for path, _ in files])})"
+        )
+    lines.append("")
     write_markdown(staging / "index.md", lines)
 
 
