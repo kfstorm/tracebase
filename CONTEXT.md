@@ -36,6 +36,22 @@ _Avoid_: Completeness, audit log
 A stable source-specific scope used to distinguish Collection Ranges and detect overlap to prevent duplicate collection. For GitHub it is the authenticated actor's stable node ID; for OpenCode it is a user-chosen `--instance-id` that is unique across machines and stable on the same machine; for ChatGPT it is the authenticated account's stable provider identity used as the scope ID. A machine name is valid as an OpenCode instance ID if it meets both conditions.
 _Avoid_: Project association
 
+**Attribution Mode**:
+The Context and Summary-layer rule for projecting source evidence into the
+user's work. `personal` means materially meaningful work recorded by the source
+belongs to the user, including delegated agent or subagent work. `actor_scoped`
+means only explicitly tracked-account actions or authorship belong to the user;
+other participant activity remains context-only evidence. The current mapping
+is OpenCode -> `personal`, ChatGPT -> `personal`, and GitHub -> `actor_scoped`.
+Every supported source kind must be explicitly mapped; unknown source kinds do
+not inherit a default.
+
+**User-work Projection**:
+The attribution-filtered evidence that may become a Summary workstream. It is
+applied before workstream identification, ranking, or synthesis. Context-only
+evidence may explain a user's work or its state, but cannot itself become final
+Summary content.
+
 **Snapshot**:
 An append-only, complete set of evidence from one Observation Window of one Source Item. A Snapshot does not represent a global system state.
 _Avoid_: Current state, sync point
@@ -60,8 +76,22 @@ _Avoid_: Projection, synchronized view
 A disposable, self-contained directory assembled from one Context Extraction Result for consumer exploration. It is reproducible from selected Raw Archive evidence, the Context request, and required archive-level identity profile(s), owned by the caller, and not a durable derived store or a synchronized view of the source. Refreshing an identity profile may change tracked-account annotations without changing Source-native Evidence.
 _Avoid_: Cache, index, intermediate archive
 
+Context Markdown preserves source-native evidence type, temporal grouping,
+relationship, and order. Under `actor_scoped`, attribution is an orthogonal
+record-level annotation such as `[User work]` or `[Context only]`; it does not
+create parallel attribution sections or reorder a thread, timeline, or commit
+section. Shard reports may project those records into separate user-work and
+context-only sections, but Context itself does not.
+
 Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output v1 does not perform sensitive-data redaction and should be treated with the same confidentiality as the Raw Archive.
 
 **Summary Output**:
-A caller-owned, derived directory containing a human-readable work summary and provenance generated from Context Output by the production Summarizer. It is not Source-native Evidence and may contain sensitive work evidence; treat it with the same confidentiality as the Raw Archive. Sending its input to a third-party or AI service requires a separate derived-data scope and sanitization decision.
+A caller-owned, derived directory containing a human-readable work summary and
+provenance generated from Context Output by the production Summarizer. The final
+Summary is a projection of the user's work, not a summary of all activity in
+Context: attribution semantics are applied before workstream identification and
+synthesis. It is not Source-native Evidence and may contain sensitive work
+evidence; treat it with the same confidentiality as the Raw Archive. Sending
+its input to a third-party or AI service requires a separate derived-data scope
+and sanitization decision.
 _Avoid_: Raw Archive, long-term memory

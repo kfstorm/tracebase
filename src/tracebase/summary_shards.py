@@ -8,11 +8,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .attribution import AttributionMode
+
 _STATUS_BLOCK = re.compile(
     r"<!--\s*SHARD_STATUS_BEGIN\s*-->(.*?)<!--\s*SHARD_STATUS_END\s*-->",
     re.DOTALL,
 )
 _SHARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_USER_WORK_SECTION = "## User work"
+_CONTEXT_ONLY_SECTION = "## Context-only evidence"
+_ATTRIBUTION_MODE_VALUES = {mode.value for mode in AttributionMode}
+_ATTRIBUTION_MODE = re.compile(r"attribution mode: `([^`]+)`")
+_CONTEXT_LINK = re.compile(r"\]\(([^)]+)\)")
+_CONTEXT_ROOT = re.compile(r"(?:github|opencode)/[A-Za-z0-9._/-]+")
+_GITHUB_SCOPE = re.compile(r"(?:GitHub )?repository (?P<repo>[^,;:]+)")
+_OPENCODE_SCOPE = re.compile(r"OpenCode(?: project)? (?P<project>[^:;]+)")
+_BRACE_SCOPE = re.compile(r"(?P<prefix>[^{}]+?)/\{(?P<items>[^{}]+)\}\Z")
+_GITHUB_REPOSITORY_SEPARATOR_COUNT = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +42,88 @@ def _status_data(notes: str) -> Any:
         return json.loads(match.group(1))
     except json.JSONDecodeError as error:
         raise ValueError("NOTES.md SHARD_STATUS block is not valid JSON") from error
+
+
+def _context_items(index_lines: tuple[str, ...]) -> dict[str, str]:
+    """Return projected item roots and their declared attribution modes."""
+    items: dict[str, str] = {}
+    for line in index_lines:
+        mode = _ATTRIBUTION_MODE.search(line)
+        if mode is None:
+            continue
+        for target in _CONTEXT_LINK.findall(line):
+            if not target.endswith("/overview.md"):
+                continue
+            root = target.removesuffix("/overview.md").removeprefix("./")
+            items[root] = mode.group(1)
+    return items
+
+
+def _scope_parts(scope: str) -> tuple[str, ...]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(scope):
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth = max(depth - 1, 0)
+        elif character == "," and depth == 0:
+            parts.append(scope[start:index].strip())
+            start = index + 1
+    parts.append(scope[start:].strip())
+    return tuple(part for part in parts if part)
+
+
+def _source_scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
+    selectors: list[tuple[str, bool]] = []
+    for part in _scope_parts(scope.removeprefix("misc:").strip()):
+        match = _BRACE_SCOPE.fullmatch(part)
+        if match is not None:
+            prefix = match.group("prefix").rstrip("/")
+            selectors.extend(
+                (f"{prefix}/{item.strip()}", False)
+                for item in match.group("items").split(",")
+                if item.strip()
+            )
+            continue
+        path = part.rstrip("/")
+        is_broad = (
+            path.startswith("github/")
+            and path.count("/") == _GITHUB_REPOSITORY_SEPARATOR_COUNT
+        ) or (path.startswith("opencode/") and "/session/" not in path)
+        selectors.append((path, is_broad))
+    return tuple(selectors)
+
+
+def _scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
+    cleaned = scope.split(" (", 1)[0].strip()
+    if cleaned.startswith("/context/"):
+        return ((cleaned.removeprefix("/context/").rstrip("/"), True),)
+    if cleaned.startswith(("github/", "opencode/", "misc:")):
+        return _source_scope_selectors(cleaned)
+    github_scope = _GITHUB_SCOPE.match(cleaned)
+    if github_scope is not None:
+        return ((f"github/{github_scope.group('repo').strip()}", True),)
+    opencode_scope = _OPENCODE_SCOPE.match(cleaned)
+    if opencode_scope is not None:
+        return ((f"opencode{opencode_scope.group('project').strip()}", True),)
+    selectors: list[tuple[str, bool]] = []
+    for part in _scope_parts(cleaned):
+        selectors.extend(_source_scope_selectors(part))
+    return tuple(selectors)
+
+
+def _scope_items(scope: str, item_roots: set[str]) -> frozenset[str]:
+    selectors = _scope_selectors(scope)
+    return frozenset(
+        root
+        for root in item_roots
+        if any(
+            root == selector or (broad and root.startswith(f"{selector}/"))
+            for selector, broad in selectors
+        )
+    )
 
 
 def inspect_shards(
@@ -57,6 +151,19 @@ def inspect_shards(
             return ShardObservability(("non-empty Context has no declared shards",))
 
     errors: list[str] = []
+    index_lines: tuple[str, ...] = ()
+    index_error = False
+    if context_dir is not None:
+        try:
+            index_lines = tuple(
+                (context_dir / "index.md").read_text(encoding="utf-8").splitlines()
+            )
+        except OSError, UnicodeError:
+            index_error = True
+            errors.append("could not read Context index")
+    context_items = _context_items(index_lines)
+    item_roots = set(context_items)
+    shard_items: list[tuple[str, frozenset[str]]] = []
     seen: set[str] = set()
     for item in data["shards"]:
         if not isinstance(item, dict):
@@ -66,6 +173,7 @@ def inspect_shards(
         status = item.get("status")
         retry_count = item.get("retry_count", 0)
         report = item.get("report")
+        attribution_modes = item.get("attribution_modes")
         if not isinstance(shard_id, str) or _SHARD_ID.fullmatch(shard_id) is None:
             errors.append("shard id is invalid")
             continue
@@ -81,6 +189,33 @@ def inspect_shards(
             errors.append(f"shard {shard_id!r} reported failure")
         elif status != "complete":
             errors.append(f"shard {shard_id!r} is not in a terminal state")
+        if (
+            not isinstance(attribution_modes, list)
+            or not attribution_modes
+            or not all(
+                isinstance(mode, str) and mode in _ATTRIBUTION_MODE_VALUES
+                for mode in attribution_modes
+            )
+        ):
+            errors.append(f"shard {shard_id!r} attribution modes are invalid")
+        scope = item.get("scope")
+        if context_dir is not None and not index_error:
+            if not isinstance(scope, str) or not scope:
+                errors.append(f"shard {shard_id!r} scope is invalid")
+            elif not isinstance(attribution_modes, list):
+                pass
+            else:
+                resolved_items = _scope_items(scope, item_roots)
+                shard_items.append((shard_id, resolved_items))
+                expected_modes = {context_items[root] for root in resolved_items}
+                if not resolved_items:
+                    errors.append(
+                        f"shard {shard_id!r} scope does not match Context items"
+                    )
+                elif expected_modes != set(attribution_modes):
+                    errors.append(
+                        f"shard {shard_id!r} attribution modes do not match Context"
+                    )
 
         expected_report = f"/work/shards/{shard_id}.md"
         if report != expected_report:
@@ -91,8 +226,30 @@ def inspect_shards(
                 errors.append(f"shard {shard_id!r} canonical report is missing")
             else:
                 try:
-                    if not report_path.read_text(encoding="utf-8").strip():
+                    report_text = report_path.read_text(encoding="utf-8")
+                    if not report_text.strip():
                         errors.append(f"shard {shard_id!r} canonical report is empty")
+                    elif (
+                        _USER_WORK_SECTION not in report_text
+                        or _CONTEXT_ONLY_SECTION not in report_text
+                    ):
+                        errors.append(
+                            f"shard {shard_id!r} report does not separate user work "
+                            "from context-only evidence"
+                        )
                 except OSError, UnicodeError:
                     errors.append(f"shard {shard_id!r} canonical report cannot be read")
+    if context_dir is not None and not index_error:
+        memberships: dict[str, list[str]] = {root: [] for root in item_roots}
+        for shard_id, resolved_items in shard_items:
+            for root in resolved_items:
+                memberships[root].append(shard_id)
+        for root, owners in sorted(memberships.items()):
+            if not owners:
+                errors.append(f"Context item {root!r} is not covered by any shard")
+            elif len(owners) > 1:
+                errors.append(
+                    f"Context item {root!r} is covered by multiple shards: "
+                    + ", ".join(owners)
+                )
     return ShardObservability(tuple(errors))

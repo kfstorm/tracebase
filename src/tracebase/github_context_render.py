@@ -7,6 +7,12 @@ from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
 from .context_render import format_timestamp, parse_timestamp
+from .github_context import (
+    github_actor_login,
+    github_inline_comment_canonical_id,
+    github_logins_match,
+    github_user_work_record_ids,
+)
 from .github_identity import GitHubIdentity
 
 GITHUB_COMMIT_LIMIT = 250
@@ -66,21 +72,22 @@ def _short_sha(value: Any) -> str | None:
     return value[:7] if isinstance(value, str) and value else None
 
 
-def _actor(value: dict[str, Any]) -> str | None:
-    for key in ("user", "actor", "author"):
-        actor = value.get(key)
-        login = actor.get("login") if isinstance(actor, dict) else None
-        if isinstance(login, str):
-            return login
-    return None
-
-
 def _actor_label(value: dict[str, Any], tracked_login: str | None) -> str:
-    actor = _actor(value) or "unknown"
-    return f"@{actor} (tracked account)" if actor == tracked_login else f"@{actor}"
+    actor = github_actor_login(value) or "unknown"
+    return (
+        f"@{actor} (tracked account)"
+        if github_logins_match(actor, tracked_login)
+        else f"@{actor}"
+    )
 
 
-def _commit_author(value: dict[str, Any], identity: GitHubIdentity | None) -> str:
+def _attribution(is_user_work: bool) -> str:
+    return "[User work]" if is_user_work else "[Context only]"
+
+
+def _commit_author(
+    value: dict[str, Any], tracked_login: str | None, identity: GitHubIdentity | None
+) -> str:
     author = value.get("author")
     committer = value.get("committer")
     author_name = author.get("name") if isinstance(author, dict) else None
@@ -92,7 +99,10 @@ def _commit_author(value: dict[str, Any], identity: GitHubIdentity | None) -> st
     else:
         name = "unknown"
     author_email = author.get("email") if isinstance(author, dict) else None
-    if identity is not None and identity.matches_commit_email(author_email):
+    author_login = author.get("login") if isinstance(author, dict) else None
+    if github_logins_match(author_login, tracked_login) or (
+        identity is not None and identity.matches_commit_email(author_email)
+    ):
         return f"{name} (tracked account)"
     return name
 
@@ -114,7 +124,11 @@ def _edited_time(value: dict[str, Any], timezone: tzinfo) -> str | None:
 
 
 def _comment(
-    lines: list[str], value: dict[str, Any], timezone: tzinfo, tracked_login: str | None
+    lines: list[str],
+    value: dict[str, Any],
+    timezone: tzinfo,
+    tracked_login: str | None,
+    is_user_work: bool,
 ) -> None:
     actor = _actor_label(value, tracked_login)
     created = _time(value, timezone)
@@ -122,7 +136,7 @@ def _comment(
     timestamp = f" · {created}" if created else ""
     if edited:
         timestamp += f" · edited {edited}"
-    lines.extend([f"**{actor}{timestamp}**", ""])
+    lines.extend([f"**{actor}{timestamp} · {_attribution(is_user_work)}**", ""])
     body = value.get("body")
     if isinstance(body, str) and body:
         lines.extend([body, ""])
@@ -223,7 +237,7 @@ def _timeline_event_label(
                         details.append(f"{key} {detail}")
             if details:
                 rendered += f" ({'; '.join(details)})"
-    actor = _actor(value)
+    actor = github_actor_login(value)
     return f"{rendered}{f' by {_actor_label(value, tracked_login)}' if actor else ''}"
 
 
@@ -251,8 +265,23 @@ def _object_events(
     ]
 
 
+def _object_event_is_user_work(
+    record: dict[str, Any],
+    event: str,
+    user_work_ids: frozenset[tuple[str, str]],
+) -> bool:
+    """Attribute only object creation; updated_at has no actor provenance."""
+    return (
+        event == "created"
+        and (str(record.get("kind")), str(record.get("native_id"))) in user_work_ids
+    )
+
+
 def _review_lines(
-    value: dict[str, Any], timezone: tzinfo, tracked_login: str | None
+    value: dict[str, Any],
+    timezone: tzinfo,
+    tracked_login: str | None,
+    is_user_work: bool,
 ) -> list[str] | None:
     state = value.get("state")
     body = value.get("body")
@@ -264,7 +293,11 @@ def _review_lines(
     suffix = f" · {timestamp}" if timestamp else ""
     commit_id = _short_sha(value.get("commit_id"))
     commit_suffix = f" · on {commit_id}" if commit_id else ""
-    lines = [f"Review by {actor}{suffix}{commit_suffix}{state_suffix}", ""]
+    lines = [
+        f"Review by {actor}{suffix} · {_attribution(is_user_work)}"
+        f"{commit_suffix}{state_suffix}",
+        "",
+    ]
     if isinstance(body, str) and body:
         lines.extend([body, ""])
     return lines
@@ -284,9 +317,12 @@ def _thread_comments(
     activity: list[dict[str, Any]] = []
     future: list[dict[str, Any]] = []
     for node in nodes:
-        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+        if not isinstance(node, dict):
             continue
-        value = inline.get(node["id"], node)
+        canonical_id = github_inline_comment_canonical_id(node)
+        if canonical_id is None:
+            continue
+        value = inline.get(canonical_id, node)
         times = _times(value)
         if any(start <= timestamp < end for timestamp in times):
             activity.append(value)
@@ -304,6 +340,7 @@ def _thread_lines(
     timestamp: datetime,
     timezone: tzinfo,
     tracked_login: str | None,
+    user_work_ids: frozenset[tuple[str, str]],
 ) -> list[str]:
     location = next(
         (_location(value) for value in [*earlier, *activity] if _location(value)), None
@@ -313,14 +350,23 @@ def _thread_lines(
         f"### {rendered_time} · Review thread · {location or 'unknown location'}",
         "",
     ]
-    if earlier:
-        lines.extend(["### Earlier context", ""])
-        for value in earlier:
-            _comment(lines, value, timezone, tracked_login)
-    if activity:
-        lines.extend(["### During requested interval", ""])
-        for value in activity:
-            _comment(lines, value, timezone, tracked_login)
+    for heading, values in (
+        ("Earlier context", earlier),
+        ("During requested interval", activity),
+    ):
+        if not values:
+            continue
+        lines.extend([f"### {heading}", ""])
+        for value in values:
+            canonical_id = github_inline_comment_canonical_id(value)
+            _comment(
+                lines,
+                value,
+                timezone,
+                tracked_login,
+                canonical_id is not None
+                and ("inline-comment", canonical_id) in user_work_ids,
+            )
     return lines
 
 
@@ -330,6 +376,7 @@ def _thread_entries(
     end: datetime,
     timezone: tzinfo,
     tracked_login: str | None,
+    user_work_ids: frozenset[tuple[str, str]],
 ) -> tuple[list[tuple[datetime, str, list[str]]], set[str], set[str], set[str]]:
     inline: dict[str, dict[str, Any]] = {}
     for record in records:
@@ -352,9 +399,10 @@ def _thread_entries(
         if not isinstance(nodes, list):
             nodes = []
         all_threaded_ids.update(
-            str(node["id"])
+            canonical_id
             for node in nodes
-            if isinstance(node, dict) and isinstance(node.get("id"), str)
+            if isinstance(node, dict)
+            and (canonical_id := github_inline_comment_canonical_id(node)) is not None
         )
         if not earlier and not activity:
             continue
@@ -373,7 +421,13 @@ def _thread_entries(
                 if timestamp < start
             )
         lines = _thread_lines(
-            thread, earlier, activity, timestamp, timezone, tracked_login
+            thread,
+            earlier,
+            activity,
+            timestamp,
+            timezone,
+            tracked_login,
+            user_work_ids,
         )
         thread_id = str(thread_record.get("native_id"))
         if activity:
@@ -388,15 +442,27 @@ def _event_entries(  # noqa: PLR0915
     item: ContextItem,
     result: ContextExtractionResult,
     bucket: str,
+    user_work_ids: frozenset[tuple[str, str]] | None = None,
 ) -> list[tuple[datetime, str, list[str]]]:
     assert item.github is not None
     projection = item.github
+    if user_work_ids is None:
+        user_work_ids = github_user_work_record_ids(
+            projection, result.request.start, result.request.end
+        )
     start, end = result.request.start, result.request.end
     timezone = start.tzinfo
     assert timezone is not None
     records = projection.records
     thread_entries, active_thread_ids, earlier_thread_ids, all_threaded_ids = (
-        _thread_entries(records, start, end, timezone, projection.tracked_login)
+        _thread_entries(
+            records,
+            start,
+            end,
+            timezone,
+            projection.tracked_login,
+            user_work_ids,
+        )
     )
     entries = [
         entry
@@ -412,11 +478,18 @@ def _event_entries(  # noqa: PLR0915
             for timestamp, event in _object_events(record, start, end):
                 rendered_time = format_timestamp(timestamp.isoformat(), timezone)
                 if rendered_time is not None:
+                    attribution = _attribution(
+                        _object_event_is_user_work(record, event, user_work_ids)
+                    )
                     entries.append(
                         (
                             timestamp,
                             f"{kind}:{event}",
-                            [f"{rendered_time} · {object_name} {event}", ""],
+                            [
+                                f"{rendered_time} · {object_name} {event} · "
+                                f"{attribution}",
+                                "",
+                            ],
                         )
                     )
             continue
@@ -437,7 +510,13 @@ def _event_entries(  # noqa: PLR0915
             if event_time is None:
                 continue
             lines: list[str] = []
-            _comment(lines, value, timezone, projection.tracked_login)
+            _comment(
+                lines,
+                value,
+                timezone,
+                projection.tracked_login,
+                (kind, native_id) in user_work_ids,
+            )
             entries.append((event_time, native_id, lines))
         elif kind == "timeline":
             value = _value(record)
@@ -450,18 +529,28 @@ def _event_entries(  # noqa: PLR0915
             if label is None or event_time is None:
                 continue
             rendered_time = format_timestamp(event_time.isoformat(), timezone)
+            native_id = str(record.get("native_id"))
             entries.append(
                 (
                     event_time,
-                    str(record.get("native_id")),
-                    [f"- {rendered_time} · {label}", ""],
+                    native_id,
+                    [
+                        f"- {rendered_time} · {label} · "
+                        f"{_attribution((kind, native_id) in user_work_ids)}",
+                        "",
+                    ],
                 )
             )
         elif kind == "review":
             value = _value(record)
             if not isinstance(value, dict):
                 continue
-            review_lines = _review_lines(value, timezone, projection.tracked_login)
+            review_lines = _review_lines(
+                value,
+                timezone,
+                projection.tracked_login,
+                (kind, str(record.get("native_id"))) in user_work_ids,
+            )
             if _event_bucket(value, start, end) != bucket:
                 continue
             event_time = _in_range_time(value, start, end)
@@ -473,7 +562,14 @@ def _event_entries(  # noqa: PLR0915
                 )
                 if event_time is None:
                     continue
-            entries.append((event_time, str(record.get("native_id")), review_lines))
+            native_id = str(record.get("native_id"))
+            entries.append(
+                (
+                    event_time,
+                    native_id,
+                    review_lines,
+                )
+            )
     return sorted(entries, key=lambda entry: (entry[0], entry[1]))
 
 
@@ -514,9 +610,11 @@ def _commit_section(
     bucket: str,
     timezone: tzinfo,
     warn_without_commits: bool,
+    tracked_login: str | None,
     identity: GitHubIdentity | None,
+    user_work_ids: frozenset[tuple[str, str]],
 ) -> list[str]:
-    commits: list[tuple[datetime, str, str, str, datetime | None, int]] = []
+    commits: list[tuple[datetime, str, str, str, datetime | None, int, bool]] = []
     fallback_order = 0
     for record in records:
         if record.get("kind") != "timeline":
@@ -524,6 +622,8 @@ def _commit_section(
         value = _value(record)
         if not isinstance(value, dict) or value.get("event") != "committed":
             continue
+        native_id = str(record.get("native_id"))
+        is_user_work = ("timeline", native_id) in user_work_ids
         author_date, committer_date = _commit_dates(value)
         timestamp = committer_date or author_date
         sha = _short_sha(value.get("sha"))
@@ -542,13 +642,14 @@ def _commit_section(
                 timestamp,
                 sha,
                 message if isinstance(message, str) else "",
-                _commit_author(value, identity),
+                _commit_author(value, tracked_login, identity),
                 author_date
                 if author_date is not None
                 and committer_date is not None
                 and author_date != committer_date
                 else None,
                 order,
+                is_user_work,
             )
         )
     warning = _commit_limit_warning(records)
@@ -565,13 +666,15 @@ def _commit_section(
                 "",
             ]
         )
-    for timestamp, sha, message, author, author_date, _order in sorted(
-        commits, key=lambda entry: entry[-1]
+    for timestamp, sha, message, author, author_date, _order, is_user_work in sorted(
+        commits, key=lambda entry: entry[-2]
     ):
         rendered_time = format_timestamp(timestamp.isoformat(), timezone)
         if rendered_time is None:
             continue
-        lines.append(f"- {rendered_time} · `{sha}` · {author}")
+        lines.append(
+            f"- {rendered_time} · `{sha}` · {author} · {_attribution(is_user_work)}"
+        )
         if author_date is not None:
             rendered_author_time = format_timestamp(author_date.isoformat(), timezone)
             if rendered_author_time is not None:
@@ -585,15 +688,24 @@ def _commit_section(
 
 
 def _activity(
-    item: ContextItem, result: ContextExtractionResult, bucket: str
+    item: ContextItem,
+    result: ContextExtractionResult,
+    bucket: str,
+    user_work_ids: frozenset[tuple[str, str]],
 ) -> list[str]:
     assert item.github is not None
-    entries = _event_entries(item, result, bucket)
-    lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
-    for _, _, entry_lines in entries:
-        lines.extend(entry_lines)
+    projection = item.github
+    entries = _event_entries(item, result, bucket, user_work_ids)
+    lines = [
+        f"# {'Activity' if bucket == 'activity' else 'Background'}",
+        "",
+        f"Attribution mode: `{item.attribution_mode.value}`",
+        "",
+    ]
     timezone = result.request.start.tzinfo
     assert timezone is not None
+    for _, _, entry_lines in entries:
+        lines.extend(entry_lines)
     lines.extend(
         _commit_section(
             item.github.records,
@@ -602,15 +714,26 @@ def _activity(
             bucket,
             timezone,
             bucket == "activity",
+            projection.tracked_login,
             item.github.tracked_identity,
+            user_work_ids,
         )
     )
-    if lines == [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]:
+    if lines == [
+        f"# {'Activity' if bucket == 'activity' else 'Background'}",
+        "",
+        f"Attribution mode: `{item.attribution_mode.value}`",
+        "",
+    ]:
         return []
     return lines
 
 
-def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
+def _overview(
+    item: ContextItem,
+    result: ContextExtractionResult,
+    user_work_ids: frozenset[tuple[str, str]],
+) -> list[str]:
     assert item.github is not None
     projection = item.github
     object_record = next(
@@ -635,6 +758,7 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
             "## Tracked account",
             "",
             f"- GitHub: @{projection.tracked_login or 'unknown'}",
+            f"- Attribution mode: `{item.attribution_mode.value}`",
             "- Git commit identities are marked `(tracked account)` only when they "
             "match a locally synced identity profile.",
             "- Activity and Background may include collaborators' work on tracked "
@@ -642,7 +766,7 @@ def _overview(item: ContextItem, result: ContextExtractionResult) -> list[str]:
             "",
         ]
     )
-    author = _actor(value)
+    author = github_actor_login(value)
     if author:
         lines.append(f"- Author: {_actor_label(value, projection.tracked_login)}")
     lines.append(f"- Type: {'Pull request' if kind == 'PR' else 'Issue'}")
@@ -700,9 +824,14 @@ def render_github(
     item: ContextItem, result: ContextExtractionResult
 ) -> dict[str, list[str] | bytes]:
     assert item.github is not None
-    files: dict[str, list[str] | bytes] = {"overview.md": _overview(item, result)}
-    activity = _activity(item, result, "activity")
-    background = _activity(item, result, "background")
+    user_work_ids = github_user_work_record_ids(
+        item.github, result.request.start, result.request.end
+    )
+    files: dict[str, list[str] | bytes] = {
+        "overview.md": _overview(item, result, user_work_ids)
+    }
+    activity = _activity(item, result, "activity", user_work_ids)
+    background = _activity(item, result, "background", user_work_ids)
     diff = _diff_content(item, result)
     if activity:
         files["activity.md"] = activity

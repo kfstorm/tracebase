@@ -23,10 +23,12 @@ class FakeRunner:
         *,
         recover: bool = False,
         incomplete: bool = False,
+        missing_context_section: bool = False,
     ) -> None:
         self.output = output
         self.recover = recover
         self.incomplete = incomplete
+        self.missing_context_section = missing_context_section
         self.calls: list[list[str]] = []
 
     def run(
@@ -42,7 +44,15 @@ class FakeRunner:
             if not self.recover or "--session" in arguments:
                 work = self.output / "work"
                 (work / "shards").mkdir(exist_ok=True)
-                (work / "shards/repo.md").write_text("evidence", encoding="utf-8")
+                (work / "shards/repo.md").write_text(
+                    "## User work\n\nevidence\n"
+                    + (
+                        ""
+                        if self.missing_context_section
+                        else "\n## Context-only evidence\n\nNone.\n"
+                    ),
+                    encoding="utf-8",
+                )
                 status = "failed" if self.incomplete else "complete"
                 (work / "NOTES.md").write_text(
                     "<!-- SHARD_STATUS_BEGIN -->\n"
@@ -51,7 +61,8 @@ class FakeRunner:
                             "shards": [
                                 {
                                     "id": "repo",
-                                    "scope": "repo",
+                                    "scope": "/context/repo",
+                                    "attribution_modes": ["personal"],
                                     "status": status,
                                     "retry_count": 0,
                                     "report": "/work/shards/repo.md",
@@ -77,7 +88,8 @@ def context(tmp_path: Path) -> Path:
     (result / "index.md").write_text(
         "# Context Output\n\n"
         "Requested interval: `2026-01-01T01:00:00+01:00 <= t < "
-        "2026-01-01T03:00:00+01:00`\n",
+        "2026-01-01T03:00:00+01:00`\n"
+        "- **repo** [attribution mode: `personal`](repo/overview.md)\n",
         encoding="utf-8",
     )
     return result
@@ -126,6 +138,22 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     assert len(runner.calls) == 2
 
 
+def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> None:
+    prompt = (
+        Path(__file__).parents[1] / "src/tracebase/prompts/summarizer-v1.md"
+    ).read_text(encoding="utf-8")
+
+    assert "final Summary is a projection of the user's work" in prompt
+    assert "`personal`" in prompt and "`actor_scoped`" in prompt
+    assert "authoritative attribution" in prompt
+    assert "same review thread" in prompt
+    assert "single `## Commits` section" in prompt
+    assert "## User work" in prompt
+    assert "## Context-only evidence" in prompt
+    assert "Only `User work` may be promoted" in prompt
+    assert "Repository ownership" in prompt
+
+
 def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
@@ -153,6 +181,25 @@ def test_incomplete_shards_publish_nothing(tmp_path: Path) -> None:
     assert not list(tmp_path.glob(".summary.*"))
 
 
+def test_missing_shard_section_fails_without_mutating_worker_report(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    debug = tmp_path / "debug"
+    runner = FakeRunner(tmp_path, missing_context_section=True)
+    bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="shard protocol"):
+        summarize(
+            SummaryRequest(source, "model", None, output, debug_output=debug), runner
+        )
+
+    assert not output.exists()
+    report = debug / "work/shards/repo.md"
+    assert report.read_text(encoding="utf-8") == "## User work\n\nevidence\n"
+
+
 def test_debug_retains_existing_runtime_artifacts_without_extra_calls(
     tmp_path: Path,
 ) -> None:
@@ -168,6 +215,7 @@ def test_debug_retains_existing_runtime_artifacts_without_extra_calls(
     assert (debug / "work/TASK.md").is_file()
     assert (debug / "work/NOTES.md").is_file()
     assert (debug / "work/shards/repo.md").is_file()
+    assert "## Context-only evidence" in (debug / "work/shards/repo.md").read_text()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "runtime/stderr.log").is_file()
     assert not (debug / ".opencode-data").exists()
@@ -279,13 +327,406 @@ def test_archive_mode_rejects_outputs_overlapping_archive(tmp_path: Path) -> Non
 def test_shard_validation_rejects_retry_above_one(tmp_path: Path) -> None:
     (tmp_path / "NOTES.md").write_text(
         '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"a","status":"complete",'
-        '"retry_count":2,"report":"/work/shards/a.md"}]}<!-- SHARD_STATUS_END -->',
+        '"attribution_modes":["personal"],"retry_count":2,'
+        '"report":"/work/shards/a.md"}]}<!-- SHARD_STATUS_END -->',
         encoding="utf-8",
     )
     (tmp_path / "shards").mkdir()
     (tmp_path / "shards/a.md").write_text("report", encoding="utf-8")
 
     assert "retried more than once" in inspect_shards(tmp_path).errors[0]
+
+
+def test_shard_validation_rejects_context_attribution_mismatch(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **repo** [attribution mode: `personal`](repo/overview.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "NOTES.md").write_text(
+        '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"repo",'
+        '"scope":"/context/repo","attribution_modes":["actor_scoped"],'
+        '"status":"complete","retry_count":0,"report":"/work/shards/repo.md"}]}'
+        "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+    (tmp_path / "shards/repo.md").write_text(
+        "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    assert "do not match Context" in inspect_shards(tmp_path, context_dir).errors[0]
+
+
+def test_shard_validation_does_not_match_context_scope_prefixes(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **repo-tools** [attribution mode: `actor_scoped`](repo-tools/overview.md)\n"
+        "- **repo** [attribution mode: `personal`](repo/overview.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "NOTES.md").write_text(
+        '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"repo",'
+        '"scope":"/context/repo","attribution_modes":["personal"],'
+        '"status":"complete","retry_count":0,"report":"/work/shards/repo.md"},'
+        '{"id":"repo-tools","scope":"/context/repo-tools",'
+        '"attribution_modes":["actor_scoped"],"status":"complete",'
+        '"retry_count":0,"report":"/work/shards/repo-tools.md"}]}'
+        "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+    (tmp_path / "shards/repo.md").write_text(
+        "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards/repo-tools.md").write_text(
+        "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_rejects_missing_context_item(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "github/acme/one/issue/1/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/two/issue/2/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/one/issue/{1}",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("not covered by any shard" in error for error in errors)
+
+
+def test_shard_partition_rejects_partial_brace_scope(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/2/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "partial",
+                "scope": "github/acme/repo/issue/{1}",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("issue/2" in error for error in errors)
+
+
+def test_shard_partition_allows_full_brace_scope(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/2/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "all",
+                "scope": "github/acme/repo/issue/{1,2}",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_allows_repository_broad_scope(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **issue-one** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n"
+        "- **issue-two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/2/overview.md)\n"
+        "- **pull-three** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/pull/3/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "repository",
+                "scope": "github/acme/repo",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_rejects_brace_overlap(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/2/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "first",
+                "scope": "github/acme/repo/issue/{1,2}",
+                "attribution_modes": ["actor_scoped"],
+            },
+            {
+                "id": "second",
+                "scope": "github/acme/repo/issue/{2}",
+                "attribution_modes": ["actor_scoped"],
+            },
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("issue/2" in error for error in errors)
+    assert any("covered by multiple shards" in error for error in errors)
+
+
+def test_shard_partition_resolves_mixed_misc_brace_scope_exactly(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **issue-one** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n"
+        "- **issue-two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/2/overview.md)\n"
+        "- **session-one** [attribution mode: `personal`]("
+        "opencode/work/project/session/01/overview.md)\n"
+        "- **session-three** [attribution mode: `personal`]("
+        "opencode/work/project/session/03/overview.md)\n"
+        "- **session-five** [attribution mode: `personal`]("
+        "opencode/work/project/session/05/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "misc",
+                "scope": (
+                    "misc: github/acme/repo/issue/{1,2}, "
+                    "opencode/work/project/session/{01,03}"
+                ),
+                "attribution_modes": ["personal", "actor_scoped"],
+            },
+            {
+                "id": "remaining",
+                "scope": "opencode/work/project/session/{05}",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_rejects_overlapping_context_item(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "github/acme/one/issue/1/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "first",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "second",
+                "scope": "github/acme/one/issue/{1}",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("covered by multiple shards" in error for error in errors)
+
+
+def test_shard_partition_allows_repository_scope_covering_multiple_items(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/pull/2/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "repo",
+                "scope": "repository acme/repo",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_allows_misc_scope_covering_explicit_items(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "opencode/home/work/session/01/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/1/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "misc",
+                "scope": (
+                    "misc: opencode/home/work/session/01, github/acme/repo/issue/1"
+                ),
+                "attribution_modes": ["personal", "actor_scoped"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def _write_partition_fixture(tmp_path: Path, shards: list[dict[str, object]]) -> None:
+    (tmp_path / "NOTES.md").write_text(
+        "<!-- SHARD_STATUS_BEGIN -->"
+        + json.dumps(
+            {
+                "shards": [
+                    {
+                        **shard,
+                        "status": "complete",
+                        "retry_count": 0,
+                        "report": f"/work/shards/{shard['id']}.md",
+                    }
+                    for shard in shards
+                ]
+            }
+        )
+        + "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+    for shard in shards:
+        (tmp_path / "shards" / f"{shard['id']}.md").write_text(
+            "## User work\n\nnone\n\n## Context-only evidence\n\nnone\n",
+            encoding="utf-8",
+        )
+
+
+def test_shard_validation_matches_context_scope_file_set(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **repo** [attribution mode: `actor_scoped`](github/repo/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "repo",
+                "scope": "repository repo; PRs #1, #2",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_validation_matches_source_path_scopes(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **GitHub** [attribution mode: `actor_scoped`]("
+        "github/example/project/pull/1/overview.md)\n"
+        "- **OpenCode** [attribution mode: `personal`]("
+        "opencode/home/tester/project/session/01/overview.md)\n",
+        encoding="utf-8",
+    )
+    shards = [
+        {
+            "id": "github",
+            "scope": "github/example/project/pull/{1}",
+            "attribution_modes": ["actor_scoped"],
+        },
+        {
+            "id": "opencode",
+            "scope": "opencode/home/tester/project/session/{01}",
+            "attribution_modes": ["personal"],
+        },
+    ]
+    _write_partition_fixture(tmp_path, shards)
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
 
 
 def test_cli_rejects_conflicting_inputs(capsys: pytest.CaptureFixture[str]) -> None:

@@ -12,6 +12,11 @@ from tracebase.archive import (
     Snapshot,
     encode_path_id,
 )
+from tracebase.attribution import (
+    AttributionError,
+    AttributionMode,
+    source_attribution_mode,
+)
 from tracebase.context import (
     ContextError,
     ContextRequest,
@@ -20,6 +25,7 @@ from tracebase.context import (
     load_archive,
     select_observation,
 )
+from tracebase.github_context import github_user_work_record_ids
 
 
 def request() -> ContextRequest:
@@ -356,6 +362,7 @@ def github_output(
     tmp_path: Path,
     evidence: dict[str, object | str],
     pull_request: dict[str, object] | None = None,
+    object_kind: str = "pull-request",
     effective_options: dict[str, object] | None = None,
     with_profile: bool = True,
 ) -> Path:
@@ -368,6 +375,7 @@ def github_output(
             "pull-request.json": payload,
             **evidence,
         },
+        object_kind=object_kind,
         effective_options=effective_options,
     )
     if with_profile:
@@ -652,6 +660,14 @@ def test_context_skips_known_chatgpt_source_without_projector(
         "github",
         "opencode",
     }
+    assert {
+        item.snapshot.manifest["source_kind"]: item.attribution_mode
+        for item in result.items
+    } == {
+        "github": AttributionMode.ACTOR_SCOPED,
+        "opencode": AttributionMode.PERSONAL,
+    }
+    assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
     assert "github/example/project/pull/1/overview.md" in files(output)
     assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
         output
@@ -856,6 +872,44 @@ def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None
     assert "Actor" not in overview
 
 
+@pytest.mark.parametrize(
+    "object_kind, object_name", [("issue", "Issue"), ("pull-request", "PR")]
+)
+@pytest.mark.parametrize(
+    "author, created_attribution",
+    [("tracked-user", "[User work]"), ("collaborator", "[Context only]")],
+)
+def test_github_object_updated_event_has_no_actor_provenance(
+    tmp_path: Path,
+    object_kind: str,
+    object_name: str,
+    author: str,
+    created_attribution: str,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(archive)
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "issue.json": {
+                **github_base(),
+                "user": {"login": author},
+                "created_at": "2026-01-01T00:30:00Z",
+                "updated_at": "2026-01-01T01:00:00Z",
+            }
+        },
+        object_kind=object_kind,
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    activity = text(output, "activity.md")
+
+    assert f"{object_name} created · {created_attribution}" in activity
+    assert f"{object_name} updated · [Context only]" in activity
+
+
 def test_comment_aliases_render_once_and_equal_bodies_remain_distinct(
     tmp_path: Path,
 ) -> None:
@@ -965,6 +1019,83 @@ def test_review_threads_are_materialized_and_unthreaded_comments_remain(
     assert "loose" in activity
     assert activity.count("first") == 1
     assert activity.count("reply") == 1
+
+
+def test_review_thread_classifies_rest_comments_by_graphql_canonical_id(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "review-comments.001.json": [
+                {
+                    "id": 776172573,
+                    "node_id": "PRRC_TRACKED",
+                    "body": "tracked inline review",
+                    "user": {"login": "tracked-user"},
+                    "path": "src/example.py",
+                    "line": 12,
+                    "created_at": "2026-01-01T01:00:00Z",
+                },
+                {
+                    "id": 776172574,
+                    "node_id": "PRRC_COLLABORATOR",
+                    "body": "collaborator inline review",
+                    "user": {"login": "collaborator"},
+                    "path": "src/example.py",
+                    "line": 12,
+                    "created_at": "2026-01-01T02:00:00Z",
+                },
+                {
+                    "id": 776172575,
+                    "node_id": "PRRC_TRACKED_FOLLOWUP",
+                    "body": "tracked follow-up",
+                    "user": {"login": "tracked-user"},
+                    "path": "src/example.py",
+                    "line": 12,
+                    "created_at": "2026-01-01T03:00:00Z",
+                },
+            ],
+            "review-threads.001.json": {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRT_THREAD",
+                                        "comments": {
+                                            "nodes": [
+                                                {"id": "PRRC_TRACKED"},
+                                                {"id": "PRRC_COLLABORATOR"},
+                                                {"id": "PRRC_TRACKED_FOLLOWUP"},
+                                            ]
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    activity = text(output, "activity.md")
+    assert activity.count("Review thread") == 1
+    assert "#### User work" not in activity
+    assert "#### Context-only evidence" not in activity
+    assert (
+        activity.index("tracked inline review")
+        < activity.index("collaborator inline review")
+        < activity.index("tracked follow-up")
+    )
+    assert activity.count("[User work]") == 2
+    assert activity.count("[Context only]") >= 1
 
 
 def test_active_review_thread_separates_earlier_and_future_comments(
@@ -1152,9 +1283,9 @@ def test_commits_use_commit_time_buckets_and_preserve_full_messages(
     background = text(output, "background.md")
     assert "Commit placement uses Git committer time" in activity
     assert activity.count("Commit placement uses Git committer time") == 1
-    assert "2026-01-01 09:00 · `during1` · unknown" in activity
+    assert "2026-01-01 09:00 · `during1` · unknown · [Context only]" in activity
     assert (
-        "- 2026-01-01 09:00 · `during1` · unknown\n"
+        "- 2026-01-01 09:00 · `during1` · unknown · [Context only]\n"
         "  Authored: 2026-01-01 10:00\n"
         "  During subject\n\n  Why and how"
     ) in activity
@@ -1163,7 +1294,7 @@ def test_commits_use_commit_time_buckets_and_preserve_full_messages(
     assert "cutoff1" not in activity
     assert "future1" not in activity
     assert "Commit placement uses Git committer time" in background
-    assert "2025-12-31 23:30 · `before1` · unknown" in background
+    assert "2025-12-31 23:30 · `before1` · unknown · [Context only]" in background
     assert "Before subject" in background and "Before body" in background
     assert "during1" not in background
 
@@ -1230,7 +1361,7 @@ def test_commits_keep_timeline_order_and_show_author_identity_and_time(
     assert activity.index("zzzzz") < activity.index("aaaaaaa")
     assert "Kai Yang (tracked account)" in activity
     assert activity.count("Kai Yang (tracked account)") == 1
-    assert "`same000` · Kai Yang\n" in activity
+    assert "`same000` · Kai Yang · [Context only]\n" in activity
     assert "mubai" in activity
     assert "kai@example.com" not in activity
     assert "Co-authored-by: Name <private@example.com>" in activity
@@ -1501,8 +1632,8 @@ def test_high_value_timeline_events_and_review_commit_are_rendered(
     assert "Base ref changed" in activity
     assert "Renamed old title -> new title" in activity
     assert (
-        "Review by @reviewer · 2026-01-01 17:00 · on abcdef1 (CHANGES_REQUESTED)"
-        in activity
+        "Review by @reviewer · 2026-01-01 17:00 · [Context only] · on abcdef1 "
+        "(CHANGES_REQUESTED)" in activity
     )
     assert "head_ref_deleted" not in activity
 
@@ -1708,7 +1839,7 @@ def test_opencode_root_session_uses_title_directory_and_compact_activity(
     assert "# #52 refactor\n" in text(output, "overview.md")
     activity = text(output, "activity.md")
     assert "Message" not in activity
-    assert "m" not in activity
+    assert "\n**M ·" not in activity
     assert "2026-01-01 00:30" in activity
     assert "Context limitations" not in text(output, "overview.md")
 
@@ -2932,3 +3063,273 @@ def test_context_generation_is_offline(
     archive = tmp_path / "archive"
     archive.mkdir()
     generate_context(archive, request(), tmp_path / "output")
+
+
+def test_source_attribution_mapping_is_explicit_and_rejects_unknown_kinds() -> None:
+    assert source_attribution_mode("opencode") is AttributionMode.PERSONAL
+    assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
+    assert source_attribution_mode("github") is AttributionMode.ACTOR_SCOPED
+    with pytest.raises(AttributionError, match="no attribution semantics"):
+        source_attribution_mode("future-source")
+
+
+def test_personal_opencode_delegated_work_is_user_work_and_exposes_mode(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            directory="/workspace/example",
+            messages=[
+                message(
+                    "delegated",
+                    "2026-01-01T01:00:00Z",
+                    [
+                        {
+                            "type": "text",
+                            "text": "Delegated investigation and implementation",
+                        }
+                    ],
+                    role="assistant",
+                ),
+                message(
+                    "validation",
+                    "2026-01-01T02:00:00Z",
+                    [{"type": "text", "text": "Tests and validation complete"}],
+                ),
+            ],
+        ),
+        "run",
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    index = (output / "index.md").read_text()
+    overview = text(output, "overview.md")
+    activity = text(output, "activity.md")
+    assert "attribution mode: `personal`" in index
+    assert "- Attribution mode: `personal`" in overview
+    assert "Attribution mode: `personal`" in activity
+    assert "delegated agent or subagent" in overview
+    assert "Delegated investigation and implementation" in activity
+    assert "Tests and validation complete" in activity
+
+
+def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(archive, emails=["tracked@example.com"])
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "comments.001.json": [
+                {
+                    "id": 1,
+                    "body": "tracked concern",
+                    "user": {"login": "Tracked-User"},
+                    "created_at": "2026-01-01T01:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "body": "other finding",
+                    "user": {"login": "other-reviewer"},
+                    "created_at": "2026-01-01T02:00:00Z",
+                },
+            ],
+            "reviews.001.json": [
+                {
+                    "id": 3,
+                    "body": "approved after review",
+                    "user": {"login": "TRACKED-USER"},
+                    "state": "APPROVED",
+                    "submitted_at": "2026-01-01T03:00:00Z",
+                },
+                {
+                    "id": 4,
+                    "body": "separate finding",
+                    "user": {"login": "other-reviewer"},
+                    "state": "CHANGES_REQUESTED",
+                    "submitted_at": "2026-01-01T04:00:00Z",
+                },
+            ],
+            "timeline.001.json": [
+                {
+                    "id": 5,
+                    "node_id": "COLLAB_COMMIT",
+                    "event": "committed",
+                    "author": {
+                        "name": "collaborator",
+                        "email": "collaborator@example.com",
+                        "date": "2026-01-01T05:00:00Z",
+                    },
+                    "committer": {"date": "2026-01-01T05:00:00Z"},
+                    "sha": "collab123456",
+                    "message": "Collaborator implementation",
+                },
+                {
+                    "id": 6,
+                    "node_id": "USER_COMMIT",
+                    "event": "committed",
+                    "author": {
+                        "name": "tracked-user",
+                        "email": "tracked@example.com",
+                        "date": "2026-01-01T06:00:00Z",
+                    },
+                    "committer": {"date": "2026-01-01T06:00:00Z"},
+                    "sha": "user12345678",
+                    "message": "Tracked follow-up",
+                },
+                {
+                    "id": 7,
+                    "node_id": "TRACKED_CLOSED",
+                    "event": "closed",
+                    "actor": {"login": "tracked-user"},
+                    "created_at": "2026-01-01T06:30:00Z",
+                },
+            ],
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    activity = text(output, "activity.md")
+    assert "Attribution mode: `actor_scoped`" in text(output, "overview.md")
+    assert activity.count("## Commits") == 1
+    assert "## User work" not in activity
+    assert "## Context-only evidence" not in activity
+    assert "Attribution mode: `actor_scoped`" in activity
+    assert activity.index("tracked concern") < activity.index("other finding")
+    assert activity.index("approved after review") < activity.index("separate finding")
+    assert activity.index("Collaborator implementation") < activity.index(
+        "Tracked follow-up"
+    )
+    assert "Closed by @tracked-user (tracked account) · [User work]" in activity
+    assert activity.count("[User work]") == 4
+    assert activity.count("[Context only]") == 4
+
+    result = extract_context(request(), load_archive(archive.root), archive.root)
+    projection = result.items[0].github
+    assert projection is not None
+    ids = github_user_work_record_ids(projection, request().start, request().end)
+    assert ("ordinary-comment", "1") in ids
+    assert ("review", "3") in ids
+    assert ("timeline", "USER_COMMIT") in ids
+    assert ("ordinary-comment", "2") not in ids
+    assert ("review", "4") not in ids
+    assert ("timeline", "COLLAB_COMMIT") not in ids
+
+
+def test_actor_scoped_item_with_only_collaborator_activity_is_context_only(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    write_github_profile(archive)
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "comments.001.json": [
+                {
+                    "id": 1,
+                    "body": "collaborator-only discussion",
+                    "user": {"login": "collaborator"},
+                    "created_at": "2026-01-01T01:00:00Z",
+                }
+            ],
+            "timeline.001.json": [
+                {
+                    "id": 2,
+                    "node_id": "COLLAB_COMMIT",
+                    "event": "committed",
+                    "author": {"email": "collaborator@example.com"},
+                    "committer": {
+                        "date": "2026-01-01T02:00:00Z",
+                    },
+                    "sha": "collab123456",
+                    "message": "Important collaborator implementation",
+                }
+            ],
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    overview = text(output, "overview.md")
+    activity = text(output, "activity.md")
+    assert "No tracked-account user work was identified" not in overview
+    assert "## User work" not in activity
+    assert "## Context-only evidence" not in activity
+    assert "Important collaborator implementation" in activity
+    assert "[Context only]" in activity
+    assert "attribution mode: `actor_scoped`" in (output / "index.md").read_text()
+
+
+def test_mixed_sources_keep_personal_work_and_tracked_actions_only(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session(
+            "root",
+            directory="/workspace/example",
+            messages=[
+                message(
+                    "design",
+                    "2026-01-01T01:00:00Z",
+                    [{"type": "text", "text": "Delegated design decision"}],
+                )
+            ],
+        ),
+        "opencode-run",
+    )
+    write_github_profile(archive, emails=["tracked@example.com"])
+    publish_github(
+        archive,
+        "PR_1",
+        {
+            "issue.json": github_base(),
+            "pull-request.json": {"node_id": "PR_1"},
+            "comments.001.json": [
+                {
+                    "id": 1,
+                    "body": "tracked decision",
+                    "user": {"login": "tracked-user"},
+                    "created_at": "2026-01-01T02:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "body": "collaborator implementation details",
+                    "user": {"login": "collaborator"},
+                    "created_at": "2026-01-01T03:00:00Z",
+                },
+            ],
+        },
+        effective_options={"actor_login": "tracked-user"},
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    index = (output / "index.md").read_text()
+    assert index.count("attribution mode: `personal`") == 1
+    assert index.count("attribution mode: `actor_scoped`") == 1
+    activity_files = {path.read_text() for path in output.rglob("activity.md")}
+    assert any("Delegated design decision" in content for content in activity_files)
+    github_activity = next(
+        content for content in activity_files if "tracked decision" in content
+    )
+    assert "tracked decision" in github_activity
+    assert "collaborator implementation details" in github_activity
+    assert "## User work" not in github_activity
+    assert "## Context-only evidence" not in github_activity
+    assert github_activity.index("[User work]") < github_activity.index(
+        "tracked decision"
+    )
+    assert "[Context only]" in github_activity

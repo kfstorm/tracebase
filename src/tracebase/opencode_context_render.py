@@ -61,7 +61,7 @@ def _render_messages(
     projection = item.opencode
     timezone = result.request.start.tzinfo
     assert timezone is not None
-    lines = [f"# {'Activity' if bucket == 'activity' else 'Background'}", ""]
+    lines: list[str] = []
     messages: list[tuple[dict[str, Any], str, list[str]]] = []
     for message in projection.messages:
         if message.get("_supporting_message") is True:
@@ -95,6 +95,16 @@ def _render_messages(
             ]
             messages = messages[first_retained:]
 
+    if not messages:
+        return []
+    lines.extend(
+        [
+            f"# {'Activity' if bucket == 'activity' else 'Background'}",
+            "",
+            f"Attribution mode: `{item.attribution_mode.value}`",
+            "",
+        ]
+    )
     for message, role, texts in messages:
         timestamp = format_timestamp(message.get("created"), timezone)
         lines.extend([_header(str(role), timestamp), ""])
@@ -117,10 +127,25 @@ def render_opencode(
     context = _session_context(projection)
     directory = context.get("working_directory", ".")
     project_directory = context.get("project_directory", directory)
-    overview = [f"# {title}", "", f"Project directory: `{project_directory}`"]
+    overview = [
+        f"# {title}",
+        "",
+        f"Project directory: `{project_directory}`",
+    ]
     if directory != project_directory:
         overview.append(f"Working directory: `{directory}`")
-    overview.append("")
+    overview.extend(
+        [
+            "",
+            "## Attribution",
+            "",
+            f"- Attribution mode: `{item.attribution_mode.value}`",
+            "- All materially meaningful OpenCode work is user work, including "
+            "delegated agent or subagent investigation, design, implementation, "
+            "debugging, validation, and decisions.",
+            "",
+        ]
+    )
     files: dict[str, list[str]] = {"overview.md": overview}
     activity = _render_messages(item, result, "activity")
     background = _render_messages(item, result, "background")
