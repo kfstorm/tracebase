@@ -22,6 +22,7 @@ from tracebase.archive import (
     Snapshot,
     decode_path_id,
     encode_path_id,
+    load_published_archive,
     uuid7,
 )
 from tracebase.github import (
@@ -62,6 +63,23 @@ def build_run(
         collector_version="test",
         effective_options={},
     )
+
+
+def write_session_snapshot(
+    run: CollectionRun, *, source_id: str = "session-1", evidence: bool = True
+) -> Path:
+    snapshot_root = run.write_snapshot(
+        Snapshot(
+            source_kind="opencode",
+            object_kind="session",
+            source_id=source_id,
+            observation_window=run.collection_range.as_manifest(),
+            evidence_files=({"path": "session.json"},),
+        )
+    )
+    if evidence:
+        run.write_evidence(snapshot_root, "session.json", b"session")
+    return snapshot_root
 
 
 def build_github_run(archive: Archive) -> CollectionRun:
@@ -880,15 +898,7 @@ def test_publish_rejects_missing_declared_evidence_and_keeps_staging() -> None:
     with tempfile.TemporaryDirectory() as directory:
         archive = Archive(directory)
         run = build_run(archive)
-        run.write_snapshot(
-            Snapshot(
-                source_kind="opencode",
-                object_kind="session",
-                source_id="session-1",
-                observation_window={},
-                evidence_files=({"path": "session.json"},),
-            )
-        )
+        write_session_snapshot(run, evidence=False)
 
         with pytest.raises(ArchiveError, match="evidence"):
             run.publish({})
@@ -897,20 +907,59 @@ def test_publish_rejects_missing_declared_evidence_and_keeps_staging() -> None:
         assert not (Path(directory) / "runs").exists()
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("format_version", 2, "format"),
+        ("observation_window", {}, "observation"),
+    ],
+)
+def test_publish_rejects_invalid_snapshot_contract_fields(
+    field: str, value: object, error: str
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        run = build_run(archive)
+        snapshot_root = write_session_snapshot(run)
+        manifest_path = snapshot_root / "snapshot.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest[field] = value
+        manifest_path.write_text(json.dumps(manifest))
+
+        with pytest.raises(ArchiveError, match=error):
+            run.publish({})
+
+        assert run.staging.exists()
+        assert not (Path(directory) / "runs").exists()
+
+
+def test_published_reader_rejects_the_same_snapshot_contract_fields() -> None:
+    for field, value, error in (
+        ("format_version", 2, "format"),
+        ("observation_window", {}, "observation"),
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Archive(directory)
+            run = build_run(archive)
+            snapshot_root = write_session_snapshot(run)
+            snapshot_relative_path = snapshot_root.relative_to(run.staging)
+            published = run.publish({})
+            loaded = load_published_archive(directory)
+            assert loaded[0].snapshots[0].evidence["session.json"] == b"session"
+            manifest_path = published / snapshot_relative_path / "snapshot.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest[field] = value
+            manifest_path.write_text(json.dumps(manifest))
+
+            with pytest.raises(ArchiveError, match=error):
+                load_published_archive(directory)
+
+
 def test_publish_rejects_unlisted_evidence() -> None:
     with tempfile.TemporaryDirectory() as directory:
         archive = Archive(directory)
         run = build_run(archive)
-        snapshot_root = run.write_snapshot(
-            Snapshot(
-                source_kind="opencode",
-                object_kind="session",
-                source_id="session-1",
-                observation_window={},
-                evidence_files=({"path": "session.json"},),
-            )
-        )
-        run.write_evidence(snapshot_root, "session.json", b"session")
+        snapshot_root = write_session_snapshot(run)
         run.write_evidence(snapshot_root, "unexpected.json", b"unexpected")
 
         with pytest.raises(ArchiveError, match="evidence"):
@@ -918,6 +967,39 @@ def test_publish_rejects_unlisted_evidence() -> None:
 
         assert run.staging.exists()
         assert not (Path(directory) / "runs").exists()
+
+
+@pytest.mark.parametrize("evidence_kind", ["directory", "symlink"])
+def test_publish_rejects_non_regular_declared_evidence(evidence_kind: str) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        run = build_run(archive)
+        snapshot_root = write_session_snapshot(run, evidence=False)
+        evidence_path = snapshot_root / "session.json"
+        if evidence_kind == "directory":
+            evidence_path.mkdir()
+        else:
+            outside = Path(directory) / "outside.json"
+            outside.write_bytes(b"session")
+            evidence_path.symlink_to(outside)
+
+        with pytest.raises(ArchiveError, match=r"regular|symlink"):
+            run.publish({})
+
+        assert run.staging.exists()
+        assert not (Path(directory) / "runs").exists()
+
+
+def test_corrupt_staged_snapshot_is_retried() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        run = build_run(Archive(directory))
+        write_session_snapshot(run, evidence=False)
+
+        assert not run.has_staged_snapshot("session", "session-1")
+        run.discard_staged_snapshot("session", "session-1")
+
+        write_session_snapshot(run)
+        assert run.has_staged_snapshot("session", "session-1")
 
 
 def test_write_snapshot_rejects_non_json_metadata_before_creating_files() -> None:
@@ -957,7 +1039,7 @@ def test_manifest_paths_are_posix_and_object_kind_is_an_archive_identifier() -> 
                 source_kind="opencode",
                 object_kind="session",
                 source_id="session-2",
-                observation_window={},
+                observation_window=run.collection_range.as_manifest(),
                 evidence_files=({"path": "nested/session.json"},),
             )
         )
