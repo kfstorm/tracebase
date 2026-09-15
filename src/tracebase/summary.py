@@ -344,7 +344,15 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
             config = prepare_state(state, request.model)
             ensure_image(IMAGE, dockerfile, OPENCODE_VERSION)
             runner = ContainerRunner(
-                IMAGE, ContainerMounts(context, work, results, state, task=task)
+                IMAGE,
+                ContainerMounts(
+                    context,
+                    work,
+                    results,
+                    state,
+                    Path(__file__).parent / "summary_shard_validator.py",
+                    task=task,
+                ),
             )
         else:
             config = prepare_config(request.model)

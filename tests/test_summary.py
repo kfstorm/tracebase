@@ -16,7 +16,7 @@ from tracebase.summary import (
     summarize,
     summarize_archive,
 )
-from tracebase.summary_shards import inspect_shards
+from tracebase.summary_shards import inspect_shard_plan, inspect_shards
 
 
 class FakeRunner:
@@ -388,6 +388,11 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     assert "analysis, research, investigation, review, evaluation" in prompt
     assert "assistant patch, command, or" in prompt
     assert "suggestion to run, test, or" in prompt
+    assert "Only `User work` may be promoted" in prompt
+    assert "Repository ownership" in prompt
+    assert "Run the plan validator only during initial shard planning" in prompt
+    assert "After worker dispatch begins, never run the plan validator again" in prompt
+    assert "use the\nshard status and reports for completion reconciliation." in prompt
 
 
 def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:
@@ -704,6 +709,250 @@ def test_shard_validation_rejects_context_attribution_mismatch(
     )
 
     assert "do not match Context" in inspect_shards(tmp_path, context_dir).errors[0]
+
+
+def test_shard_plan_accepts_a_complete_partition(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "github/acme/repo/issue/1/overview.md)\n"
+        "- **two** [attribution mode: `actor_scoped`]("
+        "github/acme/repo/issue/2/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/repo/issue/{1}",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "two",
+                "scope": "github/acme/repo/issue/{2}",
+                "attribution_modes": ["actor_scoped"],
+            },
+        ],
+    )
+
+    assert inspect_shard_plan(tmp_path, context_dir).errors == ()
+
+
+def test_shard_plan_rejects_a_missing_context_item(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`](github/acme/one/overview.md)\n"
+        "- **two** [attribution mode: `personal`](github/acme/two/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    errors = inspect_shard_plan(tmp_path, context_dir).errors
+
+    assert "Context item 'github/acme/two' is not covered by any shard" in errors
+
+
+def test_shard_plan_rejects_a_context_item_in_two_shards(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`](github/acme/one/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "first",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "second",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    errors = inspect_shard_plan(tmp_path, context_dir).errors
+
+    assert any("covered by multiple shards" in error for error in errors)
+
+
+def test_shard_plan_rejects_an_unmatched_scope(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`](github/acme/one/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/missing",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    errors = inspect_shard_plan(tmp_path, context_dir).errors
+
+    assert "shard 'one' scope does not match Context items" in errors
+
+
+def test_shard_plan_rejects_mismatched_attribution_modes(tmp_path: Path) -> None:
+    context_dir = _single_context_item(tmp_path)
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/one",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    errors = inspect_shard_plan(tmp_path, context_dir).errors
+
+    assert "shard 'one' attribution modes do not match Context" in errors
+
+
+def test_shard_plan_rejects_a_non_canonical_report_path(tmp_path: Path) -> None:
+    context_dir = _single_context_item(tmp_path)
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+                "report": "/work/shards/other.md",
+            }
+        ],
+    )
+
+    errors = inspect_shard_plan(tmp_path, context_dir).errors
+
+    assert "shard 'one' has a non-canonical report path" in errors
+
+
+def test_shard_plan_rejects_non_pending_status_with_exact_error(
+    tmp_path: Path,
+) -> None:
+    context_dir = _single_context_item(tmp_path)
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+                "status": "complete",
+            }
+        ],
+    )
+
+    assert inspect_shard_plan(tmp_path, context_dir).errors == (
+        "shard 'one' is not pending",
+    )
+
+
+def test_shard_plan_rejects_nonzero_retry_count_with_exact_error(
+    tmp_path: Path,
+) -> None:
+    context_dir = _single_context_item(tmp_path)
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+                "retry_count": 1,
+            }
+        ],
+    )
+
+    assert inspect_shard_plan(tmp_path, context_dir).errors == (
+        "shard 'one' retry_count must be 0 before dispatch",
+    )
+
+
+def test_post_run_validation_still_requires_terminal_status_and_report(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "NOTES.md").write_text(
+        '<!-- SHARD_STATUS_BEGIN -->{"shards":[{"id":"one",'
+        '"status":"pending","retry_count":0,"report":"/work/shards/one.md"}]}'
+        "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+
+    errors = inspect_shards(tmp_path).errors
+
+    assert "shard 'one' is not in a terminal state" in errors
+    assert "shard 'one' canonical report is missing" in errors
+
+
+def test_executable_shard_plan_success_has_exact_output(tmp_path: Path) -> None:
+    context_dir = _single_context_item(tmp_path)
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/one",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    result = _run_shard_validator(tmp_path, context_dir)
+
+    assert result.returncode == 0
+    assert result.stdout == "Shard plan validation passed.\n"
+    assert result.stderr == ""
+
+
+def test_executable_shard_plan_failure_prints_validation_errors(
+    tmp_path: Path,
+) -> None:
+    context_dir = _single_context_item(tmp_path)
+    _write_plan_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "github/acme/missing",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    result = _run_shard_validator(tmp_path, context_dir)
+
+    assert result.returncode != 0
+    assert result.stdout == (
+        "shard 'one' scope does not match Context items\n"
+        "Context item 'github/acme/one' is not covered by any shard\n"
+    )
+    assert result.stderr == ""
 
 
 def test_shard_validation_does_not_match_context_scope_prefixes(
@@ -1243,6 +1492,49 @@ def test_shard_partition_allows_misc_scope_covering_explicit_items(
     )
 
     assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def _single_context_item(tmp_path: Path) -> Path:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`](github/acme/one/overview.md)\n",
+        encoding="utf-8",
+    )
+    return context_dir
+
+
+def _write_plan_fixture(tmp_path: Path, shards: list[dict[str, object]]) -> None:
+    entries = []
+    for shard in shards:
+        shard_id = str(shard["id"])
+        entries.append(
+            {
+                **shard,
+                "status": shard.get("status", "pending"),
+                "retry_count": shard.get("retry_count", 0),
+                "report": shard.get("report", f"/work/shards/{shard_id}.md"),
+            }
+        )
+    (tmp_path / "NOTES.md").write_text(
+        "<!-- SHARD_STATUS_BEGIN -->"
+        + json.dumps({"shards": entries})
+        + "<!-- SHARD_STATUS_END -->",
+        encoding="utf-8",
+    )
+    (tmp_path / "shards").mkdir()
+
+
+def _run_shard_validator(
+    work_dir: Path, context_dir: Path
+) -> subprocess.CompletedProcess[str]:
+    validator = Path(__file__).parents[1] / "src/tracebase/summary_shard_validator.py"
+    return subprocess.run(
+        ["python3", str(validator), "plan", str(work_dir), str(context_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _write_partition_fixture(tmp_path: Path, shards: list[dict[str, object]]) -> None:

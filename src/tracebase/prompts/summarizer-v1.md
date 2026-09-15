@@ -228,8 +228,8 @@ None.
 The assigned conversation was reviewed and classified as non-work for the requested work summary.
 ```
 
-Only `User work` containing materially meaningful work may be promoted into the
-root workstream inventory. `User work: None` must not create a workstream merely
+Only `User work` may be promoted into the root workstream inventory, and it must
+contain materially meaningful work. `User work: None` must not create a workstream merely
 because the item appears in `index.md`. Keep `Context-only evidence` available
 for interpretation, including the reviewed non-work exclusion state, but never
 promote it as a workstream, restate it as the user's work, or leak the concrete
@@ -282,6 +282,23 @@ meaningful work", and do not ask a worker to read the root `TASK.md`.
 Put all attributed work-related evidence in `## User work`, including work that
 may later be omitted by the root for materiality. Put non-work and
 collaborator/context-only evidence in `## Context-only evidence`.
+
+Before issuing any `task` call, run:
+
+`python3 /opt/tracebase/validate-summary-shards.py plan /work /context`
+
+Do not issue any `task` call unless this command exits successfully. If validation
+fails, use the reported errors to correct the shard inventory in
+`/work/NOTES.md`, then run the same command again. Repeat until validation
+succeeds. Do not work around, replace, or skip this validation.
+
+Run the plan validator only during initial shard planning, before the first task
+call. After worker dispatch begins, never run the plan validator again; use the
+shard status and reports for completion reconciliation.
+
+Once validation succeeds, treat the shard inventory as frozen. Do not add,
+remove, merge, split, rename, or change the scope of any shard after worker
+dispatch begins.
 
 For each independent shard, issue one foreground `task` call with the shard ID
 and its exact Context paths/scope in the task prompt. Dispatch all independent
