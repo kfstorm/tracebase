@@ -141,19 +141,6 @@ def _is_regular_file(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
 
 
-def _validate_declared_evidence(snapshot_root: Path, evidence_files: Any) -> set[str]:
-    declared = _normalize_evidence_files(evidence_files)
-    declared_paths = {evidence_file["path"] for evidence_file in declared}
-    for evidence_file in declared:
-        evidence_path = snapshot_root.joinpath(
-            *PurePosixPath(evidence_file["path"]).parts
-        )
-        _ensure_inside(evidence_path, snapshot_root)
-        if not _is_regular_file(evidence_path):
-            raise ArchiveError("declared evidence file is missing or not regular")
-    return declared_paths
-
-
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -335,6 +322,53 @@ def _parse_observation_window(value: Any) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _validate_snapshot_filesystem(
+    snapshot_root: Path,
+    source_kind: str,
+    object_kind: str,
+    source_id: str,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Validate one complete Snapshot tree and return its evidence order."""
+    if not snapshot_root.is_dir() or snapshot_root.is_symlink():
+        raise ArchiveError("snapshot directory is not regular")
+    manifest_path = snapshot_root / "snapshot.json"
+    manifest = _read_published_object(manifest_path, "snapshot manifest")
+    if manifest.get("format_version") != FORMAT_VERSION:
+        raise ArchiveError("snapshot format version is invalid")
+    if any(
+        manifest.get(field) != expected
+        for field, expected in (
+            ("source_kind", source_kind),
+            ("object_kind", object_kind),
+            ("source_id", source_id),
+        )
+    ):
+        raise ArchiveError("snapshot manifest identity is inconsistent")
+    _parse_observation_window(manifest.get("observation_window"))
+
+    declared = _normalize_evidence_files(manifest.get("evidence_files"))
+    evidence_paths = tuple(evidence_file["path"] for evidence_file in declared)
+    for path in evidence_paths:
+        evidence_path = snapshot_root.joinpath(*PurePosixPath(path).parts)
+        _ensure_inside(evidence_path, snapshot_root)
+        if not _is_regular_file(evidence_path):
+            raise ArchiveError("declared evidence file is missing or not regular")
+
+    actual_paths: set[str] = set()
+    for path in snapshot_root.rglob("*"):
+        _ensure_inside(path, snapshot_root)
+        if path == manifest_path:
+            continue
+        if path.is_dir():
+            continue
+        if not _is_regular_file(path):
+            raise ArchiveError("snapshot contains a non-regular evidence entry")
+        actual_paths.add(path.relative_to(snapshot_root).as_posix())
+    if actual_paths != set(evidence_paths):
+        raise ArchiveError("snapshot evidence files do not match its manifest")
+    return manifest, evidence_paths
+
+
 def _validate_published_run(run_root: Path) -> dict[str, Any]:
     run = _read_published_object(run_root / "run.json", "run manifest")
     if (
@@ -404,36 +438,10 @@ def _load_published_snapshot(
     _ensure_inside(root, run_root / "snapshots")
     if not root.is_dir() or root.is_symlink():
         raise ArchiveError("snapshot directory is not regular")
-    manifest = _read_published_object(root / "snapshot.json", "snapshot manifest")
-    if (
-        manifest.get("format_version") != FORMAT_VERSION
-        or manifest.get("source_kind") != source_kind
-        or manifest.get("object_kind") != object_kind
-        or manifest.get("source_id") != source_id
-    ):
-        raise ArchiveError("snapshot manifest identity is inconsistent")
-    _parse_observation_window(manifest.get("observation_window"))
-    declared = _normalize_evidence_files(manifest.get("evidence_files"))
-    evidence_paths: list[str] = []
-    for descriptor in declared:
-        evidence_path = root.joinpath(*PurePosixPath(descriptor["path"]).parts)
-        _ensure_inside(evidence_path, root)
-        if not _is_regular_file(evidence_path):
-            raise ArchiveError("declared evidence file is missing or not regular")
-        evidence_paths.append(descriptor["path"])
-    actual: set[str] = set()
-    for child in root.rglob("*"):
-        _ensure_inside(child, root)
-        if child == root / "snapshot.json" or child.is_dir():
-            continue
-        if not _is_regular_file(child):
-            raise ArchiveError("snapshot contains a non-regular evidence entry")
-        actual.add(child.relative_to(root).as_posix())
-    if actual != set(evidence_paths):
-        raise ArchiveError("snapshot evidence files do not match its manifest")
-    return PublishedSnapshot(
-        run, manifest, _EvidenceStore(root, tuple(evidence_paths)), root
+    manifest, evidence_paths = _validate_snapshot_filesystem(
+        root, source_kind, object_kind, source_id
     )
+    return PublishedSnapshot(run, manifest, _EvidenceStore(root, evidence_paths), root)
 
 
 def load_published_archive(root: str | Path) -> tuple[PublishedRun, ...]:
@@ -604,17 +612,14 @@ class CollectionRun:
             if entry["object_kind"] != object_kind or entry["source_id"] != source_id:
                 continue
             snapshot_root = self.staging / PurePosixPath(entry["path"])
-            manifest_path = snapshot_root / "snapshot.json"
-            if not _is_regular_file(manifest_path):
-                return False
             try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if not isinstance(manifest, dict):
-                    return False
-                _validate_declared_evidence(
-                    snapshot_root, manifest.get("evidence_files")
+                _validate_snapshot_filesystem(
+                    snapshot_root,
+                    entry["source_kind"],
+                    entry["object_kind"],
+                    entry["source_id"],
                 )
-            except OSError, ArchiveError, json.JSONDecodeError:
+            except OSError, ArchiveError:
                 return False
             return True
         return False
@@ -753,37 +758,12 @@ class CollectionRun:
             _ensure_inside(snapshot_root, snapshots_root)
             if not snapshot_root.is_dir() or snapshot_root.is_symlink():
                 raise ArchiveError("Snapshot directory is not a regular directory")
-            snapshot_manifest_path = snapshot_root / "snapshot.json"
-            if not _is_regular_file(snapshot_manifest_path):
-                raise ArchiveError("Snapshot manifest is not a regular file")
-            try:
-                snapshot_manifest = json.loads(
-                    snapshot_manifest_path.read_text(encoding="utf-8")
-                )
-            except OSError, json.JSONDecodeError:
-                raise ArchiveError("Snapshot manifest is unreadable") from None
-            if not isinstance(snapshot_manifest, dict):
-                raise ArchiveError("Snapshot manifest is invalid")
-            for field in ("source_kind", "object_kind", "source_id"):
-                if snapshot_manifest.get(field) != entry[field]:
-                    raise ArchiveError(f"Snapshot {field} is inconsistent")
-            declared_paths = _validate_declared_evidence(
-                snapshot_root, snapshot_manifest.get("evidence_files")
+            _validate_snapshot_filesystem(
+                snapshot_root,
+                entry["source_kind"],
+                entry["object_kind"],
+                entry["source_id"],
             )
-
-            actual_paths: set[str] = set()
-            for path in snapshot_root.rglob("*"):
-                if path == snapshot_manifest_path:
-                    continue
-                if path.is_symlink():
-                    raise ArchiveError("Snapshot contains a non-regular evidence entry")
-                if path.is_dir():
-                    continue
-                if not path.is_file():
-                    raise ArchiveError("Snapshot contains a non-regular evidence entry")
-                actual_paths.add(path.relative_to(snapshot_root).as_posix())
-            if actual_paths != declared_paths:
-                raise ArchiveError("Snapshot evidence files do not match its manifest")
 
     @staticmethod
     def _write_json(path: Path, value: dict[str, Any]) -> None:
