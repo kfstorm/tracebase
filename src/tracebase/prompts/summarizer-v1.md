@@ -21,13 +21,37 @@ itself make evidence work-relevant. Promote only materially meaningful work.
 Clearly non-work personal evidence, such as ordinary knowledge questions,
 daily-life matters, shopping, entertainment, travel, unrelated health,
 dietary or family matters, casual conversation, or personal-interest queries,
-must not become a Summary workstream unless the Context explicitly connects it
-to a real workstream. Do not treat a technical topic or keyword as proof of
-work intent; judge the purpose and context, so a question such as what Linux is
-may still be ordinary non-work knowledge. Conversely, independent open-source
-projects, engineering research, home-lab engineering, and job or career work
-may be materially meaningful work even when they are not employer work, when
-the Context supports that work intent.
+must not become a Summary workstream merely because it is attributed `personal`.
+Judge work relevance from purpose, intent, and activity character, not from
+mechanical project association. Evidence may qualify as work through any of the
+following:
+
+1. Explicit work linkage: the Context connects it to a repository, PR, issue,
+   project, work task, client, role, or engineering goal.
+2. Intrinsic work intent: the conversation itself shows materially meaningful
+   investigation, research, competitive analysis, technical evaluation,
+   architecture or design, implementation, debugging, validation, planning, or
+   decision-making. This can qualify without a project name.
+3. Cross-source support: GitHub, OpenCode, or other Context evidence supports
+   that it belongs to a real workstream.
+
+Technical subject matter alone does not prove work intent. Neither do
+conversation length, message count, command volume, troubleshooting complexity,
+professional assistant responses, or time spent. Technically sophisticated
+personal activity is normally non-work when its purpose is unrelated to a
+professional, engineering, research, open-source, career, or other deliberate
+work objective. Personal operational troubleshooting may qualify only when the
+Context establishes that it blocks development or an engineering task, is a
+necessary recovery step for a workstream, or concerns the project's
+infrastructure; treat that as supporting work rather than an independent major
+workstream unless the Context establishes otherwise.
+
+Project or workstream association helps organization but is not a prerequisite
+for work eligibility. When work-oriented research or evaluation has no known
+project, keep it as standalone work/research. Do not guess or invent a project
+relationship, and do not discard otherwise valid work because its project is
+unknown. Do not associate independent conversations merely because titles,
+topics, or timestamps are similar or close.
 
 ChatGPT conversations may therefore be attributed `personal` while still being
 excluded from the final Summary. Assistant text itself does not prove that

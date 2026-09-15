@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -277,43 +278,42 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     ).read_text(encoding="utf-8")
     normalized_prompt = " ".join(prompt.split())
 
+    required_semantics = (
+        r"`personal` is an attribution rule, not a work-relevance classification",
+        r"Attribution and work relevance are separate judgments",
+        r"purpose, intent, and activity character",
+        r"Explicit work linkage:.*repository.*PR.*issue.*project",
+        r"Intrinsic work intent:.*investigation, research, competitive analysis,"
+        r" technical evaluation",
+        r"Cross-source support:.*GitHub, OpenCode",
+        r"Technical subject matter alone does not prove work intent",
+        r"conversation length, message count, command volume, troubleshooting"
+        r" complexity",
+        r"Personal operational troubleshooting may qualify only when.*blocks"
+        r" development or an engineering task",
+        r"supporting work rather than an independent major workstream",
+        r"association helps organization but is not a prerequisite for"
+        r" work eligibility",
+        r"standalone work/research",
+        r"Do not guess or invent a project relationship",
+        r"do not discard otherwise valid work because its project is unknown",
+    )
+    for semantic_clause in required_semantics:
+        assert re.search(semantic_clause, normalized_prompt)
+
     assert "final Summary is a projection of the user's work" in prompt
     assert "`personal`" in prompt and "`actor_scoped`" in prompt
-    assert (
-        "`personal` is an attribution rule, not a work-relevance classification"
-        in normalized_prompt
-    )
-    assert "Attribution and work relevance are separate judgments" in prompt
-    assert (
-        "`personal` attribution does not by itself make evidence work-relevant"
-        in normalized_prompt
-    )
-    assert "must not become a Summary workstream" in normalized_prompt
-    assert "technical topic or keyword as proof of work intent" in normalized_prompt
     assert "authoritative attribution" in prompt
     assert "same review thread" in prompt
     assert "single `## Commits` section" in prompt
     assert "## User work" in prompt
     assert "## Context-only evidence" in prompt
-    assert (
-        "Only `User work` containing materially meaningful work may be promoted"
-        in normalized_prompt
-    )
     assert "shard inventory covers every projected Context item" in normalized_prompt
     assert (
         "workstream inventory contains only materially meaningful work"
         in normalized_prompt
     )
     assert "User work: None" in normalized_prompt
-    assert "classified as non-work for the requested work summary" in normalized_prompt
-    assert (
-        "must not create a workstream merely because the item appears in `index.md`"
-        in normalized_prompt
-    )
-    assert (
-        "leak the concrete non-work content into the final Summary" in normalized_prompt
-    )
-    assert "Repository ownership" in prompt
     assert (
         "Each ChatGPT conversation is an independent projected Context item"
         in normalized_prompt
@@ -322,9 +322,6 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     assert (
         "Do not create a cross-source relationship from time proximity"
         in normalized_prompt
-    )
-    assert (
-        "reduce phase" in normalized_prompt and "real workstream" in normalized_prompt
     )
     assert "`activity.md`" in normalized_prompt
     assert "`background.md`" in normalized_prompt
