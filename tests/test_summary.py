@@ -51,6 +51,20 @@ class FakeRunner:
             if not self.recover or "--session" in arguments:
                 work = self.output / "work"
                 (work / "shards").mkdir(exist_ok=True)
+                opencode = self.output / ".opencode-data/share/opencode"
+                opencode.mkdir(parents=True, exist_ok=True)
+                (opencode / "opencode.db").write_text(
+                    "synthetic-root-session\nsynthetic-child-session\n",
+                    encoding="utf-8",
+                )
+                for name in (
+                    "auth.json",
+                    "credentials.json",
+                    "credentials.toml",
+                    "secrets.json",
+                    "provider-token.json",
+                ):
+                    (opencode / name).write_text("synthetic-secret", encoding="utf-8")
                 shard_specs = self.shards or [
                     {
                         "id": "repo",
@@ -334,6 +348,26 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     assert "assistant proposal" in normalized_prompt
     assert "implementation, execution, deployment" in normalized_prompt
     assert "validation happened" in normalized_prompt
+    worker_contract = (
+        "Worker Relevance Contract",
+        "personal` is attribution, not work relevance",
+        "Explicit project or workstream association may support relevance "
+        "but is not required",
+        "Technical subject matter, complexity, duration, interaction count, or",
+        "troubleshooting depth do not by themselves establish work relevance",
+        "Non-work personal activity belongs in `Context-only evidence`",
+        "delegated cognitive work",
+        "The worker does not decide Summary materiality",
+        "Work-related does not mean it must appear in the final Summary",
+        "must never create a new workstream",
+        "never to rescue a worker's misclassification",
+        "do not ask a worker to read the root `TASK.md`",
+    )
+    for clause in worker_contract:
+        assert clause in normalized_prompt
+    assert "analysis, research, investigation, review, evaluation" in prompt
+    assert "assistant patch, command, or" in prompt
+    assert "suggestion to run, test, or" in prompt
 
 
 def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:
@@ -400,8 +434,25 @@ def test_debug_retains_existing_runtime_artifacts_without_extra_calls(
     assert "## Context-only evidence" in (debug / "work/shards/repo.md").read_text()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "runtime/stderr.log").is_file()
+    state = debug / "opencode/share/opencode/opencode.db"
+    assert state.read_text(encoding="utf-8") == (
+        "synthetic-root-session\nsynthetic-child-session\n"
+    )
+    assert json.loads((debug / "manifest.json").read_text())["opencode"] == {
+        "allowlisted_paths": [
+            "share/opencode/opencode.db",
+            "share/opencode/opencode.db-wal",
+            "share/opencode/opencode.db-shm",
+            "share/opencode/opencode.db-journal",
+        ],
+        "copied_paths": ["share/opencode/opencode.db"],
+        "state_root": ".opencode-data",
+    }
     assert not (debug / ".opencode-data").exists()
     assert not list(debug.rglob("auth.json"))
+    assert not list(debug.rglob("credentials*"))
+    assert not list(debug.rglob("secrets*"))
+    assert not list(debug.rglob("*token*"))
     assert len(runner.calls) == 2
 
 
@@ -441,6 +492,7 @@ def test_failure_with_debug_retains_available_artifacts(tmp_path: Path) -> None:
     assert not output.exists()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "work/shards/repo.md").is_file()
+    assert (debug / "opencode/share/opencode/opencode.db").is_file()
     assert (debug / "results/summary.md").read_text() == "# Work summary\n"
     assert json.loads((debug / "manifest.json").read_text())["status"] == "failed"
     assert len(runner.calls) == 2

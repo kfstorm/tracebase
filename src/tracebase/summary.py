@@ -27,6 +27,24 @@ RECOVERY_PROMPT = (
     "not start a new session or silently omit a shard."
 )
 _INTERVAL = re.compile(r"^Requested interval: `(.+?) <= t < (.+?)`$", re.MULTILINE)
+_OPENCODE_STATE_ALLOWLIST = (
+    Path("share/opencode/opencode.db"),
+    Path("share/opencode/opencode.db-wal"),
+    Path("share/opencode/opencode.db-shm"),
+    Path("share/opencode/opencode.db-journal"),
+)
+
+
+def _is_credential_state_path(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        name == "auth.json"
+        or name.startswith("credentials")
+        or name.startswith("secrets")
+        or "auth" in name
+        or "credential" in name
+        or "token" in name
+    )
 
 
 class SummaryError(RuntimeError):
@@ -220,6 +238,31 @@ def _publish_directory(staging: Path, target: Path, label: str) -> Path:
     return target
 
 
+def _copy_opencode_state(run: Path, staging: Path) -> list[str]:
+    """Copy only pinned OpenCode's non-secret SQLite session state."""
+    state = run / ".opencode-data"
+    target = staging / "opencode"
+    target.mkdir()
+    copied: list[str] = []
+    for relative in _OPENCODE_STATE_ALLOWLIST:
+        if _is_credential_state_path(relative):
+            raise SummaryError("OpenCode state allowlist contains credential state")
+        source = state / relative
+        if not source.exists():
+            continue
+        if source.is_symlink() or not source.is_file():
+            raise SummaryError("OpenCode allowlisted state is not a regular file")
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        copied.append(relative.as_posix())
+    return copied
+
+
+def _ignore_debug_credentials(_directory: str, names: list[str]) -> list[str]:
+    return [name for name in names if _is_credential_state_path(Path(name))]
+
+
 def _publish_debug(
     run: Path,
     target: Path,
@@ -229,18 +272,23 @@ def _publish_debug(
 ) -> None:
     staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
     try:
-        excluded = shutil.ignore_patterns(
-            "auth.json",
-            "credentials.json",
-            "credentials.toml",
-            "secrets.json",
-            ".opencode-data",
-        )
+        excluded = _ignore_debug_credentials
         for name in ("context", "work", "runtime", "results"):
             source = run / name
             if source.is_dir():
                 shutil.copytree(source, staging / name, ignore=excluded)
-        manifest = {**provenance, "status": status}
+        copied_opencode = _copy_opencode_state(run, staging)
+        manifest = {
+            **provenance,
+            "status": status,
+            "opencode": {
+                "state_root": ".opencode-data",
+                "allowlisted_paths": [
+                    path.as_posix() for path in _OPENCODE_STATE_ALLOWLIST
+                ],
+                "copied_paths": copied_opencode,
+            },
+        }
         if error is not None:
             manifest["error"] = error
         _write_json(staging / "manifest.json", manifest)

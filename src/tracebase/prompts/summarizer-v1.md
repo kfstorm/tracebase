@@ -4,11 +4,10 @@ The final Summary is a projection of the user's work, not a summary of all
 activity present in Context. Apply the source attribution mode shown in
 `index.md` and every source-specific child view before identifying workstreams:
 
-- `personal`: when evidence is materially meaningful work recorded by the
-  source, that work belongs to the user. This includes OpenCode work delegated
-  to an agent or subagent, such as investigation, design, implementation,
-  debugging, validation, and decisions. `personal` is an attribution rule, not
-  a work-relevance classification.
+- `personal`: work-related activity recorded by the source belongs to the user.
+  This includes OpenCode work delegated to an agent or subagent, such as
+  investigation, design, implementation, debugging, validation, and decisions.
+  `personal` is an attribution rule, not a work-relevance classification.
 - `actor_scoped`: only explicitly marked tracked-account actions or authorship
   belong to the user. For GitHub, this means `(tracked account)` actors and Git
   commit authors. Repository ownership, Item inclusion, PR or Issue presence,
@@ -52,6 +51,17 @@ project, keep it as standalone work/research. Do not guess or invent a project
 relationship, and do not discard otherwise valid work because its project is
 unknown. Do not associate independent conversations merely because titles,
 topics, or timestamps are similar or close.
+
+For a `personal` conversational source, a user-initiated work-related request
+may be delegated cognitive work even when the substantive content is written
+by the assistant. Analysis, research, investigation, review, evaluation,
+design, reasoning, planning, and decision support can therefore be User work.
+This does not establish an external side effect: assistant analysis or review
+can evidence delegated cognitive work, but an assistant patch, command, or
+proposal does not evidence implementation; a suggestion to run, test, or
+deploy does not evidence execution, validation, or deployment; and an assistant
+description of external state is limited to the strength of the actual Context
+evidence.
 
 ChatGPT conversations may therefore be attributed `personal` while still being
 excluded from the final Summary. Assistant text itself does not prove that
@@ -198,7 +208,8 @@ empty section when that category has no evidence:
 
 ```markdown
 ## User work
-<only work eligible for the user's Summary>
+<all assigned evidence attributed to the user and work-related, whether or not
+it will later be material enough for the final Summary>
 
 ## Context-only evidence
 <collaborator, non-work, or other evidence used only to explain user work or state>
@@ -237,6 +248,39 @@ be `complete` or `failed`, `retry_count` must be 0 or 1, and `report` must be
 all source items assigned to that shard. A failed or missing report must never
 be omitted from the status block or the final synthesis.
 
+### Worker Relevance Contract
+
+The root must include this complete contract in every shard `task` prompt. Do
+not replace it with a shortened instruction such as "determine materially
+meaningful work", and do not ask a worker to read the root `TASK.md`.
+
+- Attribution and work relevance are separate judgments. `personal` is
+  attribution, not work relevance; `actor_scoped` still follows the explicit
+  tracked-actor rules above.
+- Judge work relevance from purpose and intent supported by the assigned
+  Context. Explicit project or workstream association may support relevance but
+  is not required.
+- Technical subject matter, complexity, duration, interaction count, or
+  troubleshooting depth do not by themselves establish work relevance.
+- Do not invent project or workstream relationships.
+- Non-work personal activity belongs in `Context-only evidence`.
+- For a personal source, a user-initiated work-related request followed by
+  assistant analysis, research, investigation, review, evaluation, design,
+  reasoning, planning, or decision support is delegated cognitive work and may
+  belong in `User work`, even when the assistant wrote the substantive content.
+- Assistant cognitive output does not prove external side effects: a patch or
+  command does not prove implementation; a suggestion to run, test, or deploy
+  does not prove execution, validation, or deployment; and described external
+  state must be limited to the actual evidence strength.
+- The worker decides attribution and work-related versus non-work evidence
+  only. The worker does not decide Summary materiality, major work, or whether
+  evidence must appear in the final Summary. Work-related does not mean it must
+  appear in the final Summary.
+
+Put all attributed work-related evidence in `## User work`, including work that
+may later be omitted by the root for materiality. Put non-work and
+collaborator/context-only evidence in `## Context-only evidence`.
+
 For each independent shard, issue one foreground `task` call with the shard ID
 and its exact Context paths/scope in the task prompt. Dispatch all independent
 workers in the same turn where the tool permits it; do not use background
@@ -260,11 +304,14 @@ failed, record the failure and do not silently treat its evidence as reviewed.
 
 For the reduce phase, primarily read only the `User work` sections of completed
 shard reports, in stable inventory order, to merge workstreams and decide major
-versus other work. `Context-only evidence` is not root-synthesis input; it may be
-consulted only to understand an explicitly attributed user-work fact, and must
-never be copied, paraphrased, or used to fill an attribution gap. Do not infer a
-relationship merely because reports are adjacent. A workstream may span shards
-only when the Context evidence establishes that relationship. Do not re-traverse
+versus other work. The root then assesses Summary materiality and may classify
+work as major, other, or omit it. `Context-only evidence` is not root-synthesis
+input. It may be consulted only to understand an explicitly attributed User work
+fact, never to rescue a worker's misclassification. It must never create a new
+workstream, fill an attribution gap, or be copied or paraphrased as the user's
+work. Do not infer a relationship merely because reports are adjacent. A
+workstream may span shards only when the Context evidence establishes that
+relationship. Do not re-traverse
 the complete Context in normal operation. Only perform a targeted fallback for a
 specific unresolved report when the missing evidence is necessary to resolve a
 material conclusion, and record that fallback in NOTES. Preserve unresolved
