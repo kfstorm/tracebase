@@ -90,6 +90,7 @@ ignore = [
 "src/tracebase/cli.py" = ["PLR0911", "PLR0915"]
 "src/tracebase/summary.py" = ["PLR0915"]
 "src/tracebase/summary_shards.py" = ["PLR0915"]
+"src/tracebase/summary_shard_validator.py" = ["PLR0915"]
 
 [tool.ruff.format]
 quote-style = "double"

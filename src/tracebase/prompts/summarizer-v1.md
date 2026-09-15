@@ -134,6 +134,23 @@ be `complete` or `failed`, `retry_count` must be 0 or 1, and `report` must be
 all source items assigned to that shard. A failed or missing report must never
 be omitted from the status block or the final synthesis.
 
+Before issuing any `task` call, run:
+
+`python3 /opt/tracebase/validate-summary-shards.py plan /work /context`
+
+Do not issue any `task` call unless this command exits successfully. If validation
+fails, use the reported errors to correct the shard inventory in
+`/work/NOTES.md`, then run the same command again. Repeat until validation
+succeeds. Do not work around, replace, or skip this validation.
+
+Run the plan validator only during initial shard planning, before the first task
+call. After worker dispatch begins, never run the plan validator again; use the
+shard status and reports for completion reconciliation.
+
+Once validation succeeds, treat the shard inventory as frozen. Do not add,
+remove, merge, split, rename, or change the scope of any shard after worker
+dispatch begins.
+
 For each independent shard, issue one foreground `task` call with the shard ID
 and its exact Context paths/scope in the task prompt. Dispatch all independent
 workers in the same turn where the tool permits it; do not use background

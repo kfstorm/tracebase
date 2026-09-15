@@ -61,3 +61,6 @@ def test_dockerfile_requires_an_explicit_opencode_version() -> None:
 
     assert 'ARG OPENCODE_VERSION\n\nRUN test -n "$OPENCODE_VERSION" \\\n' in dockerfile
     assert "ARG OPENCODE_VERSION=" not in dockerfile
+    assert "https://astral.sh/uv/install.sh" in dockerfile
+    assert "uv python install 3.14 --install-dir /opt/tracebase-python" in dockerfile
+    assert "name python3.14 -print -quit" in dockerfile
