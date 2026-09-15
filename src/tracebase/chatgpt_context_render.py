@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .chatgpt_context import ChatGPTProjection
 from .context import ContextExtractionResult, ContextItem
 from .dialogue import render_dialogue_files, write_dialogue_markdown
 
@@ -11,8 +12,8 @@ from .dialogue import render_dialogue_files, write_dialogue_markdown
 def render_chatgpt(
     item: ContextItem, result: ContextExtractionResult, output: Path
 ) -> list[str]:
-    assert item.chatgpt is not None
-    projection = item.chatgpt
+    projection = item.projection
+    assert isinstance(projection, ChatGPTProjection)
     timezone = result.request.start.tzinfo
     assert timezone is not None
     overview = [

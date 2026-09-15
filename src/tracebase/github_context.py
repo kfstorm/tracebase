@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from .archive import ArchiveError, PublishedSnapshot
-from .github_identity import GitHubIdentity
+from .archive import ArchiveError, PublishedRun, PublishedSnapshot
+from .attribution import source_attribution_mode
+from .context_adapter import (
+    ContextIndexEntry,
+    RenderedContextItem,
+    rendered_context_item,
+    safe_path_component,
+)
+from .github_identity import GitHubIdentity, require_github_identity
+
+if TYPE_CHECKING:
+    from .context import ContextExtractionResult, ContextItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -591,3 +602,149 @@ def project_github(  # noqa: PLR0915
         title,
         tracked_login,
     )
+
+
+def _github_path(projection: GitHubProjection) -> str:
+    owner, _, repository = projection.repository.partition("/")
+    kind = (
+        "pull"
+        if any(record.get("kind") == "pull-request" for record in projection.records)
+        else "issue"
+    )
+    return (
+        f"github/{safe_path_component(owner)}/{safe_path_component(repository)}"
+        f"/{kind}/{projection.number}"
+    )
+
+
+class GitHubContextAdapter:
+    source_kind = "github"
+    object_kinds = frozenset({"issue", "pull-request"})
+    attribution_mode = source_attribution_mode("github")
+    index_section = "GitHub"
+    empty_index_message = "No GitHub items are available."
+
+    def project(
+        self, snapshot: PublishedSnapshot, start: datetime, end: datetime
+    ) -> GitHubProjection:
+        return project_github(snapshot, start, end)
+
+    def include(self, projection: object) -> bool:
+        if not isinstance(projection, GitHubProjection):
+            raise ArchiveError("GitHub context projection was invalid")
+        return projection.selected
+
+    def prepare(
+        self,
+        items: tuple[ContextItem, ...],
+        runs: tuple[PublishedRun, ...],
+        archive_root: str | Path | None,
+    ) -> tuple[ContextItem, ...]:
+        scope_ids = sorted(
+            {
+                item.snapshot.run["source"]["scope_id"]
+                for item in items
+                if isinstance(item.projection, GitHubProjection)
+            }
+        )
+        if not scope_ids:
+            return items
+        if archive_root is None:
+            raise ArchiveError(
+                "GitHub identity profiles require an archive path during "
+                "Context extraction"
+            )
+        historical_logins: dict[str, set[str]] = {
+            scope_id: set() for scope_id in scope_ids
+        }
+        for run in runs:
+            source = run.manifest.get("source")
+            if not isinstance(source, dict) or source.get("kind") != "github":
+                continue
+            scope_id = source.get("scope_id")
+            if not isinstance(scope_id, str) or scope_id not in historical_logins:
+                continue
+            login = (
+                run.manifest.get("collector", {})
+                .get("effective_options", {})
+                .get("actor_login")
+            )
+            if isinstance(login, str) and login:
+                historical_logins[scope_id].add(login)
+        identities = {
+            scope_id: require_github_identity(
+                archive_root, scope_id, historical_logins[scope_id]
+            )
+            for scope_id in scope_ids
+        }
+        prepared: list[ContextItem] = []
+        for item in items:
+            projection = item.projection
+            if not isinstance(projection, GitHubProjection):
+                raise ArchiveError("GitHub context projection was invalid")
+            prepared.append(
+                replace(
+                    item,
+                    projection=replace(
+                        projection,
+                        tracked_identity=identities[
+                            item.snapshot.run["source"]["scope_id"]
+                        ],
+                    ),
+                    path=_github_path(projection),
+                )
+            )
+        return tuple(prepared)
+
+    def render(
+        self, item: ContextItem, result: ContextExtractionResult, output: Path
+    ) -> RenderedContextItem:
+        from .context_render import write_markdown  # noqa: PLC0415
+        from .github_context_render import render_github  # noqa: PLC0415
+
+        files = render_github(item, result)
+        for name, content in files.items():
+            path = output / name
+            if isinstance(content, bytes):
+                path.write_bytes(content)
+            else:
+                write_markdown(path, content)
+        return rendered_context_item(self, item, result, files)
+
+    def index_header(self, items: tuple[ContextItem, ...]) -> tuple[str, ...]:
+        logins = sorted(
+            {
+                item.projection.tracked_login
+                for item in items
+                if isinstance(item.projection, GitHubProjection)
+                and item.projection.tracked_login is not None
+            }
+        )
+        return tuple(
+            line
+            for login in logins
+            for line in (f"Tracked GitHub account: @{login}", "")
+        )
+
+    def index_metadata(
+        self, item: ContextItem, _result: ContextExtractionResult
+    ) -> ContextIndexEntry:
+        projection = item.projection
+        if not isinstance(projection, GitHubProjection):
+            raise ArchiveError("GitHub context projection was invalid")
+        kind = (
+            "PR"
+            if any(
+                record.get("kind") == "pull-request" for record in projection.records
+            )
+            else "Issue"
+        )
+        return ContextIndexEntry(
+            None,
+            (item.snapshot.manifest["source_id"],),
+            f"{projection.repository} {kind} #{projection.number}: "
+            f"{projection.title or 'Untitled'}",
+        )
+
+
+GITHUB_CONTEXT_ADAPTER = GitHubContextAdapter()

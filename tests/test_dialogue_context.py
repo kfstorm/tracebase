@@ -12,7 +12,7 @@ from tracebase.archive import (
     PublishedSnapshot,
     Snapshot,
 )
-from tracebase.chatgpt_context import project_chatgpt
+from tracebase.chatgpt_context import ChatGPTProjection, project_chatgpt
 from tracebase.context import (
     ContextRequest,
     extract_context,
@@ -634,8 +634,8 @@ def test_chatgpt_later_snapshot_supplies_earlier_messages(tmp_path: Path) -> Non
     result = extract_context(request, load_archive(archive.root))
 
     assert result.items[0].snapshot.run["run_id"] == "later-run"
-    assert result.items[0].chatgpt is not None
-    assert [turn.text for turn in result.items[0].chatgpt.dialogue.activity] == [
+    assert isinstance(result.items[0].projection, ChatGPTProjection)
+    assert [turn.text for turn in result.items[0].projection.dialogue.activity] == [
         "old",
         "current",
     ]

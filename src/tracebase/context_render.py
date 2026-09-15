@@ -9,6 +9,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .context import ContextError, ContextExtractionResult, ContextItem
+from .context_adapter import RenderedContextItem
+from .context_adapters import CONTEXT_ADAPTERS
 
 
 def write_markdown(path: Path, lines: list[str]) -> None:
@@ -34,50 +36,20 @@ def format_timestamp(value: Any, timezone: Any) -> str | None:
 
 def _render_item(
     staging: Path, item: ContextItem, result: ContextExtractionResult
-) -> list[tuple[str, str]]:
+) -> RenderedContextItem:
     item_root = staging.joinpath(*PurePosixPath(item.path).parts)
     item_root.mkdir(parents=True, exist_ok=True)
-    if item.github is not None:
-        from .github_context_render import render_github  # noqa: PLC0415
-
-        files = render_github(item, result)
-        for name, content in files.items():
-            if isinstance(content, bytes):
-                (item_root / name).write_bytes(content)
-            else:
-                write_markdown(item_root / name, content)
-        names = list(files)
-    elif item.opencode is not None:
-        from .opencode_context_render import render_opencode  # noqa: PLC0415
-
-        names = render_opencode(item, result, item_root)
-    elif item.chatgpt is not None:
-        from .chatgpt_context_render import render_chatgpt  # noqa: PLC0415
-
-        names = render_chatgpt(item, result, item_root)
-    else:
-        raise ContextError("context item has no source projection")
-    return [(f"{item.path}/{name}", name) for name in names]
+    return item.adapter.render(item, result, item_root)
 
 
 def _link_list(paths: list[str]) -> str:
     return ", ".join(f"[{PurePosixPath(path).name}]({path})" for path in paths)
 
 
-def _session_span(item: ContextItem, result: ContextExtractionResult) -> str | None:
-    assert item.opencode is not None
-    times = [turn.timestamp for turn in item.opencode.dialogue.activity]
-    timezone = result.request.start.tzinfo
-    assert timezone is not None
-    first = min(times).astimezone(timezone).strftime("%H:%M")
-    last = max(times).astimezone(timezone).strftime("%H:%M")
-    return first if first == last else f"{first}-{last}"
-
-
 def _render_index(
     staging: Path,
     result: ContextExtractionResult,
-    items: list[tuple[ContextItem, list[tuple[str, str]]]],
+    items: list[tuple[ContextItem, RenderedContextItem]],
 ) -> None:
     lines = [
         "# Context Output",
@@ -88,97 +60,55 @@ def _render_index(
         "Attribution mode is declared for every source item; Summary projects "
         "user work before synthesizing workstreams.",
         "",
-        "## GitHub",
-        "",
     ]
-    github_items = [(item, files) for item, files in items if item.github is not None]
-    tracked_logins = sorted(
-        {
-            item.github.tracked_login
-            for item, _ in github_items
-            if item.github is not None and item.github.tracked_login is not None
-        }
-    )
-    for login in tracked_logins:
-        lines.extend([f"Tracked GitHub account: @{login}", ""])
-    if not github_items:
-        lines.append("No GitHub items are available.")
-    for item, files in github_items:
-        assert item.github is not None
-        projection = item.github
-        kind = (
-            "PR"
-            if any(
-                record.get("kind") == "pull-request" for record in projection.records
-            )
-            else "Issue"
-        )
-        title = projection.title or "Untitled"
-        links = [path for path, _ in files]
-        lines.append(
-            f"- **{projection.repository} {kind} #{projection.number}**: {title} "
-            f"[attribution mode: `{item.attribution_mode.value}`] "
-            f"({_link_list(links)})"
-        )
-    lines.extend(["", "## OpenCode", ""])
-    opencode_items = [
-        (item, files) for item, files in items if item.opencode is not None
-    ]
-    if not opencode_items:
-        lines.append("No OpenCode root sessions are available.")
-    grouped: dict[str, list[tuple[ContextItem, list[tuple[str, str]]]]] = {}
-    for item, files in opencode_items:
-        assert item.opencode is not None
-        value = item.opencode.session.get("project_directory", ".")
-        directory = value if isinstance(value, str) else "."
-        grouped.setdefault(directory, []).append((item, files))
-    for directory in sorted(grouped):
-        lines.append(f"### `{directory}`")
-        lines.append("")
-        ordered_group = sorted(
-            grouped[directory],
-            key=lambda pair: next(
-                path for path, _ in pair[1] if path.endswith("/overview.md")
-            ),
-        )
-        for item, files in ordered_group:
-            assert item.opencode is not None
-            value = item.opencode.session.get("value")
-            value = value if isinstance(value, dict) else {}
-            info = value.get("info")
-            info = info if isinstance(info, dict) else {}
-            title_value = info.get("title")
-            title = (
-                title_value
-                if isinstance(title_value, str) and title_value
-                else "Untitled session"
-            )
-            span = _session_span(item, result) or "No in-range time"
-            lines.append(
-                f"- **{span} - {title}** [attribution mode: "
-                f"`{item.attribution_mode.value}`] "
-                f"({_link_list([path for path, _ in files])})"
-            )
-        lines.append("")
-    lines.extend(["", "## ChatGPT", ""])
-    chatgpt_items = [(item, files) for item, files in items if item.chatgpt is not None]
-    if not chatgpt_items:
-        lines.append("No ChatGPT conversations are available.")
-    for item, files in sorted(
-        chatgpt_items,
-        key=lambda pair: (
-            pair[0].chatgpt.title if pair[0].chatgpt is not None else "",
-            pair[0].snapshot.manifest["source_id"],
-        ),
-    ):
-        assert item.chatgpt is not None
-        lines.append(
-            f"- **{item.chatgpt.title}** [attribution mode: "
-            f"`{item.attribution_mode.value}`] "
-            f"({_link_list([path for path, _ in files])})"
-        )
+    rendered_by_adapter = {
+        adapter: [
+            (item, rendered) for item, rendered in items if item.adapter is adapter
+        ]
+        for adapter in CONTEXT_ADAPTERS
+    }
+    for adapter_index, adapter in enumerate(CONTEXT_ADAPTERS):
+        lines.extend([f"## {adapter.index_section}", ""])
+        adapter_items = rendered_by_adapter[adapter]
+        source_items = tuple(item for item, _rendered in adapter_items)
+        if not adapter_items:
+            lines.append(adapter.empty_index_message)
+        else:
+            lines.extend(adapter.index_header(source_items))
+            grouped: dict[
+                str | None, list[tuple[ContextItem, RenderedContextItem]]
+            ] = {}
+            for item, rendered in adapter_items:
+                group = rendered.index.group
+                grouped.setdefault(group, []).append((item, rendered))
+            for item, rendered in sorted(
+                grouped.pop(None, []), key=lambda pair: pair[1].index.sort_key
+            ):
+                _append_index_item(lines, item, rendered)
+            named_groups = [group for group in grouped if group is not None]
+            for group in sorted(named_groups):
+                lines.extend([f"### `{group}`", ""])
+                for item, rendered in sorted(
+                    grouped[group], key=lambda pair: pair[1].index.sort_key
+                ):
+                    _append_index_item(lines, item, rendered)
+                lines.append("")
+        if adapter_index < len(CONTEXT_ADAPTERS) - 1:
+            lines.append("")
     lines.append("")
     write_markdown(staging / "index.md", lines)
+
+
+def _append_index_item(
+    lines: list[str], item: ContextItem, rendered: RenderedContextItem
+) -> None:
+    """Add a source-neutral index item from adapter-provided metadata."""
+    files = rendered.files
+    links = [f"{item.path}/{name}" for name in files]
+    lines.append(
+        f"- **{rendered.index.label}** [attribution mode: "
+        f"`{item.attribution_mode.value}`] ({_link_list(links)})"
+    )
 
 
 def _cleanup_staging(staging: Path) -> None:
@@ -208,7 +138,7 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
             raise ContextError("context output publication failed") from None
         assert staging is not None
         try:
-            rendered: list[tuple[ContextItem, list[tuple[str, str]]]] = []
+            rendered: list[tuple[ContextItem, RenderedContextItem]] = []
             for item in result.items:
                 item_rendered = _render_item(staging, item, result)
                 rendered.append((item, item_rendered))
