@@ -279,12 +279,40 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
 
     assert "final Summary is a projection of the user's work" in prompt
     assert "`personal`" in prompt and "`actor_scoped`" in prompt
+    assert (
+        "`personal` is an attribution rule, not a work-relevance classification"
+        in normalized_prompt
+    )
+    assert "Attribution and work relevance are separate judgments" in prompt
+    assert (
+        "`personal` attribution does not by itself make evidence work-relevant"
+        in normalized_prompt
+    )
+    assert "must not become a Summary workstream" in normalized_prompt
+    assert "technical topic or keyword as proof of work intent" in normalized_prompt
     assert "authoritative attribution" in prompt
     assert "same review thread" in prompt
     assert "single `## Commits` section" in prompt
     assert "## User work" in prompt
     assert "## Context-only evidence" in prompt
-    assert "Only `User work` may be promoted" in prompt
+    assert (
+        "Only `User work` containing materially meaningful work may be promoted"
+        in normalized_prompt
+    )
+    assert "shard inventory covers every projected Context item" in normalized_prompt
+    assert (
+        "workstream inventory contains only materially meaningful work"
+        in normalized_prompt
+    )
+    assert "User work: None" in normalized_prompt
+    assert "classified as non-work for the requested work summary" in normalized_prompt
+    assert (
+        "must not create a workstream merely because the item appears in `index.md`"
+        in normalized_prompt
+    )
+    assert (
+        "leak the concrete non-work content into the final Summary" in normalized_prompt
+    )
     assert "Repository ownership" in prompt
     assert (
         "Each ChatGPT conversation is an independent projected Context item"
@@ -305,7 +333,7 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
         in normalized_prompt
     )
     assert "Later dialogue" in normalized_prompt
-    assert "assistant text itself does not prove" in normalized_prompt
+    assert "Assistant text itself does not prove" in normalized_prompt
     assert "assistant proposal" in normalized_prompt
     assert "implementation, execution, deployment" in normalized_prompt
     assert "validation happened" in normalized_prompt

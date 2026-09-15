@@ -4,23 +4,41 @@ The final Summary is a projection of the user's work, not a summary of all
 activity present in Context. Apply the source attribution mode shown in
 `index.md` and every source-specific child view before identifying workstreams:
 
-- `personal`: materially meaningful work recorded by the source belongs to the
-  user. This includes OpenCode work delegated to an agent or subagent, such as
-  investigation, design, implementation, debugging, validation, and decisions.
+- `personal`: when evidence is materially meaningful work recorded by the
+  source, that work belongs to the user. This includes OpenCode work delegated
+  to an agent or subagent, such as investigation, design, implementation,
+  debugging, validation, and decisions. `personal` is an attribution rule, not
+  a work-relevance classification.
 - `actor_scoped`: only explicitly marked tracked-account actions or authorship
   belong to the user. For GitHub, this means `(tracked account)` actors and Git
   commit authors. Repository ownership, Item inclusion, PR or Issue presence,
   merge status, and authorship by collaborators are not ownership evidence.
 
-ChatGPT conversations are the user's personal work evidence, but assistant text
-itself does not prove that real-world implementation, execution, deployment, or
-validation happened. Distinguish the completion supported by the conversation,
-such as discussion or exploration, investigation, design or decision, a plan or
-proposed change, an implementation claim, or a validation/result. An assistant
-proposal, command, patch, plan, or conclusion is not by itself evidence that the
-user actually performed, submitted, deployed, or validated it. User text,
-explicit assistant reports of actual work or results, and cross-source evidence
-may support a stronger completion state when the evidence warrants it.
+Attribution and work relevance are separate judgments. Attribution asks,
+"If this is work, does it belong to the user?" Work relevance asks, "Should
+this evidence enter the work Summary?" `personal` attribution does not by
+itself make evidence work-relevant. Promote only materially meaningful work.
+Clearly non-work personal evidence, such as ordinary knowledge questions,
+daily-life matters, shopping, entertainment, travel, unrelated health,
+dietary or family matters, casual conversation, or personal-interest queries,
+must not become a Summary workstream unless the Context explicitly connects it
+to a real workstream. Do not treat a technical topic or keyword as proof of
+work intent; judge the purpose and context, so a question such as what Linux is
+may still be ordinary non-work knowledge. Conversely, independent open-source
+projects, engineering research, home-lab engineering, and job or career work
+may be materially meaningful work even when they are not employer work, when
+the Context supports that work intent.
+
+ChatGPT conversations may therefore be attributed `personal` while still being
+excluded from the final Summary. Assistant text itself does not prove that
+real-world implementation, execution, deployment, or validation happened.
+Distinguish the completion supported by the conversation, such as discussion or
+exploration, investigation, design or decision, a plan or proposed change, an
+implementation claim, or a validation/result. An assistant proposal, command,
+patch, plan, or conclusion is not by itself evidence that the user actually
+performed, submitted, deployed, or validated it. User text, explicit assistant
+reports of actual work or results, and cross-source evidence may support a
+stronger completion state when the evidence warrants it.
 
 This same caution applies to text-only OpenCode. Tool, task, and other non-text
 evidence is not in conversational Context, so a proposal cannot establish
@@ -52,8 +70,10 @@ are uncertain about your progress, reread `/work/TASK.md` and
 Maintain `/work/NOTES.md` as durable working memory throughout the
 investigation. Update it as you discover workstreams, important facts, evidence
 locations, decisions and reasoning, temporal distinctions, unresolved
-questions, and tentative conclusions. Do not rely entirely on conversational
-context. NOTES is scratch space and does not need a rigid format.
+questions, and tentative conclusions. Keep the shard inventory for coverage
+separate from the workstream inventory for materially meaningful work. Do not
+rely entirely on conversational context. NOTES is scratch space and does not
+need a rigid format.
 
 NOTES is internal, evidence-rich working memory. It can and should preserve the
 workstream inventory, Context evidence locations, PR and Issue IDs, commit SHAs,
@@ -111,8 +131,10 @@ sources. In particular, do not look for internal structures such as
 `temporal_roles` that are not part of conversational Context.
 
 After reading `index.md`, build a stable shard inventory before investigating
-individual evidence. Group OpenCode evidence by `project_directory`; group
-GitHub evidence by `repository`.
+individual evidence. The shard inventory covers every projected Context item;
+the separate workstream inventory contains only materially meaningful work.
+Group OpenCode evidence by `project_directory`; group GitHub evidence by
+`repository`.
 Each ChatGPT conversation is an independent projected Context item. By default,
 use one ChatGPT conversation per shard. Multiple small conversations may be
 combined into a `misc` shard, but
@@ -139,26 +161,42 @@ scopes are exact sets of the listed item paths, not wildcards; a comma-separated
 interpretation of a scope description.
 
 For each shard, preserve the complete assigned Context evidence while making a
-user-work projection from the attribution annotation on each record. A GitHub
-Item with only collaborator activity is not a personal Summary workstream, even
-when its context is technically important. A review thread must remain one
-conversation unit with chronological/source order intact; do not create nested
-`User work` or `Context-only evidence` headings inside it. Keep commits in the
-single source-native `## Commits` section, retaining timeline order and each
-commit's annotation. A shard report must have these explicit sections, including
-an empty section when that category has no evidence:
+user-work projection from the attribution annotation on each record and a
+separate work-relevance judgment. A GitHub Item with only collaborator activity
+is not a personal Summary workstream, even when its context is technically
+important. A personal ChatGPT or OpenCode item can likewise be reviewed and
+classified as non-work. A review thread must remain one conversation unit with
+chronological/source order intact; do not create nested `User work` or
+`Context-only evidence` headings inside it. Keep commits in the single
+source-native `## Commits` section, retaining timeline order and each commit's
+annotation. A shard report must have these explicit sections, including an
+empty section when that category has no evidence:
 
 ```markdown
 ## User work
 <only work eligible for the user's Summary>
 
 ## Context-only evidence
-<collaborator or other evidence used only to explain user work or state>
+<collaborator, non-work, or other evidence used only to explain user work or state>
 ```
 
-Only `User work` may be promoted into the root workstream inventory. Keep
-`Context-only evidence` available for interpretation, but never promote it as a
-workstream or restate it as the user's work.
+For a completely non-work assigned item, use the same two sections without
+adding a third schema or repeating its private content, for example:
+
+```markdown
+## User work
+None.
+
+## Context-only evidence
+The assigned conversation was reviewed and classified as non-work for the requested work summary.
+```
+
+Only `User work` containing materially meaningful work may be promoted into the
+root workstream inventory. `User work: None` must not create a workstream merely
+because the item appears in `index.md`. Keep `Context-only evidence` available
+for interpretation, including the reviewed non-work exclusion state, but never
+promote it as a workstream, restate it as the user's work, or leak the concrete
+non-work content into the final Summary.
 
 Create `/work/shards/` and maintain the following machine-readable block in
 `/work/NOTES.md` as the orchestration state. Use safe stable shard IDs and the
@@ -215,10 +253,13 @@ unattributed implementation, finding, or decision.
 
 Before writing `/results/summary.md`, reconcile the shard inventory and status
 block against `/context/index.md`, ensure every declared report was considered,
-and perform the existing coverage and final-state reconciliation. The final
-summary must remain a durable human-readable synthesis: do not include Context
-locators, PR/Issue numeric IDs, or commit SHAs there even though shard reports
-and NOTES may retain them.
+and perform the existing coverage and final-state reconciliation. If no shard's
+`User work` contains materially meaningful work, publish a valid concise result
+stating that the requested interval contains no materially meaningful work; do
+not invent a workstream and do not explain which personal conversations were
+excluded. The final summary must remain a durable human-readable synthesis: do
+not include Context locators, PR/Issue numeric IDs, or commit SHAs there even
+though shard reports and NOTES may retain them.
 
 Treat a file-read or other tool result as partial evidence, not as a complete
 review of that file, whenever it explicitly says that the output was truncated
