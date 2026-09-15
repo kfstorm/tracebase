@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
 
-from .archive import ArchiveError, PublishedSnapshot
+from .archive import ArchiveError, PublishedRun, PublishedSnapshot
+from .attribution import source_attribution_mode
+from .context_adapter import (
+    ContextIndexEntry,
+    RenderedContextItem,
+    render_source_item,
+    safe_path_component,
+)
 from .dialogue import DialogueTranscript, DialogueTurn, project_dialogue
+
+if TYPE_CHECKING:
+    from .context import ContextExtractionResult, ContextItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,3 +238,135 @@ def project_opencode(
     if project_directory is not None:
         session["project_directory"] = project_directory
     return OpenCodeProjection(session, dialogue)
+
+
+def _session_parts(
+    projection: OpenCodeProjection,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    value = projection.session.get("value")
+    value = value if isinstance(value, dict) else {}
+    info = value.get("info")
+    info = info if isinstance(info, dict) else {}
+    return value, info
+
+
+def _session_directory(projection: OpenCodeProjection) -> str:
+    project_directory = projection.session.get("project_directory")
+    if isinstance(project_directory, str) and project_directory:
+        return project_directory
+    value, info = _session_parts(projection)
+    directory = info.get("directory", value.get("directory"))
+    if isinstance(directory, str) and directory:
+        return directory
+    directory = projection.session.get("working_directory")
+    if isinstance(directory, str) and directory:
+        return directory
+    return "."
+
+
+def _session_title(projection: OpenCodeProjection) -> str:
+    value, info = _session_parts(projection)
+    title = info.get("title", value.get("title"))
+    return title if isinstance(title, str) and title else "Untitled session"
+
+
+def _opencode_path(directory: str, session_number: int) -> str:
+    parts = PurePosixPath(directory).parts
+    if parts and parts[0] == "/":
+        parts = parts[1:]
+    safe_parts = [safe_path_component(part) for part in parts if part not in {"", "."}]
+    if not safe_parts:
+        safe_parts = ["root"]
+    return f"opencode/{'/'.join(safe_parts)}/session/{session_number:02d}"
+
+
+def _session_first_in_range(projection: OpenCodeProjection) -> datetime:
+    return min(turn.timestamp for turn in projection.dialogue.activity)
+
+
+def _session_sort_key(item: ContextItem) -> tuple[datetime, str, str]:
+    projection = item.projection
+    if not isinstance(projection, OpenCodeProjection):
+        raise ArchiveError("OpenCode context projection was invalid")
+    return (
+        _session_first_in_range(projection),
+        _session_title(projection),
+        projection.session_id,
+    )
+
+
+def _session_span(projection: OpenCodeProjection, timezone: Any) -> str:
+    times = [turn.timestamp for turn in projection.dialogue.activity]
+    first = min(times).astimezone(timezone).strftime("%H:%M")
+    last = max(times).astimezone(timezone).strftime("%H:%M")
+    return first if first == last else f"{first}-{last}"
+
+
+class OpenCodeContextAdapter:
+    source_kind = "opencode"
+    object_kinds = frozenset({"session"})
+    attribution_mode = source_attribution_mode("opencode")
+    index_section = "OpenCode"
+    empty_index_message = "No OpenCode root sessions are available."
+
+    def project(
+        self, snapshot: PublishedSnapshot, start: datetime, end: datetime
+    ) -> OpenCodeProjection | None:
+        return project_opencode(snapshot, start, end)
+
+    def include(self, projection: object) -> bool:
+        if not isinstance(projection, OpenCodeProjection):
+            raise ArchiveError("OpenCode context projection was invalid")
+        return projection.parent_id is None
+
+    def prepare(
+        self,
+        items: tuple[ContextItem, ...],
+        _runs: tuple[PublishedRun, ...],
+        _archive_root: str | Path | None,
+    ) -> tuple[ContextItem, ...]:
+        grouped: dict[str, list[tuple[int, ContextItem]]] = {}
+        for index, item in enumerate(items):
+            projection = item.projection
+            if not isinstance(projection, OpenCodeProjection):
+                raise ArchiveError("OpenCode context projection was invalid")
+            grouped.setdefault(_session_directory(projection), []).append((index, item))
+        prepared = list(items)
+        for directory, grouped_items in grouped.items():
+            ordered_items = sorted(
+                grouped_items,
+                key=lambda pair: _session_sort_key(pair[1]),
+            )
+            for session_number, (index, item) in enumerate(ordered_items, start=1):
+                prepared[index] = replace(
+                    item, path=_opencode_path(directory, session_number)
+                )
+        return tuple(prepared)
+
+    def render(
+        self, item: ContextItem, result: ContextExtractionResult, output: Path
+    ) -> RenderedContextItem:
+        from .opencode_context_render import render_opencode  # noqa: PLC0415
+
+        return render_source_item(self, item, result, output, render_opencode)
+
+    def index_header(self, _items: tuple[ContextItem, ...]) -> tuple[str, ...]:
+        return ()
+
+    def index_metadata(
+        self, item: ContextItem, result: ContextExtractionResult
+    ) -> ContextIndexEntry:
+        projection = item.projection
+        if not isinstance(projection, OpenCodeProjection):
+            raise ArchiveError("OpenCode context projection was invalid")
+        timezone = result.request.start.tzinfo
+        if timezone is None:
+            raise ArchiveError("Context request timezone is invalid")
+        return ContextIndexEntry(
+            _session_directory(projection),
+            (item.path,),
+            f"{_session_span(projection, timezone)} - {_session_title(projection)}",
+        )
+
+
+OPENCODE_CONTEXT_ADAPTER = OpenCodeContextAdapter()

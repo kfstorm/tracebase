@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from .archive import ArchiveError, PublishedSnapshot
+from .archive import ArchiveError, PublishedRun, PublishedSnapshot, encode_path_id
+from .attribution import source_attribution_mode
+from .context_adapter import (
+    ContextIndexEntry,
+    RenderedContextItem,
+    render_source_item,
+)
 from .dialogue import DialogueTranscript, DialogueTurn, project_dialogue
+
+if TYPE_CHECKING:
+    from .context import ContextExtractionResult, ContextItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +199,66 @@ def project_chatgpt(
         title if isinstance(title, str) and title else "Untitled conversation",
         dialogue,
     )
+
+
+class ChatGPTContextAdapter:
+    source_kind = "chatgpt"
+    object_kinds = frozenset({"conversation"})
+    attribution_mode = source_attribution_mode("chatgpt")
+    index_section = "ChatGPT"
+    empty_index_message = "No ChatGPT conversations are available."
+
+    def project(
+        self, snapshot: PublishedSnapshot, start: datetime, end: datetime
+    ) -> ChatGPTProjection | None:
+        return project_chatgpt(snapshot, start, end)
+
+    def include(self, projection: object) -> bool:
+        if not isinstance(projection, ChatGPTProjection):
+            raise ArchiveError("ChatGPT context projection was invalid")
+        return True
+
+    def prepare(
+        self,
+        items: tuple[ContextItem, ...],
+        _runs: tuple[PublishedRun, ...],
+        _archive_root: str | Path | None,
+    ) -> tuple[ContextItem, ...]:
+        return tuple(
+            replace(
+                item,
+                path=(
+                    "chatgpt/conversation/"
+                    f"{encode_path_id(item.snapshot.manifest['source_id'])}"
+                ),
+            )
+            for item in items
+        )
+
+    def render(
+        self, item: ContextItem, result: ContextExtractionResult, output: Path
+    ) -> RenderedContextItem:
+        from .chatgpt_context_render import render_chatgpt  # noqa: PLC0415
+
+        return render_source_item(self, item, result, output, render_chatgpt)
+
+    def index_header(self, _items: tuple[ContextItem, ...]) -> tuple[str, ...]:
+        return ()
+
+    def index_metadata(
+        self, item: ContextItem, _result: ContextExtractionResult
+    ) -> ContextIndexEntry:
+        projection = item.projection
+        if not isinstance(projection, ChatGPTProjection):
+            raise ArchiveError("ChatGPT context projection was invalid")
+        return ContextIndexEntry(
+            None,
+            (projection.title, item.snapshot.manifest["source_id"]),
+            projection.title,
+        )
+
+
+CHATGPT_CONTEXT_ADAPTER = ChatGPTContextAdapter()
 
 
 __all__ = ["ChatGPTProjection", "project_chatgpt"]

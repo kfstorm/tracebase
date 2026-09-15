@@ -8,6 +8,7 @@ from typing import Any
 from .context import ContextExtractionResult, ContextItem
 from .context_render import format_timestamp, parse_timestamp
 from .github_context import (
+    GitHubProjection,
     github_actor_login,
     github_inline_comment_canonical_id,
     github_logins_match,
@@ -444,8 +445,8 @@ def _event_entries(  # noqa: PLR0915
     bucket: str,
     user_work_ids: frozenset[tuple[str, str]] | None = None,
 ) -> list[tuple[datetime, str, list[str]]]:
-    assert item.github is not None
-    projection = item.github
+    projection = item.projection
+    assert isinstance(projection, GitHubProjection)
     if user_work_ids is None:
         user_work_ids = github_user_work_record_ids(
             projection, result.request.start, result.request.end
@@ -693,8 +694,8 @@ def _activity(
     bucket: str,
     user_work_ids: frozenset[tuple[str, str]],
 ) -> list[str]:
-    assert item.github is not None
-    projection = item.github
+    projection = item.projection
+    assert isinstance(projection, GitHubProjection)
     entries = _event_entries(item, result, bucket, user_work_ids)
     lines = [
         f"# {'Activity' if bucket == 'activity' else 'Background'}",
@@ -708,14 +709,14 @@ def _activity(
         lines.extend(entry_lines)
     lines.extend(
         _commit_section(
-            item.github.records,
+            projection.records,
             result.request.start,
             result.request.end,
             bucket,
             timezone,
             bucket == "activity",
             projection.tracked_login,
-            item.github.tracked_identity,
+            projection.tracked_identity,
             user_work_ids,
         )
     )
@@ -734,8 +735,8 @@ def _overview(
     result: ContextExtractionResult,
     user_work_ids: frozenset[tuple[str, str]],
 ) -> list[str]:
-    assert item.github is not None
-    projection = item.github
+    projection = item.projection
+    assert isinstance(projection, GitHubProjection)
     object_record = next(
         (
             record
@@ -803,11 +804,12 @@ def _overview(
 
 
 def _diff_content(item: ContextItem, result: ContextExtractionResult) -> bytes | None:
-    assert item.github is not None
+    projection = item.projection
+    assert isinstance(projection, GitHubProjection)
     record = next(
         (
             record
-            for record in item.github.records
+            for record in projection.records
             if record.get("kind") == "aggregate-diff"
         ),
         None,
@@ -823,9 +825,10 @@ def _diff_content(item: ContextItem, result: ContextExtractionResult) -> bytes |
 def render_github(
     item: ContextItem, result: ContextExtractionResult
 ) -> dict[str, list[str] | bytes]:
-    assert item.github is not None
+    projection = item.projection
+    assert isinstance(projection, GitHubProjection)
     user_work_ids = github_user_work_record_ids(
-        item.github, result.request.start, result.request.end
+        projection, result.request.start, result.request.end
     )
     files: dict[str, list[str] | bytes] = {
         "overview.md": _overview(item, result, user_work_ids)

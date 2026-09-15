@@ -1,14 +1,19 @@
 import hashlib
 import json
 import urllib.request
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+import tracebase.context as context_module
 from tracebase.archive import (
     Archive,
     CollectionRange,
     CollectionRun,
+    PublishedRun,
+    PublishedSnapshot,
     Snapshot,
     encode_path_id,
 )
@@ -25,7 +30,9 @@ from tracebase.context import (
     load_archive,
     select_observation,
 )
-from tracebase.github_context import github_user_work_record_ids
+from tracebase.context_adapter import ContextIndexEntry, RenderedContextItem
+from tracebase.github_context import GitHubProjection, github_user_work_record_ids
+from tracebase.opencode_context import OpenCodeProjection
 
 
 def request() -> ContextRequest:
@@ -198,6 +205,7 @@ def publish_github(
     *,
     object_kind: str = "pull-request",
     run_id: str = "github-run",
+    scope_id: str = "actor-node",
     from_text: str = "2026-01-01T00:00:00+08:00",
     to_text: str = "2026-01-02T00:00:00+08:00",
     effective_options: dict[str, object] | None = None,
@@ -210,6 +218,7 @@ def publish_github(
         from_text,
         to_text,
         effective_options,
+        instance_id=scope_id,
     )
     snapshot = current.write_snapshot(
         Snapshot(
@@ -510,8 +519,8 @@ def test_selection_chooses_first_observation_at_or_after_request_end(
     result = extract_context(request(), load_archive(archive.root), archive.root)
     item = result.items[0]
     assert item.snapshot.run["run_id"] == "first-future"
-    assert item.opencode is not None
-    assert [turn.text for turn in item.opencode.dialogue.activity] == ["first future"]
+    assert isinstance(item.projection, OpenCodeProjection)
+    assert [turn.text for turn in item.projection.dialogue.activity] == ["first future"]
 
 
 def test_selection_chooses_latest_observation_before_request_end(
@@ -800,6 +809,80 @@ def test_selection_tie_break_is_independent_of_input_order(tmp_path: Path) -> No
     )
 
 
+def test_context_extraction_delegates_projection_to_an_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection = object()
+    calls: list[str] = []
+
+    class FourthSourceAdapter:
+        source_kind = "fourth-source"
+        object_kinds = frozenset({"record"})
+        attribution_mode = AttributionMode.PERSONAL
+        index_section = "Fourth source"
+        empty_index_message = "No fourth-source records are available."
+
+        def project(self, snapshot: object, start: datetime, end: datetime) -> object:
+            assert start < end
+            calls.append("project")
+            return projection
+
+        def include(self, value: object) -> bool:
+            assert value is projection
+            return True
+
+        def prepare(
+            self,
+            items: tuple[object, ...],
+            runs: tuple[object, ...],
+            archive_root: str | Path | None,
+        ) -> tuple[object, ...]:
+            assert runs and archive_root is None
+            return tuple(replace(item, path="fourth-source/record") for item in items)
+
+        def render(
+            self, item: object, result: object, output: Path
+        ) -> RenderedContextItem:
+            raise AssertionError("rendering is outside this extraction seam")
+
+        def index_header(self, items: tuple[object, ...]) -> tuple[str, ...]:
+            return ()
+
+        def index_metadata(self, item: object, result: object) -> ContextIndexEntry:
+            raise AssertionError("indexing is outside this extraction seam")
+
+    adapter = FourthSourceAdapter()
+    snapshot = PublishedSnapshot(
+        {"run_id": "fourth-run", "source": {"scope_id": "scope-1"}},
+        {
+            "source_kind": "fourth-source",
+            "object_kind": "record",
+            "source_id": "record-1",
+            "observation_window": {
+                "from": "2026-01-01T00:00:00Z",
+                "to": "2026-01-01T01:00:00Z",
+            },
+        },
+        {},
+        Path("/synthetic/snapshot"),
+    )
+    monkeypatch.setattr(context_module, "CONTEXT_ADAPTERS", (adapter,))
+    monkeypatch.setattr(context_module, "adapter_for", lambda _kind: adapter)
+
+    result = extract_context(
+        ContextRequest.parse("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
+        (PublishedRun({"source": {"scope_id": "scope-1"}}, (snapshot,)),),
+    )
+
+    assert calls == ["project"]
+    assert result.items[0].adapter is adapter
+    assert result.items[0].projection is projection
+    assert result.items[0].path == "fourth-source/record"
+    assert not any(
+        hasattr(result.items[0], field) for field in ("github", "opencode", "chatgpt")
+    )
+
+
 def test_empty_output_has_only_useful_index_without_front_matter(
     tmp_path: Path,
 ) -> None:
@@ -921,6 +1004,54 @@ def test_github_uses_natural_path_and_heading(tmp_path: Path) -> None:
     assert "locally synced identity profile" in overview
     assert "Tracked GitHub account:" not in (output / "index.md").read_text()
     assert "github/example/project" in (output / "index.md").read_text()
+
+
+def test_github_index_preserves_logical_key_order(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    entries = (
+        ("scope-b", "pull-request", "pr-b", 22, "run-1"),
+        ("scope-a", "issue", "issue-z", 12, "run-2"),
+        ("scope-b", "issue", "issue-a", 21, "run-3"),
+        ("scope-a", "issue", "issue-a", 11, "run-4"),
+        ("scope-a", "pull-request", "pr-a", 13, "run-5"),
+    )
+    for scope_id, object_kind, source_id, number, run_id in entries:
+        evidence: dict[str, object | str] = {
+            "issue.json": github_base(source_id, number),
+            **activity_evidence(),
+        }
+        if object_kind == "pull-request":
+            evidence["pull-request.json"] = {"node_id": source_id}
+        publish_github(
+            archive,
+            source_id,
+            evidence,
+            object_kind=object_kind,
+            run_id=run_id,
+            scope_id=scope_id,
+            from_text=f"2025-12-{int(run_id[-1]):02d}T00:00:00+00:00",
+            to_text=f"2025-12-{int(run_id[-1]) + 1:02d}T00:00:00+00:00",
+        )
+        write_github_profile(archive, scope_id=scope_id)
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    github_lines = [
+        line
+        for line in (output / "index.md").read_text().splitlines()
+        if line.startswith("- **example/project")
+    ]
+
+    assert [
+        line.split("](", 1)[1].split("/overview.md", 1)[0] for line in github_lines
+    ] == [
+        "github/example/project/issue/11",
+        "github/example/project/issue/12",
+        "github/example/project/pull/13",
+        "github/example/project/issue/21",
+        "github/example/project/pull/22",
+    ]
 
 
 def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None:
@@ -3330,8 +3461,8 @@ def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
     assert activity.count("[Context only]") == 4
 
     result = extract_context(request(), load_archive(archive.root), archive.root)
-    projection = result.items[0].github
-    assert projection is not None
+    projection = result.items[0].projection
+    assert isinstance(projection, GitHubProjection)
     ids = github_user_work_record_ids(projection, request().start, request().end)
     assert ("ordinary-comment", "1") in ids
     assert ("review", "3") in ids

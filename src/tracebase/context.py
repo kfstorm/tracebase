@@ -3,41 +3,23 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
-from typing import Any
+from pathlib import Path
 
 from .archive import (
     ArchiveError,
     PublishedRun,
     PublishedSnapshot,
-    encode_path_id,
     load_published_archive,
 )
-from .attribution import AttributionError, AttributionMode, source_attribution_mode
-from .chatgpt_context import ChatGPTProjection, project_chatgpt
-from .github_context import GitHubProjection, project_github
-from .github_identity import GitHubIdentity, require_github_identity
-from .opencode_context import (
-    OpenCodeProjection,
-    project_opencode,
-)
+from .attribution import AttributionMode
+from .context_adapter import ContextAdapter
+from .context_adapters import CONTEXT_ADAPTERS, adapter_for
 
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|z|[+-]\d{2}:\d{2})$"
 )
-# Archive recognition is broader than the set of sources with Context projectors.
-_ARCHIVE_OBJECT_KINDS = {
-    "github": {"issue", "pull-request"},
-    "opencode": {"session"},
-    "chatgpt": {"conversation"},
-}
-_SUPPORTED_CONTEXT_OBJECT_KINDS = {
-    "github": {"issue", "pull-request"},
-    "opencode": {"session"},
-    "chatgpt": {"conversation"},
-}
 
 
 class ContextError(ArchiveError):
@@ -86,11 +68,14 @@ class ContextRequest:
 @dataclass(frozen=True, slots=True)
 class ContextItem:
     snapshot: PublishedSnapshot
+    adapter: ContextAdapter
+    projection: object
     path: str
     attribution_mode: AttributionMode
-    github: GitHubProjection | None = None
-    opencode: OpenCodeProjection | None = None
-    chatgpt: ChatGPTProjection | None = None
+
+    @property
+    def source_kind(self) -> str:
+        return self.adapter.source_kind
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,240 +146,59 @@ def select_observation(
     return at_or_after_request_end[0] if at_or_after_request_end else ordered[-1]
 
 
-def _safe_component(value: str) -> str:
-    component = re.sub(r"[^A-Za-z0-9._-]+", "-", value)
-    return component if component not in {"", ".", ".."} else "unknown"
-
-
-def _github_path(projection: GitHubProjection) -> str:
-    owner, _, repository = projection.repository.partition("/")
-    owner = _safe_component(owner)
-    repository = _safe_component(repository)
-    kind = (
-        "pull"
-        if any(record.get("kind") == "pull-request" for record in projection.records)
-        else "issue"
-    )
-    return f"github/{owner}/{repository}/{kind}/{projection.number}"
-
-
-def _session_parts(
-    projection: OpenCodeProjection,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    value = projection.session.get("value")
-    value = value if isinstance(value, dict) else {}
-    info = value.get("info")
-    info = info if isinstance(info, dict) else {}
-    return value, info
-
-
-def _session_directory(projection: OpenCodeProjection) -> str:
-    project_directory = projection.session.get("project_directory")
-    if isinstance(project_directory, str) and project_directory:
-        return project_directory
-    value, info = _session_parts(projection)
-    directory = info.get("directory", value.get("directory"))
-    if isinstance(directory, str) and directory:
-        return directory
-    directory = projection.session.get("working_directory")
-    if isinstance(directory, str) and directory:
-        return directory
-    return "."
-
-
-def _session_title(projection: OpenCodeProjection) -> str:
-    value, info = _session_parts(projection)
-    title = info.get("title", value.get("title"))
-    return title if isinstance(title, str) and title else "Untitled session"
-
-
-def _opencode_path(directory: str, session_number: int) -> str:
-    parts = PurePosixPath(directory).parts
-    if parts and parts[0] == "/":
-        parts = parts[1:]
-    safe_parts = [_safe_component(part) for part in parts if part not in {"", "."}]
-    if not safe_parts:
-        safe_parts = ["root"]
-    return f"opencode/{'/'.join(safe_parts)}/session/{session_number:02d}"
-
-
-def _session_first_in_range(projection: OpenCodeProjection) -> datetime:
-    return min(turn.timestamp for turn in projection.dialogue.activity)
-
-
-def _context_projection_supported(snapshot: PublishedSnapshot) -> bool:
-    source_kind = snapshot.manifest["source_kind"]
-    object_kind = snapshot.manifest["object_kind"]
-    archive_kinds = _ARCHIVE_OBJECT_KINDS.get(source_kind)
-    if archive_kinds is None or object_kind not in archive_kinds:
-        raise ContextError("unsupported context source")
-    try:
-        source_attribution_mode(source_kind)
-    except AttributionError as error:
-        raise ContextError(str(error)) from None
-    supported_kinds = _SUPPORTED_CONTEXT_OBJECT_KINDS.get(source_kind)
-    return supported_kinds is not None and object_kind in supported_kinds
-
-
-def _require_github_profiles(
-    items: list[ContextItem],
-    runs: tuple[PublishedRun, ...],
-    archive_root: str | Path | None,
-) -> dict[str, GitHubIdentity]:
-    scope_ids = sorted(
-        {
-            item.snapshot.run["source"]["scope_id"]
-            for item in items
-            if item.github is not None
-        }
-    )
-    if not scope_ids:
-        return {}
-    if archive_root is None:
-        raise ContextError(
-            "GitHub identity profiles require an archive path during Context extraction"
-        )
-    historical_logins: dict[str, set[str]] = {scope_id: set() for scope_id in scope_ids}
-    for run in runs:
-        source = run.manifest.get("source")
-        if not isinstance(source, dict) or source.get("kind") != "github":
-            continue
-        scope_id = source.get("scope_id")
-        if not isinstance(scope_id, str) or scope_id not in historical_logins:
-            continue
-        login = (
-            run.manifest.get("collector", {})
-            .get("effective_options", {})
-            .get("actor_login")
-        )
-        if isinstance(login, str) and login:
-            historical_logins[scope_id].add(login)
-    identities: dict[str, GitHubIdentity] = {}
-    for scope_id in scope_ids:
-        try:
-            identities[scope_id] = require_github_identity(
-                archive_root, scope_id, historical_logins[scope_id]
-            )
-        except ArchiveError as error:
-            raise ContextError(str(error)) from None
-    return identities
-
-
 def extract_context(
     request: ContextRequest,
     runs: tuple[PublishedRun, ...],
     archive_root: str | Path | None = None,
 ) -> ContextExtractionResult:
-    """Group archive objects and run source-specific extraction."""
+    """Group archive objects, select observations, and invoke source adapters."""
     grouped: dict[tuple[str, str, str, str], list[PublishedSnapshot]] = {}
     for run in runs:
         for snapshot in run.snapshots:
-            if not _context_projection_supported(snapshot):
-                # Preserve known archive evidence without inventing a projection.
-                continue
+            adapter = adapter_for(snapshot.manifest["source_kind"])
+            if (
+                adapter is None
+                or snapshot.manifest["object_kind"] not in adapter.object_kinds
+            ):
+                raise ContextError("unsupported context source")
             grouped.setdefault(_logical_key(snapshot), []).append(snapshot)
     all_items: list[ContextItem] = []
     for key, snapshots in sorted(grouped.items()):
         selected_snapshot = select_observation(tuple(snapshots), request.end)
+        adapter = adapter_for(key[0])
+        if adapter is None:
+            raise ContextError("unsupported context source")
         try:
-            github = (
-                project_github(
-                    selected_snapshot,
-                    request.start,
-                    request.end,
-                )
-                if key[0] == "github"
-                else None
-            )
-            opencode = (
-                project_opencode(selected_snapshot, request.start, request.end)
-                if key[0] == "opencode"
-                else None
-            )
-            chatgpt = (
-                project_chatgpt(selected_snapshot, request.start, request.end)
-                if key[0] == "chatgpt"
-                else None
-            )
+            projection = adapter.project(selected_snapshot, request.start, request.end)
         except ArchiveError as error:
             raise ContextError(str(error)) from None
-        try:
-            attribution_mode = source_attribution_mode(key[0])
-        except AttributionError as error:
-            raise ContextError(str(error)) from None
-        if (key[0] == "opencode" and opencode is None) or (
-            key[0] == "chatgpt" and chatgpt is None
-        ):
+        if projection is None or not adapter.include(projection):
             continue
         all_items.append(
             ContextItem(
-                selected_snapshot,
-                "",
-                attribution_mode,
-                github,
-                opencode,
-                chatgpt,
+                snapshot=selected_snapshot,
+                adapter=adapter,
+                projection=projection,
+                path="",
+                attribution_mode=adapter.attribution_mode,
             )
         )
-    # Child sessions remain archive evidence but are intentionally excluded from
-    # Context Output; the public document scope is root sessions only.
-    all_items = [
-        item
-        for item in all_items
-        if (item.github is None or item.github.selected)
-        and (item.opencode is None or item.opencode.parent_id is None)
-    ]
-    github_items = [item for item in all_items if item.github is not None]
-    github_identities = _require_github_profiles(github_items, runs, archive_root)
-    for item_index, item in enumerate(all_items):
-        if item.github is None:
+    for adapter in CONTEXT_ADAPTERS:
+        positions = [
+            index for index, item in enumerate(all_items) if item.adapter is adapter
+        ]
+        if not positions:
             continue
-        scope_id = item.snapshot.run["source"]["scope_id"]
-        identity = github_identities.get(scope_id)
-        if identity is None:
-            continue
-        all_items[item_index] = replace(
-            item,
-            github=replace(
-                item.github,
-                tracked_identity=identity,
-            ),
-        )
-    github_items = [item for item in all_items if item.github is not None]
-    for item in github_items:
-        assert item.github is not None
-        item_index = all_items.index(item)
-        all_items[item_index] = replace(item, path=_github_path(item.github))
-    opencode_items = [item for item in all_items if item.opencode is not None]
-    grouped_sessions: dict[str, list[ContextItem]] = {}
-    for item in opencode_items:
-        assert item.opencode is not None
-        grouped_sessions.setdefault(_session_directory(item.opencode), []).append(item)
-    for directory, grouped_items in grouped_sessions.items():
-        ordered_items = sorted(
-            grouped_items,
-            key=lambda item: (
-                _session_first_in_range(item.opencode)
-                if item.opencode is not None
-                else datetime.max,
-                _session_title(item.opencode) if item.opencode is not None else "",
-                item.opencode.session_id if item.opencode is not None else "",
-            ),
-        )
-        for session_number, item in enumerate(ordered_items, start=1):
-            item_index = all_items.index(item)
-            all_items[item_index] = replace(
-                item, path=_opencode_path(directory, session_number)
+        try:
+            prepared = adapter.prepare(
+                tuple(all_items[index] for index in positions), runs, archive_root
             )
-    for item in (item for item in all_items if item.chatgpt is not None):
-        item_index = all_items.index(item)
-        all_items[item_index] = replace(
-            item,
-            path=(
-                "chatgpt/conversation/"
-                f"{encode_path_id(item.snapshot.manifest['source_id'])}"
-            ),
-        )
+        except ArchiveError as error:
+            raise ContextError(str(error)) from None
+        if len(prepared) != len(positions):
+            raise ContextError("context adapter returned an invalid item set")
+        for index, item in zip(positions, prepared, strict=True):
+            all_items[index] = item
     return ContextExtractionResult(request, runs, tuple(all_items))
 
 

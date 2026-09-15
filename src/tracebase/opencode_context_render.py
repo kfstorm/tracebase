@@ -25,8 +25,8 @@ def _session_context(projection: OpenCodeProjection) -> dict[str, str]:
 def render_opencode(
     item: ContextItem, result: ContextExtractionResult, output: Path
 ) -> list[str]:
-    assert item.opencode is not None
-    projection = item.opencode
+    projection = item.projection
+    assert isinstance(projection, OpenCodeProjection)
     value = projection.session.get("value")
     value = value if isinstance(value, dict) else {}
     info = value.get("info")
