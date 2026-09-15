@@ -188,6 +188,9 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     assert "## Context-only evidence" in prompt
     assert "Only `User work` may be promoted" in prompt
     assert "Repository ownership" in prompt
+    assert "Run the plan validator only during initial shard planning" in prompt
+    assert "After worker dispatch begins, never run the plan validator again" in prompt
+    assert "use the\nshard status and reports for completion reconciliation." in prompt
 
 
 def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:

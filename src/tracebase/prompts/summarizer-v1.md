@@ -143,6 +143,10 @@ fails, use the reported errors to correct the shard inventory in
 `/work/NOTES.md`, then run the same command again. Repeat until validation
 succeeds. Do not work around, replace, or skip this validation.
 
+Run the plan validator only during initial shard planning, before the first task
+call. After worker dispatch begins, never run the plan validator again; use the
+shard status and reports for completion reconciliation.
+
 Once validation succeeds, treat the shard inventory as frozen. Do not add,
 remove, merge, split, rename, or change the scope of any shard after worker
 dispatch begins.
