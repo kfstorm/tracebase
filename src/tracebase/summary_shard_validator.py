@@ -14,6 +14,7 @@ _STATUS_BLOCK = re.compile(
     re.DOTALL,
 )
 _SHARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _USER_WORK_SECTION = "## User work"
 _CONTEXT_ONLY_SECTION = "## Context-only evidence"
 _ATTRIBUTION_MODE_VALUES = {"personal", "actor_scoped"}
@@ -103,7 +104,13 @@ def _source_scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
 def _scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
     cleaned = scope.split(" (", 1)[0].strip()
     if cleaned.startswith("/context/"):
-        return ((cleaned.removeprefix("/context/").rstrip("/"), True),)
+        selector = cleaned.removeprefix("/context/").rstrip("/")
+        return (
+            (
+                selector,
+                not (selector == "chatgpt" or selector.startswith("chatgpt/")),
+            ),
+        )
     if cleaned.startswith(("github/", "opencode/", "misc:")):
         return _source_scope_selectors(cleaned)
     github_scope = _GITHUB_SCOPE.match(cleaned)
@@ -128,6 +135,24 @@ def _scope_items(scope: str, item_roots: set[str]) -> frozenset[str]:
             for selector, broad in selectors
         )
     )
+
+
+def _normalized_headings(report: str) -> set[str]:
+    headings: set[str] = set()
+    fenced = False
+    for line in report.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        match = _HEADING.match(line)
+        if match is None:
+            continue
+        heading = re.sub(r"\s+#+\s*$", "", match.group(1)).strip()
+        headings.add(re.sub(r"\s+", " ", heading).casefold())
+    return headings
 
 
 def _read_context(
@@ -251,10 +276,10 @@ def _validate_common(
                     report_text = report_path.read_text(encoding="utf-8")
                     if not report_text.strip():
                         errors.append(f"shard {shard_id!r} canonical report is empty")
-                    elif (
-                        _USER_WORK_SECTION not in report_text
-                        or _CONTEXT_ONLY_SECTION not in report_text
-                    ):
+                    elif not {
+                        "user work",
+                        "context-only evidence",
+                    }.issubset(_normalized_headings(report_text)):
                         errors.append(
                             f"shard {shard_id!r} report does not separate user work "
                             "from context-only evidence"

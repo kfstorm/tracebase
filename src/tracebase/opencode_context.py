@@ -1,4 +1,4 @@
-"""Deterministic OpenCode Context Output projection."""
+"""Deterministic OpenCode conversational Context projection."""
 
 from __future__ import annotations
 
@@ -8,15 +8,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .archive import ArchiveError, PublishedSnapshot
+from .dialogue import DialogueTranscript, DialogueTurn, project_dialogue
 
 
 @dataclass(frozen=True, slots=True)
 class OpenCodeProjection:
-    """The OpenCode-specific, serializable view of one session."""
+    """OpenCode metadata plus its text-only conversational transcript."""
 
-    selected: bool
     session: dict[str, Any]
-    messages: tuple[dict[str, Any], ...]
+    dialogue: DialogueTranscript
 
     @property
     def session_id(self) -> str:
@@ -24,7 +24,7 @@ class OpenCodeProjection:
         value = value if isinstance(value, dict) else {}
         info = value.get("info")
         identifier = info.get("id") if isinstance(info, dict) else value.get("id")
-        if not isinstance(identifier, str):
+        if not isinstance(identifier, str) or not identifier:
             raise ArchiveError("OpenCode session payload is invalid")
         return identifier
 
@@ -56,8 +56,18 @@ def _timestamp(value: Any) -> datetime:
     return parsed
 
 
+def _json(snapshot: PublishedSnapshot) -> dict[str, Any]:
+    try:
+        value = json.loads(snapshot.evidence["session.json"])
+    except KeyError, UnicodeDecodeError, json.JSONDecodeError:
+        raise ArchiveError("OpenCode session payload is invalid") from None
+    if not isinstance(value, dict):
+        raise ArchiveError("OpenCode session payload is invalid")
+    return value
+
+
 def _session_header(value: dict[str, Any]) -> dict[str, Any]:
-    """Keep only session identity and display metadata after parsing."""
+    """Keep source-specific identity and display metadata, not raw messages."""
     header: dict[str, Any] = {}
     for key in ("id", "directory", "parentID"):
         if key in value:
@@ -70,16 +80,6 @@ def _session_header(value: dict[str, Any]) -> dict[str, Any]:
             if key in info
         }
     return header
-
-
-def _json(snapshot: PublishedSnapshot) -> dict[str, Any]:
-    try:
-        value = json.loads(snapshot.evidence["session.json"])
-    except KeyError, UnicodeDecodeError, json.JSONDecodeError:
-        raise ArchiveError("OpenCode session payload is invalid") from None
-    if not isinstance(value, dict):
-        raise ArchiveError("OpenCode session payload is invalid")
-    return value
 
 
 def _project_worktree(snapshot: PublishedSnapshot) -> str | None:
@@ -99,20 +99,28 @@ def _project_worktree(snapshot: PublishedSnapshot) -> str | None:
 
 
 def _created(value: dict[str, Any]) -> datetime:
-    # OpenCode has used both flattened exports and info.time payloads.
     info = value.get("info")
     info = info if isinstance(info, dict) else {}
     time_data = info.get("time", value.get("time"))
     time_data = time_data if isinstance(time_data, dict) else {}
-    candidates = (value.get("created"), time_data.get("created"))
-    for candidate in candidates:
+    for candidate in (value.get("created"), time_data.get("created")):
         if isinstance(candidate, (int, float, str)) and not isinstance(candidate, bool):
             return _timestamp(candidate)
     raise ArchiveError("OpenCode message payload is invalid")
 
 
-def _supporting_message(message: dict[str, Any]) -> bool:
-    info = message.get("info")
+def _hidden(value: dict[str, Any]) -> bool:
+    info = value.get("info")
+    metadata = value.get("metadata")
+    return bool(
+        value.get("hidden") is True
+        or (isinstance(info, dict) and info.get("hidden") is True)
+        or (isinstance(metadata, dict) and metadata.get("hidden") is True)
+    )
+
+
+def _supporting_message(value: dict[str, Any]) -> bool:
+    info = value.get("info")
     return isinstance(info, dict) and (
         info.get("mode") == "compaction"
         or info.get("summary") is True
@@ -120,143 +128,45 @@ def _supporting_message(message: dict[str, Any]) -> bool:
     )
 
 
-def _part_is_supporting(part: dict[str, Any]) -> bool:
-    value = part.get("value")
-    value = value if isinstance(value, dict) else part
-    metadata = value.get("metadata")
-    return (
-        value.get("type") == "compaction"
-        or value.get("synthetic") is True
-        or (isinstance(metadata, dict) and metadata.get("compaction_continue") is True)
-    )
-
-
-def _point_roles(value: datetime, start: datetime, end: datetime) -> tuple[str, ...]:
-    return tuple(
-        role
-        for role, present in (
-            ("in_range_work", start <= value < end),
-            ("earlier_background", value < start),
-            ("later_progression", value >= end),
-        )
-        if present
-    )
-
-
-def _interval_roles(
-    interval: tuple[datetime, datetime | None], start: datetime, end: datetime
-) -> tuple[str, ...]:
-    began, finished = interval
-    if finished is None:
-        # An unknown end is not an open-ended interval for every later request.
-        # Until completion is observed, only the source-native start is known.
-        return _point_roles(began, start, end)
-    if finished == began:
-        return _point_roles(began, start, end)
-    in_range = began < end and start < finished
-    return tuple(
-        role
-        for role, present in (
-            ("in_range_work", in_range),
-            ("earlier_background", finished is not None and finished <= start),
-            ("later_progression", began >= end),
-        )
-        if present
-    )
-
-
-def _part_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None:
-    time_data = part.get("time")
-    if not isinstance(time_data, dict):
-        return None
-    started = time_data.get("start")
-    finished = time_data.get("end")
-    if started is None:
-        created = time_data.get("created")
-        if created is None:
+def _text_parts(message: dict[str, Any]) -> str | None:
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        raise ArchiveError("OpenCode message payload is invalid")
+    texts: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            raise ArchiveError("OpenCode message payload is invalid")
+        if part.get("type") != "text":
+            continue
+        value = part.get("value")
+        value = value if isinstance(value, dict) else part
+        metadata = value.get("metadata")
+        if (
+            part.get("synthetic") is True
+            or value.get("synthetic") is True
+            or part.get("ignored") is True
+            or value.get("ignored") is True
+            or (
+                isinstance(metadata, dict)
+                and metadata.get("compaction_continue") is True
+            )
+            or value.get("hidden") is True
+        ):
+            continue
+        text = value.get("text", part.get("text"))
+        if not isinstance(text, str):
+            # A malformed text part is not safely recoverable as dialogue.
             return None
-        if not isinstance(created, (int, float, str)) or isinstance(created, bool):
-            raise ArchiveError("OpenCode part payload is invalid")
-        created_time = _timestamp(created)
-        return created_time, created_time
-    if not isinstance(started, (int, float, str)) or isinstance(started, bool):
-        raise ArchiveError("OpenCode part payload is invalid")
-    start_time = _timestamp(started)
-    if finished is None:
-        return start_time, None
-    if not isinstance(finished, (int, float, str)) or isinstance(finished, bool):
-        raise ArchiveError("OpenCode part payload is invalid")
-    end_time = _timestamp(finished)
-    if end_time < start_time:
-        raise ArchiveError("OpenCode part payload is invalid")
-    return start_time, end_time
+        if text:
+            texts.append(text)
+    return "\n\n".join(texts) or None
 
 
-def _part_id(part: dict[str, Any]) -> str:
-    identifier = part.get("id", part.get("callID"))
-    if isinstance(identifier, str) and identifier:
-        return identifier
-    return json.dumps(part, sort_keys=True, separators=(",", ":"))
-
-
-def _refresh_part_roles(part: dict[str, Any], start: datetime, end: datetime) -> None:
-    if not part["intervals"]:
-        part["temporal_roles"] = ("observed_state",)
-        return
-    roles: set[str] = set()
-    for interval in part["intervals"]:
-        roles.update(_interval_roles(interval, start, end))
-    part["temporal_roles"] = tuple(sorted(roles))
-
-
-def _part_is_work(part: dict[str, Any]) -> bool:
-    return not _part_is_supporting(part)
-
-
-def _part_is_task(part: dict[str, Any]) -> bool:
-    part_type = part.get("type")
-    if not isinstance(part_type, str):
-        return False
-    value = part.get("value")
-    value = value if isinstance(value, dict) else part
-    tool = value.get("tool")
-    return part_type == "task" or (
-        part_type == "tool" and isinstance(tool, str) and tool == "task"
-    )
-
-
-def _tool_times(part: dict[str, Any]) -> tuple[datetime, datetime | None] | None:
-    state = part.get("state")
-    if not isinstance(state, dict):
-        return None
-    time_data = state.get("time")
-    time_data = time_data if isinstance(time_data, dict) else {}
-    start = time_data.get("start", state.get("started", state.get("start")))
-    end = time_data.get(
-        "end", state.get("ended", state.get("end", state.get("completed")))
-    )
-    if start is None and state.get("status") == "pending":
-        return None
-    if not isinstance(start, (int, float, str)) or isinstance(start, bool):
-        raise ArchiveError("OpenCode tool payload is invalid")
-    started = _timestamp(start)
-    if end is None:
-        return (started, None)
-    if not isinstance(end, (int, float, str)) or isinstance(end, bool):
-        raise ArchiveError("OpenCode tool payload is invalid")
-    ended = _timestamp(end)
-    if ended < started:
-        raise ArchiveError("OpenCode tool payload is invalid")
-    return started, ended
-
-
-def project_opencode(  # noqa: PLR0915
+def project_opencode(
     snapshot: PublishedSnapshot, start: datetime, end: datetime
-) -> OpenCodeProjection:
-    """Project messages as points and tool executions as intervals."""
+) -> OpenCodeProjection | None:
+    """Project only user/assistant text using message creation time."""
     source_id = snapshot.manifest["source_id"]
-    session: dict[str, Any] = {"value": {}}
-    messages: list[dict[str, Any]] = []
     payload = _json(snapshot)
     info = payload.get("info")
     info = info if isinstance(info, dict) else {}
@@ -269,68 +179,31 @@ def project_opencode(  # noqa: PLR0915
     raw_messages = payload.get("messages")
     if not isinstance(raw_messages, list):
         raise ArchiveError("OpenCode session payload is invalid")
+
+    turns: list[DialogueTurn] = []
     for message in raw_messages:
         if not isinstance(message, dict):
             raise ArchiveError("OpenCode message payload is invalid")
-        info = message.get("info")
-        info = info if isinstance(info, dict) else {}
-        message_id = message.get("id", info.get("id"))
-        if not isinstance(message_id, str) or not message_id:
-            raise ArchiveError("OpenCode message payload is invalid")
-        message_time = _created(message)
-        record: dict[str, Any] = {
-            "id": message_id,
-            "created": message_time.isoformat(),
-            "role": message.get("role", info.get("role")),
-            "temporal_roles": _point_roles(message_time, start, end),
-        }
-        parts = message.get("parts", ())
-        if not isinstance(parts, list):
-            raise ArchiveError("OpenCode message payload is invalid")
-        if not all(isinstance(part, dict) for part in parts):
-            raise ArchiveError("OpenCode message payload is invalid")
-        supporting_message = _supporting_message(message)
-        record["_created_time"] = message_time
-        record["_supporting_message"] = supporting_message
-        if supporting_message:
-            record["temporal_roles"] = ("observed_state",)
-        parts_by_id: dict[str, dict[str, Any]] = {}
-        for part in parts:
-            if not isinstance(part, dict):
-                raise ArchiveError("OpenCode message payload is invalid")
-            part_id = _part_id(part)
-            part_interval = (
-                _tool_times(part)
-                if part.get("type") == "tool" or _part_is_task(part)
-                else _part_times(part)
-            )
-            part_record = parts_by_id.setdefault(
-                part_id,
-                {
-                    "id": part_id,
-                    "type": part.get("type"),
-                    "value": part,
-                    "temporal_roles": (
-                        _interval_roles(part_interval, start, end)
-                        if part_interval is not None
-                        else ("observed_state",)
-                    ),
-                    "intervals": [],
-                },
-            )
-            if part_interval is not None:
-                part_record["intervals"].append(part_interval)
-                part_record["_start_time"] = part_interval[0]
-                part_record["start"] = part_interval[0].isoformat()
-                if part_interval[1] is not None:
-                    part_record["end"] = part_interval[1].isoformat()
-                else:
-                    part_record["completion"] = "unknown"
-        if parts_by_id:
-            record["parts"] = list(parts_by_id.values())
-        messages.append(record)
+        role = message.get("role")
+        message_info = message.get("info")
+        if role is None and isinstance(message_info, dict):
+            role = message_info.get("role")
+        role = role.lower() if isinstance(role, str) else ""
+        if role not in {"user", "assistant"}:
+            continue
+        if _hidden(message) or _supporting_message(message):
+            continue
+        text = _text_parts(message)
+        if text is None:
+            continue
+        turns.append(DialogueTurn(role, _created(message), text))
+
+    dialogue = project_dialogue(turns, start, end)
+    if dialogue is None:
+        return None
+
     latest_value = _session_header(payload)
-    session["value"] = latest_value
+    session: dict[str, Any] = {"value": latest_value}
     latest_info = latest_value.get("info")
     latest_info = latest_info if isinstance(latest_info, dict) else {}
     directory = latest_info.get("directory", latest_value.get("directory"))
@@ -353,43 +226,4 @@ def project_opencode(  # noqa: PLR0915
         project_directory = directory
     if project_directory is not None:
         session["project_directory"] = project_directory
-    messages.sort(key=lambda message: (message["_created_time"], message["id"]))
-    for message in messages:
-        message.get("parts", []).sort(
-            key=lambda tool: (
-                "_start_time" not in tool,
-                tool.get("_start_time"),
-                tool["id"],
-            )
-        )
-        parts = message.get("parts", [])
-        if not message["_supporting_message"] and parts:
-            retained_parts = [part for part in parts if _part_is_work(part)]
-            message["parts"] = retained_parts
-            if not retained_parts:
-                message["temporal_roles"] = ("observed_state",)
-        for part in message.get("parts", ()):
-            _refresh_part_roles(part, start, end)
-            part.pop("intervals", None)
-            part.pop("_start_time", None)
-        message.pop("_created_time", None)
-    selected = any(
-        (
-            not message["_supporting_message"]
-            and "in_range_work" in message["temporal_roles"]
-        )
-        or any(
-            not message["_supporting_message"]
-            and _part_is_work(part)
-            and "in_range_work" in part["temporal_roles"]
-            for part in message.get("parts", ())
-        )
-        for message in messages
-    )
-    if not selected:
-        messages = []
-    return OpenCodeProjection(
-        selected,
-        session,
-        tuple(messages),
-    )
+    return OpenCodeProjection(session, dialogue)

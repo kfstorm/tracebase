@@ -152,7 +152,15 @@ uv run tracebase context \
   --output "$HOME/.tracebase/context-2026-09-01"
 ```
 
-Start with `index.md` in the output directory. This range selects work records, not collector observation times. Each source item declares its attribution mode: OpenCode is `personal`, so delegated agent/subagent work belongs to the user; GitHub is `actor_scoped`, so only explicitly marked tracked-account actions and authorship are eligible for the user's Summary. Collaborator evidence remains context-only. Context Output is disposable and does **not** redact sensitive data: treat it with the same confidentiality as the Raw Archive. Third-party or AI-service use requires a separate scope and sanitization decision.
+Start with `index.md` in the output directory. This range selects work records, not collector observation times. Each source item declares its attribution mode: OpenCode and ChatGPT are `personal`, so conversational text belongs to the user; OpenCode delegated agent/subagent work also belongs to the user. GitHub is `actor_scoped`, so only explicitly marked tracked-account actions and authorship are eligible for the user's Summary. Collaborator evidence remains context-only. Context Output is disposable and does **not** redact sensitive data: treat it with the same confidentiality as the Raw Archive. Third-party or AI-service use requires a separate scope and sanitization decision.
+
+Conversational Context is text-only. OpenCode and ChatGPT output only `user`
+and `assistant` text, classified by message creation time into the requested
+half-open range and bounded earlier background. OpenCode tools, tasks, and other
+non-text activity do not select a session. ChatGPT output follows the provider's
+page-ordered observed current stream; it does not reconstruct branch history,
+regenerations, or edits. ChatGPT placement uses `create_time`, not
+`update_time`. Canvas/textdocs and attachment binaries remain unsupported.
 
 For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
 

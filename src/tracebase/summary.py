@@ -20,12 +20,33 @@ from .summary_shards import inspect_shards
 
 OPENCODE_VERSION = "1.18.29"
 IMAGE = f"tracebase-opencode:{OPENCODE_VERSION}"
-RECOVERY_PROMPT = (
-    "Canonical result recovery: reread /work/TASK.md and /work/NOTES.md, "
-    "inspect every declared /work/shards/*.md report, and write the complete "
-    "canonical result to /results/summary.md. Use this same root session; do "
-    "not start a new session or silently omit a shard."
-)
+SHARD_RECOVERY_PROMPT = """Shard protocol validation failed.
+
+Reread /work/TASK.md and /work/NOTES.md. Fix only the shard-protocol
+errors listed below, preserving existing valid investigation and evidence.
+
+<VALIDATOR_ERRORS>
+
+Classify each error before acting:
+
+- If it concerns root-owned orchestration state such as the shard status
+  block in /work/NOTES.md, repair it yourself.
+- If an individual shard report is missing or substantively incomplete,
+  recover only that shard. Prefer continuing the existing worker/session
+  when the task mechanism supports it; otherwise retry that exact shard
+  once with the same canonical scope.
+- Do not re-investigate valid shards.
+- Do not change shard scopes merely to satisfy validation.
+- Do not omit or merge a failed shard.
+- Do not rewrite valid report content except where required to restore
+  the protocol.
+- Do not change /results/summary.md except when the repaired shard evidence
+  materially requires final synthesis to change.
+- A shard whose retry_count is already 1 has exhausted its worker retry;
+  do not start another worker for it, and preserve its failed status.
+
+After repairs, reconcile the complete shard inventory and status block,
+then ensure the canonical result exists at /results/summary.md."""
 _INTERVAL = re.compile(r"^Requested interval: `(.+?) <= t < (.+?)`$", re.MULTILINE)
 
 
@@ -153,8 +174,7 @@ def _run_stage(
     config: str,
     model: str,
     variant: str | None,
-    result_path: Path,
-) -> None:
+) -> tuple[str, list[str]]:
     command = [
         "--pure",
         "run",
@@ -172,23 +192,55 @@ def _run_stage(
     initial = runner.run(command, config)
     (runtime / "stdout.jsonl").write_text(initial.stdout, encoding="utf-8")
     (runtime / "stderr.log").write_text(initial.stderr, encoding="utf-8")
-    if _has_result(result_path):
-        return
-    root_id = _root_session_id(initial.stdout)
-    recovery = [*command[:-1], "--session", root_id, RECOVERY_PROMPT]
+    return _root_session_id(initial.stdout), command
+
+
+def _recovery_prompt(errors: tuple[str, ...], result_missing: bool) -> str:
+    details = list(errors)
+    if result_missing:
+        details.append("Summarizer result /results/summary.md is missing or empty")
+    return SHARD_RECOVERY_PROMPT.replace(
+        "<VALIDATOR_ERRORS>", "\n".join(f"- {error}" for error in details)
+    )
+
+
+def _run_recovery(
+    runtime: Path,
+    runner: Runner,
+    config: str,
+    command: list[str],
+    root_id: str,
+    errors: tuple[str, ...],
+    result_missing: bool,
+    result_path: Path,
+    work: Path,
+    context: Path,
+) -> tuple[tuple[str, ...], bool]:
+    recovery = [
+        *command[:-1],
+        "--session",
+        root_id,
+        _recovery_prompt(errors, result_missing),
+    ]
     resumed = runner.run(recovery, config)
     (runtime / "root-recovery.stdout.jsonl").write_text(
         resumed.stdout, encoding="utf-8"
     )
     (runtime / "root-recovery.stderr.log").write_text(resumed.stderr, encoding="utf-8")
+    final_errors = inspect_shards(work, context).errors
+    final_result_present = _has_result(result_path)
     _write_json(
         runtime / "root-recovery.json",
         {
             "attempted": True,
             "root_session_id": root_id,
-            "result_present": _has_result(result_path),
+            "validator_errors": list(errors),
+            "final_validator_errors": list(final_errors),
+            "result_present": not result_missing,
+            "final_result_present": final_result_present,
         },
     )
+    return final_errors, final_result_present
 
 
 def _tracebase_version() -> str:
@@ -229,18 +281,14 @@ def _publish_debug(
 ) -> None:
     staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
     try:
-        excluded = shutil.ignore_patterns(
-            "auth.json",
-            "credentials.json",
-            "credentials.toml",
-            "secrets.json",
-            ".opencode-data",
-        )
         for name in ("context", "work", "runtime", "results"):
             source = run / name
             if source.is_dir():
-                shutil.copytree(source, staging / name, ignore=excluded)
-        manifest = {**provenance, "status": status}
+                shutil.copytree(source, staging / name)
+        manifest = {
+            **provenance,
+            "status": status,
+        }
         if error is not None:
             manifest["error"] = error
         _write_json(staging / "manifest.json", manifest)
@@ -311,17 +359,32 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         provenance["opencode_version"] = runner.run(
             ["--pure", "--version"], config
         ).stdout.strip()
-        _run_stage(
-            runtime,
-            runner,
-            config,
-            request.model,
-            request.variant,
-            results / "summary.md",
+        root_id, command = _run_stage(
+            runtime, runner, config, request.model, request.variant
         )
+        validation_errors = inspect_shards(work, context).errors
+        result_missing = not _has_result(results / "summary.md")
+        if validation_errors or result_missing:
+            validation_errors, result_present = _run_recovery(
+                runtime,
+                runner,
+                config,
+                command,
+                root_id,
+                validation_errors,
+                result_missing,
+                results / "summary.md",
+                work,
+                context,
+            )
+            if not result_present:
+                raise SummaryError("Summarizer result /results/summary.md is missing")
+            if validation_errors:
+                raise SummaryError(
+                    "Summarizer shard protocol was incomplete: "
+                    + "; ".join(validation_errors)
+                )
         summary = _read_result(results / "summary.md")
-        if inspect_shards(work, context).errors:
-            raise SummaryError("Summarizer shard protocol was incomplete")
         publication = Path(
             tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent)
         )

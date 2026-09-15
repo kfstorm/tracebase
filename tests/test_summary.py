@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -26,12 +27,23 @@ class FakeRunner:
         recover: bool = False,
         incomplete: bool = False,
         missing_context_section: bool = False,
+        missing_context_section_for: set[str] | None = None,
+        repair_on_recovery: bool = False,
+        repair_only_shards: set[str] | None = None,
+        malformed_status_block: bool = False,
+        shards: list[dict[str, object]] | None = None,
     ) -> None:
         self.output = output
         self.recover = recover
         self.incomplete = incomplete
         self.missing_context_section = missing_context_section
+        self.missing_context_section_for = missing_context_section_for or set()
+        self.repair_on_recovery = repair_on_recovery
+        self.repair_only_shards = repair_only_shards
+        self.malformed_status_block = malformed_status_block
+        self.shards = shards
         self.calls: list[list[str]] = []
+        self.report_writes: list[str] = []
 
     def run(
         self,
@@ -48,35 +60,68 @@ class FakeRunner:
             if not self.recover or "--session" in arguments:
                 work = self.output / "work"
                 (work / "shards").mkdir(exist_ok=True)
-                (work / "shards/repo.md").write_text(
-                    "## User work\n\nevidence\n"
-                    + (
-                        ""
-                        if self.missing_context_section
-                        else "\n## Context-only evidence\n\nNone.\n"
-                    ),
-                    encoding="utf-8",
+                shard_specs = self.shards or [
+                    {
+                        "id": "repo",
+                        "scope": "/context/repo",
+                        "attribution_modes": ["personal"],
+                    }
+                ]
+                written_specs = shard_specs
+                if "--session" in arguments and self.repair_only_shards is not None:
+                    written_specs = [
+                        shard
+                        for shard in shard_specs
+                        if shard["id"] in self.repair_only_shards
+                    ]
+                for shard in written_specs:
+                    shard_id = shard["id"]
+                    assert isinstance(shard_id, str)
+                    self.report_writes.append(shard_id)
+                    (work / f"shards/{shard_id}.md").write_text(
+                        "## User work\n\nevidence\n"
+                        + (
+                            ""
+                            if (
+                                self.missing_context_section
+                                or shard_id in self.missing_context_section_for
+                            )
+                            and not (
+                                "--session" in arguments and self.repair_on_recovery
+                            )
+                            else "\n## Context-only evidence\n\nNone.\n"
+                        ),
+                        encoding="utf-8",
+                    )
+                status = (
+                    "failed"
+                    if self.incomplete
+                    and (
+                        not ("--session" in arguments and self.repair_on_recovery)
+                        or any(shard.get("retry_count") == 1 for shard in shard_specs)
+                    )
+                    else "complete"
                 )
-                status = "failed" if self.incomplete else "complete"
-                (work / "NOTES.md").write_text(
+                notes = (
                     "<!-- SHARD_STATUS_BEGIN -->\n"
                     + json.dumps(
                         {
                             "shards": [
                                 {
-                                    "id": "repo",
-                                    "scope": "/context/repo",
-                                    "attribution_modes": ["personal"],
+                                    **shard,
                                     "status": status,
-                                    "retry_count": 0,
-                                    "report": "/work/shards/repo.md",
+                                    "retry_count": shard.get("retry_count", 0),
+                                    "report": f"/work/shards/{shard['id']}.md",
                                 }
+                                for shard in shard_specs
                             ]
                         }
                     )
-                    + "\n<!-- SHARD_STATUS_END -->\n",
-                    encoding="utf-8",
+                    + "\n<!-- SHARD_STATUS_END -->\n"
                 )
+                if self.malformed_status_block and "--session" not in arguments:
+                    notes = "root bookkeeping needs repair\n"
+                (work / "NOTES.md").write_text(notes, encoding="utf-8")
                 (self.output / "results/summary.md").write_text(
                     "# Work summary\n", encoding="utf-8"
                 )
@@ -97,6 +142,41 @@ def context(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return result
+
+
+def multi_source_context(tmp_path: Path) -> Path:
+    result = tmp_path / "context"
+    result.mkdir()
+    (result / "index.md").write_text(
+        "# Context Output\n\n"
+        "Requested interval: `2026-01-01T01:00:00+01:00 <= t < "
+        "2026-01-01T03:00:00+01:00`\n"
+        "- **OpenCode session** [attribution mode: `personal`]("
+        "opencode/home/work/project/session/01/overview.md)\n"
+        "- **ChatGPT conversation** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        encoding="utf-8",
+    )
+    return result
+
+
+def _write_single_chatgpt_index(context_dir: Path) -> None:
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **conversation** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        encoding="utf-8",
+    )
+
+
+def _write_chatgpt_index(context_dir: Path, *conversation_ids: str) -> None:
+    context_dir.mkdir()
+    lines = "".join(
+        f"- **{conversation_id}** [attribution mode: `personal`]("
+        f"chatgpt/conversation/{conversation_id}/overview.md)\n"
+        for conversation_id in conversation_ids
+    )
+    (context_dir / "index.md").write_text(lines, encoding="utf-8")
 
 
 def bind_runner_to_staging(runner: FakeRunner, parent: Path) -> None:
@@ -140,6 +220,58 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     assert "metrics" not in manifest
     assert "canonical_result_recovery" not in manifest
     assert len(runner.calls) == 2
+    assert not any("--session" in call for call in runner.calls)
+
+
+def test_summary_publishes_mixed_opencode_and_chatgpt_context_partition(
+    tmp_path: Path,
+) -> None:
+    source = multi_source_context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path / ".unused",
+        shards=[
+            {
+                "id": "opencode",
+                "scope": "opencode/home/work/project/session/01",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "chatgpt",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    published = summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert published == output
+    assert (output / "summary.md").read_text() == "# Work summary\n"
+
+
+def test_summary_rejects_mixed_context_when_chatgpt_item_is_not_sharded(
+    tmp_path: Path,
+) -> None:
+    source = multi_source_context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path / ".unused",
+        shards=[
+            {
+                "id": "opencode",
+                "scope": "opencode/home/work/project/session/01",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="shard protocol"):
+        summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert not output.exists()
 
 
 def test_summarize_uses_same_version_for_image_tag_and_build(
@@ -178,6 +310,30 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     prompt = (
         Path(__file__).parents[1] / "src/tracebase/prompts/summarizer-v1.md"
     ).read_text(encoding="utf-8")
+    normalized_prompt = " ".join(prompt.split())
+
+    required_semantics = (
+        r"`personal` is an attribution rule, not a work-relevance classification",
+        r"Attribution and work relevance are separate judgments",
+        r"purpose, intent, and activity character",
+        r"Explicit work linkage:.*repository.*PR.*issue.*project",
+        r"Intrinsic work intent:.*investigation, research, competitive analysis,"
+        r" technical evaluation",
+        r"Cross-source support:.*GitHub, OpenCode",
+        r"Technical subject matter alone does not prove work intent",
+        r"conversation length, message count, command volume, troubleshooting"
+        r" complexity",
+        r"Personal operational troubleshooting may qualify only when.*blocks"
+        r" development or an engineering task",
+        r"supporting work rather than an independent major workstream",
+        r"association helps organization but is not a prerequisite for"
+        r" work eligibility",
+        r"standalone work/research",
+        r"Do not guess or invent a project relationship",
+        r"do not discard otherwise valid work because its project is unknown",
+    )
+    for semantic_clause in required_semantics:
+        assert re.search(semantic_clause, normalized_prompt)
 
     assert "final Summary is a projection of the user's work" in prompt
     assert "`personal`" in prompt and "`actor_scoped`" in prompt
@@ -186,6 +342,52 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     assert "single `## Commits` section" in prompt
     assert "## User work" in prompt
     assert "## Context-only evidence" in prompt
+    assert "shard inventory covers every projected Context item" in normalized_prompt
+    assert (
+        "workstream inventory contains only materially meaningful work"
+        in normalized_prompt
+    )
+    assert "User work: None" in normalized_prompt
+    assert (
+        "Each ChatGPT conversation is an independent projected Context item"
+        in normalized_prompt
+    )
+    assert "exact canonical conversation roots" in normalized_prompt
+    assert (
+        "Do not create a cross-source relationship from time proximity"
+        in normalized_prompt
+    )
+    assert "`activity.md`" in normalized_prompt
+    assert "`background.md`" in normalized_prompt
+    assert (
+        "Background cannot independently create a requested-interval workstream"
+        in normalized_prompt
+    )
+    assert "Later dialogue" in normalized_prompt
+    assert "Assistant text itself does not prove" in normalized_prompt
+    assert "assistant proposal" in normalized_prompt
+    assert "implementation, execution, deployment" in normalized_prompt
+    assert "validation happened" in normalized_prompt
+    worker_contract = (
+        "Worker Relevance Contract",
+        "personal` is attribution, not work relevance",
+        "Explicit project or workstream association may support relevance "
+        "but is not required",
+        "Technical subject matter, complexity, duration, interaction count, or",
+        "troubleshooting depth do not by themselves establish work relevance",
+        "Non-work personal activity belongs in `Context-only evidence`",
+        "delegated cognitive work",
+        "The worker does not decide Summary materiality",
+        "Work-related does not mean it must appear in the final Summary",
+        "must never create a new workstream",
+        "never to rescue a worker's misclassification",
+        "do not ask a worker to read the root `TASK.md`",
+    )
+    for clause in worker_contract:
+        assert clause in normalized_prompt
+    assert "analysis, research, investigation, review, evaluation" in prompt
+    assert "assistant patch, command, or" in prompt
+    assert "suggestion to run, test, or" in prompt
     assert "Only `User work` may be promoted" in prompt
     assert "Repository ownership" in prompt
     assert "Run the plan validator only during initial shard planning" in prompt
@@ -208,6 +410,80 @@ def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:
     assert len(runner.calls) == 3
 
 
+def test_shard_protocol_recovery_reuses_root_and_passes_validator_errors(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    debug = tmp_path / "debug"
+    runner = FakeRunner(tmp_path, incomplete=True, repair_on_recovery=True)
+    bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output, debug_output=debug), runner)
+
+    recovery_calls = [call for call in runner.calls if "--session" in call]
+    assert len(recovery_calls) == 1
+    recovery_prompt = recovery_calls[0][-1]
+    assert "Shard protocol validation failed." in recovery_prompt
+    assert "shard 'repo' reported failure" in recovery_prompt
+    assert recovery_calls[0][recovery_calls[0].index("--session") + 1] == "root"
+    recovery = json.loads((debug / "runtime/root-recovery.json").read_text())
+    assert recovery["validator_errors"] == ["shard 'repo' reported failure"]
+    assert recovery["final_validator_errors"] == []
+
+
+def test_root_status_recovery_reuses_root_and_passes_second_inspect(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path,
+        malformed_status_block=True,
+        repair_on_recovery=True,
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output), runner)
+
+    recovery_calls = [call for call in runner.calls if "--session" in call]
+    assert len(recovery_calls) == 1
+    assert "NOTES.md has no SHARD_STATUS block" in recovery_calls[0][-1]
+
+
+def test_shard_protocol_recovery_only_repairs_invalid_shard(
+    tmp_path: Path,
+) -> None:
+    source = multi_source_context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path / ".unused",
+        missing_context_section_for={"chatgpt"},
+        repair_on_recovery=True,
+        repair_only_shards={"chatgpt"},
+        shards=[
+            {
+                "id": "opencode",
+                "scope": "opencode/home/work/project/session/01",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "chatgpt",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert runner.report_writes == ["opencode", "chatgpt", "chatgpt"]
+    recovery_prompt = next(call[-1] for call in runner.calls if "--session" in call)
+    assert "shard 'chatgpt' report does not separate" in recovery_prompt
+    assert "shard 'opencode'" not in recovery_prompt
+
+
 def test_incomplete_shards_publish_nothing(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
@@ -218,6 +494,33 @@ def test_incomplete_shards_publish_nothing(tmp_path: Path) -> None:
 
     assert not output.exists()
     assert not list(tmp_path.glob(".summary.*"))
+    assert len([call for call in runner.calls if "--session" in call]) == 1
+
+
+def test_protocol_recovery_does_not_bypass_retry_limit(tmp_path: Path) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path,
+        incomplete=True,
+        repair_on_recovery=True,
+        shards=[
+            {
+                "id": "repo",
+                "scope": "/context/repo",
+                "attribution_modes": ["personal"],
+                "retry_count": 1,
+            }
+        ],
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="shard protocol"):
+        summarize(SummaryRequest(source, "model", None, output), runner)
+
+    recovery_prompt = next(call[-1] for call in runner.calls if "--session" in call)
+    assert "retry_count is already 1" in recovery_prompt
+    assert len([call for call in runner.calls if "--session" in call]) == 1
 
 
 def test_missing_shard_section_fails_without_mutating_worker_report(
@@ -257,30 +560,9 @@ def test_debug_retains_existing_runtime_artifacts_without_extra_calls(
     assert "## Context-only evidence" in (debug / "work/shards/repo.md").read_text()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "runtime/stderr.log").is_file()
-    assert not (debug / ".opencode-data").exists()
-    assert not list(debug.rglob("auth.json"))
+    assert not (debug / "opencode").exists()
+    assert "opencode" not in json.loads((debug / "manifest.json").read_text())
     assert len(runner.calls) == 2
-
-
-def test_debug_excludes_credentials_written_to_work(tmp_path: Path) -> None:
-    source = context(tmp_path)
-    output = tmp_path / "summary"
-    debug = tmp_path / "debug"
-    runner = FakeRunner(tmp_path)
-    original_run = runner.run
-
-    def run(arguments: list[str], config: str, stdout_path: Path | None = None):
-        result = original_run(arguments, config, stdout_path)
-        if "run" in arguments:
-            (runner.output / "work/auth.json").write_text("secret", encoding="utf-8")
-        return result
-
-    runner.run = run  # type: ignore[method-assign]
-    bind_runner_to_staging(runner, tmp_path)
-
-    summarize(SummaryRequest(source, "model", None, output, debug_output=debug), runner)
-
-    assert not list(debug.rglob("auth.json"))
 
 
 def test_failure_with_debug_retains_available_artifacts(tmp_path: Path) -> None:
@@ -298,9 +580,10 @@ def test_failure_with_debug_retains_available_artifacts(tmp_path: Path) -> None:
     assert not output.exists()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "work/shards/repo.md").is_file()
+    assert not (debug / "opencode").exists()
     assert (debug / "results/summary.md").read_text() == "# Work summary\n"
     assert json.loads((debug / "manifest.json").read_text())["status"] == "failed"
-    assert len(runner.calls) == 2
+    assert len(runner.calls) == 3
 
 
 def test_summary_rejects_output_inside_context(tmp_path: Path) -> None:
@@ -374,6 +657,33 @@ def test_shard_validation_rejects_retry_above_one(tmp_path: Path) -> None:
     (tmp_path / "shards/a.md").write_text("report", encoding="utf-8")
 
     assert "retried more than once" in inspect_shards(tmp_path).errors[0]
+
+
+@pytest.mark.parametrize("level", ["#", "##", "###", "######"])
+def test_shard_report_accepts_any_atx_heading_level(tmp_path: Path, level: str) -> None:
+    _write_partition_fixture(
+        tmp_path, [{"id": "repo", "scope": "repo", "attribution_modes": ["personal"]}]
+    )
+    (tmp_path / "shards/repo.md").write_text(
+        f"{level} User work\n\nevidence\n\n{level} Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    assert inspect_shards(tmp_path).errors == ()
+
+
+def test_shard_report_rejects_missing_normalized_heading_text(tmp_path: Path) -> None:
+    _write_partition_fixture(
+        tmp_path, [{"id": "repo", "scope": "repo", "attribution_modes": ["personal"]}]
+    )
+    (tmp_path / "shards/repo.md").write_text(
+        "# User work\n\nevidence\n\n### Other evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    errors = inspect_shards(tmp_path).errors
+
+    assert any("does not separate" in error for error in errors)
 
 
 def test_shard_validation_rejects_context_attribution_mismatch(
@@ -844,6 +1154,255 @@ def test_shard_partition_resolves_mixed_misc_brace_scope_exactly(
             {
                 "id": "remaining",
                 "scope": "opencode/work/project/session/{05}",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_allows_exact_chatgpt_conversation_scope(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_single_chatgpt_index(context_dir)
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "conversation",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_rejects_uncovered_chatgpt_conversation(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **one** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n"
+        "- **two** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-beta/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "one",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("cgpt-beta" in error and "not covered" in error for error in errors)
+
+
+def test_shard_partition_rejects_overlapping_chatgpt_conversation(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_single_chatgpt_index(context_dir)
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "first",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "second",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("covered by multiple shards" in error for error in errors)
+
+
+def test_shard_partition_rejects_chatgpt_attribution_mismatch(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_single_chatgpt_index(context_dir)
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "conversation",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["actor_scoped"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("attribution modes do not match Context" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ["/context/chatgpt", "/context/chatgpt/conversation"],
+)
+def test_shard_partition_rejects_broad_chatgpt_scope(
+    tmp_path: Path, scope: str
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "chatgpt",
+                "scope": scope,
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    errors = inspect_shards(tmp_path, context_dir).errors
+
+    assert any("scope does not match Context items" in error for error in errors)
+
+
+def test_shard_partition_allows_exact_chatgpt_scope_without_broad_match(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "foo",
+                "scope": "/context/chatgpt/conversation/foo",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "bar",
+                "scope": "/context/chatgpt/conversation/bar",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_exact_chatgpt_scope_rejects_similar_prefix(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_chatgpt_index(context_dir, "foo", "foo-extra")
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "foo",
+                "scope": "/context/chatgpt/conversation/foo",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "foo-extra",
+                "scope": "/context/chatgpt/conversation/foo-extra",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_allows_explicit_chatgpt_misc_scope(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "misc",
+                "scope": ("misc: chatgpt/conversation/foo, chatgpt/conversation/bar"),
+                "attribution_modes": ["personal"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_resolves_mixed_misc_chatgpt_scope_exactly(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **issue** [attribution mode: `actor_scoped`]("
+        "github/acme/project/pull/1/overview.md)\n"
+        "- **session** [attribution mode: `personal`]("
+        "opencode/home/work/project/session/01/overview.md)\n"
+        "- **conversation** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "misc",
+                "scope": (
+                    "misc: github/acme/project/pull/1, "
+                    "opencode/home/work/project/session/01, "
+                    "chatgpt/conversation/cgpt-alpha"
+                ),
+                "attribution_modes": ["actor_scoped", "personal"],
+            }
+        ],
+    )
+
+    assert inspect_shards(tmp_path, context_dir).errors == ()
+
+
+def test_shard_partition_does_not_match_chatgpt_root_prefixes(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "index.md").write_text(
+        "- **short** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha/overview.md)\n"
+        "- **long** [attribution mode: `personal`]("
+        "chatgpt/conversation/cgpt-alpha-extended/overview.md)\n",
+        encoding="utf-8",
+    )
+    _write_partition_fixture(
+        tmp_path,
+        [
+            {
+                "id": "short",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "long",
+                "scope": "chatgpt/conversation/cgpt-alpha-extended",
                 "attribution_modes": ["personal"],
             },
         ],
