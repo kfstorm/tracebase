@@ -15,8 +15,7 @@ _STATUS_BLOCK = re.compile(
     re.DOTALL,
 )
 _SHARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-_USER_WORK_SECTION = "## User work"
-_CONTEXT_ONLY_SECTION = "## Context-only evidence"
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _ATTRIBUTION_MODE_VALUES = {mode.value for mode in AttributionMode}
 _ATTRIBUTION_MODE = re.compile(r"attribution mode: `([^`]+)`")
 _CONTEXT_LINK = re.compile(r"\]\(([^)]+)\)")
@@ -128,6 +127,24 @@ def _scope_items(scope: str, item_roots: set[str]) -> frozenset[str]:
     )
 
 
+def _normalized_headings(report: str) -> set[str]:
+    headings: set[str] = set()
+    fenced = False
+    for line in report.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        match = _HEADING.match(line)
+        if match is None:
+            continue
+        heading = re.sub(r"\s+#+\s*$", "", match.group(1)).strip()
+        headings.add(re.sub(r"\s+", " ", heading).casefold())
+    return headings
+
+
 def inspect_shards(
     work_dir: Path, context_dir: Path | None = None
 ) -> ShardObservability:
@@ -231,10 +248,10 @@ def inspect_shards(
                     report_text = report_path.read_text(encoding="utf-8")
                     if not report_text.strip():
                         errors.append(f"shard {shard_id!r} canonical report is empty")
-                    elif (
-                        _USER_WORK_SECTION not in report_text
-                        or _CONTEXT_ONLY_SECTION not in report_text
-                    ):
+                    elif not {
+                        "user work",
+                        "context-only evidence",
+                    }.issubset(_normalized_headings(report_text)):
                         errors.append(
                             f"shard {shard_id!r} report does not separate user work "
                             "from context-only evidence"

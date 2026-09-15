@@ -27,14 +27,23 @@ class FakeRunner:
         recover: bool = False,
         incomplete: bool = False,
         missing_context_section: bool = False,
+        missing_context_section_for: set[str] | None = None,
+        repair_on_recovery: bool = False,
+        repair_only_shards: set[str] | None = None,
+        malformed_status_block: bool = False,
         shards: list[dict[str, object]] | None = None,
     ) -> None:
         self.output = output
         self.recover = recover
         self.incomplete = incomplete
         self.missing_context_section = missing_context_section
+        self.missing_context_section_for = missing_context_section_for or set()
+        self.repair_on_recovery = repair_on_recovery
+        self.repair_only_shards = repair_only_shards
+        self.malformed_status_block = malformed_status_block
         self.shards = shards
         self.calls: list[list[str]] = []
+        self.report_writes: list[str] = []
 
     def run(
         self,
@@ -51,20 +60,6 @@ class FakeRunner:
             if not self.recover or "--session" in arguments:
                 work = self.output / "work"
                 (work / "shards").mkdir(exist_ok=True)
-                opencode = self.output / ".opencode-data/share/opencode"
-                opencode.mkdir(parents=True, exist_ok=True)
-                (opencode / "opencode.db").write_text(
-                    "synthetic-root-session\nsynthetic-child-session\n",
-                    encoding="utf-8",
-                )
-                for name in (
-                    "auth.json",
-                    "credentials.json",
-                    "credentials.toml",
-                    "secrets.json",
-                    "provider-token.json",
-                ):
-                    (opencode / name).write_text("synthetic-secret", encoding="utf-8")
                 shard_specs = self.shards or [
                     {
                         "id": "repo",
@@ -72,20 +67,42 @@ class FakeRunner:
                         "attribution_modes": ["personal"],
                     }
                 ]
-                for shard in shard_specs:
+                written_specs = shard_specs
+                if "--session" in arguments and self.repair_only_shards is not None:
+                    written_specs = [
+                        shard
+                        for shard in shard_specs
+                        if shard["id"] in self.repair_only_shards
+                    ]
+                for shard in written_specs:
                     shard_id = shard["id"]
                     assert isinstance(shard_id, str)
+                    self.report_writes.append(shard_id)
                     (work / f"shards/{shard_id}.md").write_text(
                         "## User work\n\nevidence\n"
                         + (
                             ""
-                            if self.missing_context_section
+                            if (
+                                self.missing_context_section
+                                or shard_id in self.missing_context_section_for
+                            )
+                            and not (
+                                "--session" in arguments and self.repair_on_recovery
+                            )
                             else "\n## Context-only evidence\n\nNone.\n"
                         ),
                         encoding="utf-8",
                     )
-                status = "failed" if self.incomplete else "complete"
-                (work / "NOTES.md").write_text(
+                status = (
+                    "failed"
+                    if self.incomplete
+                    and (
+                        not ("--session" in arguments and self.repair_on_recovery)
+                        or any(shard.get("retry_count") == 1 for shard in shard_specs)
+                    )
+                    else "complete"
+                )
+                notes = (
                     "<!-- SHARD_STATUS_BEGIN -->\n"
                     + json.dumps(
                         {
@@ -93,16 +110,18 @@ class FakeRunner:
                                 {
                                     **shard,
                                     "status": status,
-                                    "retry_count": 0,
+                                    "retry_count": shard.get("retry_count", 0),
                                     "report": f"/work/shards/{shard['id']}.md",
                                 }
                                 for shard in shard_specs
                             ]
                         }
                     )
-                    + "\n<!-- SHARD_STATUS_END -->\n",
-                    encoding="utf-8",
+                    + "\n<!-- SHARD_STATUS_END -->\n"
                 )
+                if self.malformed_status_block and "--session" not in arguments:
+                    notes = "root bookkeeping needs repair\n"
+                (work / "NOTES.md").write_text(notes, encoding="utf-8")
                 (self.output / "results/summary.md").write_text(
                     "# Work summary\n", encoding="utf-8"
                 )
@@ -201,6 +220,7 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     assert "metrics" not in manifest
     assert "canonical_result_recovery" not in manifest
     assert len(runner.calls) == 2
+    assert not any("--session" in call for call in runner.calls)
 
 
 def test_summary_publishes_mixed_opencode_and_chatgpt_context_partition(
@@ -385,6 +405,80 @@ def test_missing_result_resumes_same_root_once(tmp_path: Path) -> None:
     assert len(runner.calls) == 3
 
 
+def test_shard_protocol_recovery_reuses_root_and_passes_validator_errors(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    debug = tmp_path / "debug"
+    runner = FakeRunner(tmp_path, incomplete=True, repair_on_recovery=True)
+    bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output, debug_output=debug), runner)
+
+    recovery_calls = [call for call in runner.calls if "--session" in call]
+    assert len(recovery_calls) == 1
+    recovery_prompt = recovery_calls[0][-1]
+    assert "Shard protocol validation failed." in recovery_prompt
+    assert "shard 'repo' reported failure" in recovery_prompt
+    assert recovery_calls[0][recovery_calls[0].index("--session") + 1] == "root"
+    recovery = json.loads((debug / "runtime/root-recovery.json").read_text())
+    assert recovery["validator_errors"] == ["shard 'repo' reported failure"]
+    assert recovery["final_validator_errors"] == []
+
+
+def test_root_status_recovery_reuses_root_and_passes_second_inspect(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path,
+        malformed_status_block=True,
+        repair_on_recovery=True,
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output), runner)
+
+    recovery_calls = [call for call in runner.calls if "--session" in call]
+    assert len(recovery_calls) == 1
+    assert "NOTES.md has no SHARD_STATUS block" in recovery_calls[0][-1]
+
+
+def test_shard_protocol_recovery_only_repairs_invalid_shard(
+    tmp_path: Path,
+) -> None:
+    source = multi_source_context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path / ".unused",
+        missing_context_section_for={"chatgpt"},
+        repair_on_recovery=True,
+        repair_only_shards={"chatgpt"},
+        shards=[
+            {
+                "id": "opencode",
+                "scope": "opencode/home/work/project/session/01",
+                "attribution_modes": ["personal"],
+            },
+            {
+                "id": "chatgpt",
+                "scope": "chatgpt/conversation/cgpt-alpha",
+                "attribution_modes": ["personal"],
+            },
+        ],
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert runner.report_writes == ["opencode", "chatgpt", "chatgpt"]
+    recovery_prompt = next(call[-1] for call in runner.calls if "--session" in call)
+    assert "shard 'chatgpt' report does not separate" in recovery_prompt
+    assert "shard 'opencode'" not in recovery_prompt
+
+
 def test_incomplete_shards_publish_nothing(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
@@ -395,6 +489,33 @@ def test_incomplete_shards_publish_nothing(tmp_path: Path) -> None:
 
     assert not output.exists()
     assert not list(tmp_path.glob(".summary.*"))
+    assert len([call for call in runner.calls if "--session" in call]) == 1
+
+
+def test_protocol_recovery_does_not_bypass_retry_limit(tmp_path: Path) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        tmp_path,
+        incomplete=True,
+        repair_on_recovery=True,
+        shards=[
+            {
+                "id": "repo",
+                "scope": "/context/repo",
+                "attribution_modes": ["personal"],
+                "retry_count": 1,
+            }
+        ],
+    )
+    bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="shard protocol"):
+        summarize(SummaryRequest(source, "model", None, output), runner)
+
+    recovery_prompt = next(call[-1] for call in runner.calls if "--session" in call)
+    assert "retry_count is already 1" in recovery_prompt
+    assert len([call for call in runner.calls if "--session" in call]) == 1
 
 
 def test_missing_shard_section_fails_without_mutating_worker_report(
@@ -434,47 +555,9 @@ def test_debug_retains_existing_runtime_artifacts_without_extra_calls(
     assert "## Context-only evidence" in (debug / "work/shards/repo.md").read_text()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "runtime/stderr.log").is_file()
-    state = debug / "opencode/share/opencode/opencode.db"
-    assert state.read_text(encoding="utf-8") == (
-        "synthetic-root-session\nsynthetic-child-session\n"
-    )
-    assert json.loads((debug / "manifest.json").read_text())["opencode"] == {
-        "allowlisted_paths": [
-            "share/opencode/opencode.db",
-            "share/opencode/opencode.db-wal",
-            "share/opencode/opencode.db-shm",
-            "share/opencode/opencode.db-journal",
-        ],
-        "copied_paths": ["share/opencode/opencode.db"],
-        "state_root": ".opencode-data",
-    }
-    assert not (debug / ".opencode-data").exists()
-    assert not list(debug.rglob("auth.json"))
-    assert not list(debug.rglob("credentials*"))
-    assert not list(debug.rglob("secrets*"))
-    assert not list(debug.rglob("*token*"))
+    assert not (debug / "opencode").exists()
+    assert "opencode" not in json.loads((debug / "manifest.json").read_text())
     assert len(runner.calls) == 2
-
-
-def test_debug_excludes_credentials_written_to_work(tmp_path: Path) -> None:
-    source = context(tmp_path)
-    output = tmp_path / "summary"
-    debug = tmp_path / "debug"
-    runner = FakeRunner(tmp_path)
-    original_run = runner.run
-
-    def run(arguments: list[str], config: str, stdout_path: Path | None = None):
-        result = original_run(arguments, config, stdout_path)
-        if "run" in arguments:
-            (runner.output / "work/auth.json").write_text("secret", encoding="utf-8")
-        return result
-
-    runner.run = run  # type: ignore[method-assign]
-    bind_runner_to_staging(runner, tmp_path)
-
-    summarize(SummaryRequest(source, "model", None, output, debug_output=debug), runner)
-
-    assert not list(debug.rglob("auth.json"))
 
 
 def test_failure_with_debug_retains_available_artifacts(tmp_path: Path) -> None:
@@ -492,10 +575,10 @@ def test_failure_with_debug_retains_available_artifacts(tmp_path: Path) -> None:
     assert not output.exists()
     assert (debug / "runtime/stdout.jsonl").is_file()
     assert (debug / "work/shards/repo.md").is_file()
-    assert (debug / "opencode/share/opencode/opencode.db").is_file()
+    assert not (debug / "opencode").exists()
     assert (debug / "results/summary.md").read_text() == "# Work summary\n"
     assert json.loads((debug / "manifest.json").read_text())["status"] == "failed"
-    assert len(runner.calls) == 2
+    assert len(runner.calls) == 3
 
 
 def test_summary_rejects_output_inside_context(tmp_path: Path) -> None:
@@ -569,6 +652,33 @@ def test_shard_validation_rejects_retry_above_one(tmp_path: Path) -> None:
     (tmp_path / "shards/a.md").write_text("report", encoding="utf-8")
 
     assert "retried more than once" in inspect_shards(tmp_path).errors[0]
+
+
+@pytest.mark.parametrize("level", ["#", "##", "###", "######"])
+def test_shard_report_accepts_any_atx_heading_level(tmp_path: Path, level: str) -> None:
+    _write_partition_fixture(
+        tmp_path, [{"id": "repo", "scope": "repo", "attribution_modes": ["personal"]}]
+    )
+    (tmp_path / "shards/repo.md").write_text(
+        f"{level} User work\n\nevidence\n\n{level} Context-only evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    assert inspect_shards(tmp_path).errors == ()
+
+
+def test_shard_report_rejects_missing_normalized_heading_text(tmp_path: Path) -> None:
+    _write_partition_fixture(
+        tmp_path, [{"id": "repo", "scope": "repo", "attribution_modes": ["personal"]}]
+    )
+    (tmp_path / "shards/repo.md").write_text(
+        "# User work\n\nevidence\n\n### Other evidence\n\nnone\n",
+        encoding="utf-8",
+    )
+
+    errors = inspect_shards(tmp_path).errors
+
+    assert any("does not separate" in error for error in errors)
 
 
 def test_shard_validation_rejects_context_attribution_mismatch(

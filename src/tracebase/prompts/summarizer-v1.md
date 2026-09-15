@@ -204,7 +204,9 @@ chronological/source order intact; do not create nested `User work` or
 `Context-only evidence` headings inside it. Keep commits in the single
 source-native `## Commits` section, retaining timeline order and each commit's
 annotation. A shard report must have these explicit sections, including an
-empty section when that category has no evidence:
+empty section when that category has no evidence. Their normalized heading text
+must be exactly `User work` and `Context-only evidence`; any normal Markdown
+ATX heading level is valid:
 
 ```markdown
 ## User work
