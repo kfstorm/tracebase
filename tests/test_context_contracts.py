@@ -205,6 +205,7 @@ def publish_github(
     *,
     object_kind: str = "pull-request",
     run_id: str = "github-run",
+    scope_id: str = "actor-node",
     from_text: str = "2026-01-01T00:00:00+08:00",
     to_text: str = "2026-01-02T00:00:00+08:00",
     effective_options: dict[str, object] | None = None,
@@ -217,6 +218,7 @@ def publish_github(
         from_text,
         to_text,
         effective_options,
+        instance_id=scope_id,
     )
     snapshot = current.write_snapshot(
         Snapshot(
@@ -1002,6 +1004,54 @@ def test_github_uses_natural_path_and_heading(tmp_path: Path) -> None:
     assert "locally synced identity profile" in overview
     assert "Tracked GitHub account:" not in (output / "index.md").read_text()
     assert "github/example/project" in (output / "index.md").read_text()
+
+
+def test_github_index_preserves_logical_key_order(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    entries = (
+        ("scope-b", "pull-request", "pr-b", 22, "run-1"),
+        ("scope-a", "issue", "issue-z", 12, "run-2"),
+        ("scope-b", "issue", "issue-a", 21, "run-3"),
+        ("scope-a", "issue", "issue-a", 11, "run-4"),
+        ("scope-a", "pull-request", "pr-a", 13, "run-5"),
+    )
+    for scope_id, object_kind, source_id, number, run_id in entries:
+        evidence: dict[str, object | str] = {
+            "issue.json": github_base(source_id, number),
+            **activity_evidence(),
+        }
+        if object_kind == "pull-request":
+            evidence["pull-request.json"] = {"node_id": source_id}
+        publish_github(
+            archive,
+            source_id,
+            evidence,
+            object_kind=object_kind,
+            run_id=run_id,
+            scope_id=scope_id,
+            from_text=f"2025-12-{int(run_id[-1]):02d}T00:00:00+00:00",
+            to_text=f"2025-12-{int(run_id[-1]) + 1:02d}T00:00:00+00:00",
+        )
+        write_github_profile(archive, scope_id=scope_id)
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+    github_lines = [
+        line
+        for line in (output / "index.md").read_text().splitlines()
+        if line.startswith("- **example/project")
+    ]
+
+    assert [
+        line.split("](", 1)[1].split("/overview.md", 1)[0] for line in github_lines
+    ] == [
+        "github/example/project/issue/11",
+        "github/example/project/issue/12",
+        "github/example/project/pull/13",
+        "github/example/project/issue/21",
+        "github/example/project/pull/22",
+    ]
 
 
 def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None:

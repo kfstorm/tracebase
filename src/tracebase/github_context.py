@@ -741,7 +741,11 @@ class GitHubContextAdapter:
         )
         return ContextIndexEntry(
             None,
-            (item.snapshot.manifest["source_id"],),
+            (
+                item.snapshot.run["source"]["scope_id"],
+                item.snapshot.manifest["object_kind"],
+                item.snapshot.manifest["source_id"],
+            ),
             f"{projection.repository} {kind} #{projection.number}: "
             f"{projection.title or 'Untitled'}",
         )
