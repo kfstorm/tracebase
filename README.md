@@ -173,7 +173,8 @@ uv run tracebase summary \
   --archive "$HOME/.tracebase/archive" \
   --from 2026-09-01T00:00:00+00:00 \
   --to 2026-09-02T00:00:00+00:00 \
-  --model openai/gpt-5 \
+  --model openai/gpt-5.6-luna \
+  --variant high \
   --output "$HOME/.tracebase/summary-2026-09-01"
 ```
 
@@ -184,7 +185,8 @@ uv run tracebase summary \
   --archive "$HOME/.tracebase/archive" \
   --from 2026-09-01T00:00:00+00:00 \
   --to 2026-09-02T00:00:00+00:00 \
-  --model openai/gpt-5 \
+  --model openai/gpt-5.6-luna \
+  --variant high \
   --context-output "$HOME/.tracebase/context-2026-09-01" \
   --debug-output "$HOME/.tracebase/summary-debug-2026-09-01" \
   --output "$HOME/.tracebase/summary-2026-09-01"
@@ -195,7 +197,8 @@ You can also summarize an existing Context Output with `--context` instead of `-
 ```bash
 uv run tracebase summary \
   --context "$HOME/.tracebase/context-2026-09-01" \
-  --model openai/gpt-5 \
+  --model openai/gpt-5.6-luna \
+  --variant high \
   --output "$HOME/.tracebase/summary-2026-09-01"
 ```
 
