@@ -161,6 +161,9 @@ non-text activity do not select a session. ChatGPT output follows the provider's
 page-ordered observed current stream; it does not reconstruct branch history,
 regenerations, or edits. ChatGPT placement uses `create_time`, not
 `update_time`. Canvas/textdocs and attachment binaries remain unsupported.
+ChatGPT conversation roots in Context Output use deterministic two-digit numbers
+assigned within that extraction. The numbers are path labels; the Raw Archive
+retains the source conversation IDs.
 
 For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
 

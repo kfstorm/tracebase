@@ -173,8 +173,10 @@ Each ChatGPT conversation is an independent projected Context item. By default,
 use one ChatGPT conversation per shard. Multiple small conversations may be
 combined into a `misc` shard, but
 only with the exact canonical conversation roots from the index. ChatGPT
-canonical roots have the form `chatgpt/conversation/<encoded-id>`; do not try to
-understand or decode `<encoded-id>`. Small groups may be combined into one
+canonical roots have the form `chatgpt/conversation/<number>`, where `<number>`
+is the two-digit number assigned within this Context extraction. The number is
+a path label, not a stable ChatGPT identity; keep shard scopes tied to the exact
+numbered roots listed in the Context index. Small groups may be combined into one
 `misc` shard. Do not create a relationship between conversations, or between
 ChatGPT and GitHub/OpenCode, merely because titles, content, or timestamps are
 similar or close. Do not create a cross-source relationship from time proximity
@@ -189,7 +191,7 @@ belongs to two shards, and sources without a Context projector do not enter this
 partition. A repository or `misc` shard may resolve to multiple items. Use exact
 canonical paths in `scope` where practical, for example
 `github/owner/repository`, `github/owner/repository/issue/{1,2}`, or
-`chatgpt/conversation/<encoded-id>`. Brace
+`chatgpt/conversation/<number>`. Brace
 scopes are exact sets of the listed item paths, not wildcards; a comma-separated
 `misc` scope may combine such exact sets across sources. Do not rely on human
 interpretation of a scope description.

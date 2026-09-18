@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .archive import ArchiveError, PublishedRun, PublishedSnapshot, encode_path_id
+from .archive import ArchiveError, PublishedRun, PublishedSnapshot
 from .attribution import source_attribution_mode
 from .context_adapter import (
     ContextIndexEntry,
     RenderedContextItem,
+    number_context_items,
     render_source_item,
 )
-from .dialogue import DialogueTranscript, DialogueTurn, project_dialogue
+from .dialogue import (
+    DialogueTranscript,
+    DialogueTurn,
+    dialogue_sort_key,
+    project_dialogue,
+)
 
 if TYPE_CHECKING:
     from .context import ContextExtractionResult, ContextItem
@@ -201,6 +207,17 @@ def project_chatgpt(
     )
 
 
+def _conversation_sort_key(item: ContextItem) -> tuple[datetime, str, str]:
+    projection = item.projection
+    if not isinstance(projection, ChatGPTProjection):
+        raise ArchiveError("ChatGPT context projection was invalid")
+    return dialogue_sort_key(
+        projection.dialogue,
+        projection.title,
+        item.snapshot.manifest["source_id"],
+    )
+
+
 class ChatGPTContextAdapter:
     source_kind = "chatgpt"
     object_kinds = frozenset({"conversation"})
@@ -225,14 +242,12 @@ class ChatGPTContextAdapter:
         _archive_root: str | Path | None,
     ) -> tuple[ContextItem, ...]:
         return tuple(
-            replace(
-                item,
-                path=(
-                    "chatgpt/conversation/"
-                    f"{encode_path_id(item.snapshot.manifest['source_id'])}"
-                ),
+            item
+            for _index, item in number_context_items(
+                tuple(enumerate(items)),
+                lambda number: f"chatgpt/conversation/{number:02d}",
+                _conversation_sort_key,
             )
-            for item in items
         )
 
     def render(

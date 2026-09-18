@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -13,10 +14,16 @@ from .attribution import source_attribution_mode
 from .context_adapter import (
     ContextIndexEntry,
     RenderedContextItem,
+    number_context_items,
     render_source_item,
     safe_path_component,
 )
-from .dialogue import DialogueTranscript, DialogueTurn, project_dialogue
+from .dialogue import (
+    DialogueTranscript,
+    DialogueTurn,
+    dialogue_sort_key,
+    project_dialogue,
+)
 
 if TYPE_CHECKING:
     from .context import ContextExtractionResult, ContextItem
@@ -280,16 +287,12 @@ def _opencode_path(directory: str, session_number: int) -> str:
     return f"opencode/{'/'.join(safe_parts)}/session/{session_number:02d}"
 
 
-def _session_first_in_range(projection: OpenCodeProjection) -> datetime:
-    return min(turn.timestamp for turn in projection.dialogue.activity)
-
-
 def _session_sort_key(item: ContextItem) -> tuple[datetime, str, str]:
     projection = item.projection
     if not isinstance(projection, OpenCodeProjection):
         raise ArchiveError("OpenCode context projection was invalid")
-    return (
-        _session_first_in_range(projection),
+    return dialogue_sort_key(
+        projection.dialogue,
         _session_title(projection),
         projection.session_id,
     )
@@ -333,14 +336,12 @@ class OpenCodeContextAdapter:
             grouped.setdefault(_session_directory(projection), []).append((index, item))
         prepared = list(items)
         for directory, grouped_items in grouped.items():
-            ordered_items = sorted(
-                grouped_items,
-                key=lambda pair: _session_sort_key(pair[1]),
-            )
-            for session_number, (index, item) in enumerate(ordered_items, start=1):
-                prepared[index] = replace(
-                    item, path=_opencode_path(directory, session_number)
-                )
+            for index, item in number_context_items(
+                tuple(grouped_items),
+                partial(_opencode_path, directory),
+                _session_sort_key,
+            ):
+                prepared[index] = item
         return tuple(prepared)
 
     def render(

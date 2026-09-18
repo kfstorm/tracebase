@@ -154,7 +154,7 @@ def multi_source_context(tmp_path: Path) -> Path:
         "- **OpenCode session** [attribution mode: `personal`]("
         "opencode/home/work/project/session/01/overview.md)\n"
         "- **ChatGPT conversation** [attribution mode: `personal`]("
-        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        "chatgpt/conversation/01/overview.md)\n",
         encoding="utf-8",
     )
     return result
@@ -164,7 +164,7 @@ def _write_single_chatgpt_index(context_dir: Path) -> None:
     context_dir.mkdir()
     (context_dir / "index.md").write_text(
         "- **conversation** [attribution mode: `personal`]("
-        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        "chatgpt/conversation/01/overview.md)\n",
         encoding="utf-8",
     )
 
@@ -238,7 +238,7 @@ def test_summary_publishes_mixed_opencode_and_chatgpt_context_partition(
             },
             {
                 "id": "chatgpt",
-                "scope": "chatgpt/conversation/cgpt-alpha",
+                "scope": "chatgpt/conversation/01",
                 "attribution_modes": ["personal"],
             },
         ],
@@ -352,6 +352,10 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
         "Each ChatGPT conversation is an independent projected Context item"
         in normalized_prompt
     )
+    assert (
+        "two-digit number assigned within this Context extraction" in normalized_prompt
+    )
+    assert "not a stable ChatGPT identity" in normalized_prompt
     assert "exact canonical conversation roots" in normalized_prompt
     assert (
         "Do not create a cross-source relationship from time proximity"
@@ -469,7 +473,7 @@ def test_shard_protocol_recovery_only_repairs_invalid_shard(
             },
             {
                 "id": "chatgpt",
-                "scope": "chatgpt/conversation/cgpt-alpha",
+                "scope": "chatgpt/conversation/01",
                 "attribution_modes": ["personal"],
             },
         ],
@@ -1172,7 +1176,7 @@ def test_shard_partition_allows_exact_chatgpt_conversation_scope(
         [
             {
                 "id": "conversation",
-                "scope": "chatgpt/conversation/cgpt-alpha",
+                "scope": "chatgpt/conversation/01",
                 "attribution_modes": ["personal"],
             }
         ],
@@ -1188,9 +1192,9 @@ def test_shard_partition_rejects_uncovered_chatgpt_conversation(
     context_dir.mkdir()
     (context_dir / "index.md").write_text(
         "- **one** [attribution mode: `personal`]("
-        "chatgpt/conversation/cgpt-alpha/overview.md)\n"
+        "chatgpt/conversation/01/overview.md)\n"
         "- **two** [attribution mode: `personal`]("
-        "chatgpt/conversation/cgpt-beta/overview.md)\n",
+        "chatgpt/conversation/02/overview.md)\n",
         encoding="utf-8",
     )
     _write_partition_fixture(
@@ -1198,7 +1202,7 @@ def test_shard_partition_rejects_uncovered_chatgpt_conversation(
         [
             {
                 "id": "one",
-                "scope": "chatgpt/conversation/cgpt-alpha",
+                "scope": "chatgpt/conversation/01",
                 "attribution_modes": ["personal"],
             }
         ],
@@ -1206,7 +1210,9 @@ def test_shard_partition_rejects_uncovered_chatgpt_conversation(
 
     errors = inspect_shards(tmp_path, context_dir).errors
 
-    assert any("cgpt-beta" in error and "not covered" in error for error in errors)
+    assert any(
+        "conversation/02" in error and "not covered" in error for error in errors
+    )
 
 
 def test_shard_partition_rejects_overlapping_chatgpt_conversation(
@@ -1219,12 +1225,12 @@ def test_shard_partition_rejects_overlapping_chatgpt_conversation(
         [
             {
                 "id": "first",
-                "scope": "chatgpt/conversation/cgpt-alpha",
+                "scope": "chatgpt/conversation/01",
                 "attribution_modes": ["personal"],
             },
             {
                 "id": "second",
-                "scope": "chatgpt/conversation/cgpt-alpha",
+                "scope": "chatgpt/conversation/01",
                 "attribution_modes": ["personal"],
             },
         ],
@@ -1245,7 +1251,7 @@ def test_shard_partition_rejects_chatgpt_attribution_mismatch(
         [
             {
                 "id": "conversation",
-                "scope": "chatgpt/conversation/cgpt-alpha",
+                "scope": "chatgpt/conversation/01",
                 "attribution_modes": ["actor_scoped"],
             }
         ],
@@ -1264,7 +1270,7 @@ def test_shard_partition_rejects_broad_chatgpt_scope(
     tmp_path: Path, scope: str
 ) -> None:
     context_dir = tmp_path / "context"
-    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_chatgpt_index(context_dir, "01", "02")
     _write_partition_fixture(
         tmp_path,
         [
@@ -1281,46 +1287,22 @@ def test_shard_partition_rejects_broad_chatgpt_scope(
     assert any("scope does not match Context items" in error for error in errors)
 
 
-def test_shard_partition_allows_exact_chatgpt_scope_without_broad_match(
+def test_shard_partition_allows_exact_numbered_chatgpt_scopes(
     tmp_path: Path,
 ) -> None:
     context_dir = tmp_path / "context"
-    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_chatgpt_index(context_dir, "01", "02")
     _write_partition_fixture(
         tmp_path,
         [
             {
-                "id": "foo",
-                "scope": "/context/chatgpt/conversation/foo",
+                "id": "01",
+                "scope": "/context/chatgpt/conversation/01",
                 "attribution_modes": ["personal"],
             },
             {
-                "id": "bar",
-                "scope": "/context/chatgpt/conversation/bar",
-                "attribution_modes": ["personal"],
-            },
-        ],
-    )
-
-    assert inspect_shards(tmp_path, context_dir).errors == ()
-
-
-def test_shard_partition_exact_chatgpt_scope_rejects_similar_prefix(
-    tmp_path: Path,
-) -> None:
-    context_dir = tmp_path / "context"
-    _write_chatgpt_index(context_dir, "foo", "foo-extra")
-    _write_partition_fixture(
-        tmp_path,
-        [
-            {
-                "id": "foo",
-                "scope": "/context/chatgpt/conversation/foo",
-                "attribution_modes": ["personal"],
-            },
-            {
-                "id": "foo-extra",
-                "scope": "/context/chatgpt/conversation/foo-extra",
+                "id": "02",
+                "scope": "/context/chatgpt/conversation/02",
                 "attribution_modes": ["personal"],
             },
         ],
@@ -1333,13 +1315,13 @@ def test_shard_partition_allows_explicit_chatgpt_misc_scope(
     tmp_path: Path,
 ) -> None:
     context_dir = tmp_path / "context"
-    _write_chatgpt_index(context_dir, "foo", "bar")
+    _write_chatgpt_index(context_dir, "01", "02")
     _write_partition_fixture(
         tmp_path,
         [
             {
                 "id": "misc",
-                "scope": ("misc: chatgpt/conversation/foo, chatgpt/conversation/bar"),
+                "scope": ("misc: chatgpt/conversation/01, chatgpt/conversation/02"),
                 "attribution_modes": ["personal"],
             }
         ],
@@ -1359,7 +1341,7 @@ def test_shard_partition_resolves_mixed_misc_chatgpt_scope_exactly(
         "- **session** [attribution mode: `personal`]("
         "opencode/home/work/project/session/01/overview.md)\n"
         "- **conversation** [attribution mode: `personal`]("
-        "chatgpt/conversation/cgpt-alpha/overview.md)\n",
+        "chatgpt/conversation/01/overview.md)\n",
         encoding="utf-8",
     )
     _write_partition_fixture(
@@ -1370,7 +1352,7 @@ def test_shard_partition_resolves_mixed_misc_chatgpt_scope_exactly(
                 "scope": (
                     "misc: github/acme/project/pull/1, "
                     "opencode/home/work/project/session/01, "
-                    "chatgpt/conversation/cgpt-alpha"
+                    "chatgpt/conversation/01"
                 ),
                 "attribution_modes": ["actor_scoped", "personal"],
             }
@@ -1380,16 +1362,16 @@ def test_shard_partition_resolves_mixed_misc_chatgpt_scope_exactly(
     assert inspect_shards(tmp_path, context_dir).errors == ()
 
 
-def test_shard_partition_does_not_match_chatgpt_root_prefixes(
+def test_shard_partition_matches_numbered_chatgpt_roots_exactly(
     tmp_path: Path,
 ) -> None:
     context_dir = tmp_path / "context"
     context_dir.mkdir()
     (context_dir / "index.md").write_text(
         "- **short** [attribution mode: `personal`]("
-        "chatgpt/conversation/cgpt-alpha/overview.md)\n"
+        "chatgpt/conversation/01/overview.md)\n"
         "- **long** [attribution mode: `personal`]("
-        "chatgpt/conversation/cgpt-alpha-extended/overview.md)\n",
+        "chatgpt/conversation/02/overview.md)\n",
         encoding="utf-8",
     )
     _write_partition_fixture(
@@ -1397,12 +1379,12 @@ def test_shard_partition_does_not_match_chatgpt_root_prefixes(
         [
             {
                 "id": "short",
-                "scope": "chatgpt/conversation/cgpt-alpha",
+                "scope": "chatgpt/conversation/01",
                 "attribution_modes": ["personal"],
             },
             {
                 "id": "long",
-                "scope": "chatgpt/conversation/cgpt-alpha-extended",
+                "scope": "chatgpt/conversation/02",
                 "attribution_modes": ["personal"],
             },
         ],
