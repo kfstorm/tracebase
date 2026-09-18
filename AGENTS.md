@@ -22,11 +22,14 @@ only what that consumer needs to use Tracebase correctly:
   projection, attribution, and source-specific semantic contracts. Keep detailed
   domain and source semantics here instead of duplicating them in the README or
   model prompts.
-- Summarizer and other model prompts may use only facts observable in their
-  actual input, plus rules needed to interpret that input. They must not depend
-  on archive internals, collector mechanics, projection implementation,
-  hidden/source-native identifiers, path-generation algorithms, historical
-  schemas, or other details unavailable to the model.
+- For domain and source facts, Summarizer and other model prompts may use only
+  information observable in their actual input, plus rules needed to interpret
+  that input. Prompts may additionally define the execution, orchestration,
+  validation, state-management, and output protocols required to perform the
+  task. Those protocols must not depend on hidden archive internals, collector
+  mechanics, projection implementation, source-native identifiers,
+  path-generation algorithms, historical schemas, or other implementation
+  details unavailable to the model.
 - Implementation and tests may know how higher-level contracts are produced;
   that knowledge must not automatically propagate into higher layers.
 
