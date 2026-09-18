@@ -231,8 +231,10 @@ not replace it with a shortened instruction such as "determine materially
 meaningful work", and do not ask a worker to read the root `TASK.md`.
 
 - Attribution and work relevance are separate judgments. `personal` is
-  attribution, not work relevance; `actor_scoped` still follows the explicit
-  tracked-actor rules above.
+  attribution, not work relevance. For `actor_scoped`, follow the explicit
+  `[User work]` and `[Context only]` attribution annotations in the assigned
+  Context. Do not re-infer attribution from actor names when those annotations
+  are present.
 - Judge work relevance from purpose and intent supported by the assigned
   Context. Explicit project or workstream association may support relevance but
   is not required.

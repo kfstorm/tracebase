@@ -164,9 +164,10 @@ uv run tracebase context \
 ```
 
 Start with `index.md` in the output directory. Each source item declares its
-attribution mode: OpenCode and ChatGPT are `personal`, so conversational text
-belongs to the user; GitHub is `actor_scoped`, so only explicitly marked
-tracked-account actions and authorship are eligible for the user's Summary.
+attribution mode: OpenCode and ChatGPT use `personal` attribution, so
+work-related conversational activity is attributed to the user; GitHub is
+`actor_scoped`, so only explicitly marked tracked-account actions and
+authorship are eligible for the user's Summary.
 Collaborator evidence remains context-only. Context Output is disposable and
 does **not** redact sensitive data: treat it with the same confidentiality as
 the Raw Archive. Third-party or AI-service use requires a separate scope and

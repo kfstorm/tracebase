@@ -27,9 +27,9 @@ only what that consumer needs to use Tracebase correctly:
   that input. Prompts may additionally define the execution, orchestration,
   validation, state-management, and output protocols required to perform the
   task. Those protocols must not depend on hidden archive internals, collector
-  mechanics, projection implementation, source-native identifiers,
-  path-generation algorithms, historical schemas, or other implementation
-  details unavailable to the model.
+  mechanics, projection implementation, source identifiers unavailable in the
+  model input, path-generation algorithms, historical schemas, or other hidden
+  implementation details.
 - Implementation and tests may know how higher-level contracts are produced;
   that knowledge must not automatically propagate into higher layers.
 

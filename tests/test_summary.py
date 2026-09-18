@@ -372,6 +372,7 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     worker_contract = (
         "Worker Relevance Contract",
         "personal` is attribution, not work relevance",
+        "For `actor_scoped`, follow the explicit `[User work]`",
         "Explicit project or workstream association may support relevance "
         "but is not required",
         "Technical subject matter, complexity, duration, interaction count, or",
@@ -386,6 +387,11 @@ def test_summarizer_contract_requires_attribution_before_sharded_synthesis() -> 
     )
     for clause in worker_contract:
         assert clause in normalized_prompt
+    assert (
+        "[User work]` and `[Context only]` attribution annotations in the assigned"
+        in normalized_prompt
+    )
+    assert "Do not re-infer attribution from actor names" in normalized_prompt
     assert "analysis, research, investigation, review, evaluation" in prompt
     assert "assistant proposal, command, patch, or plan" in normalized_prompt
     assert "suggestion to run, test, or" in prompt
@@ -427,6 +433,10 @@ def test_shard_protocol_recovery_reuses_root_and_passes_validator_errors(
     recovery_prompt = recovery_calls[0][-1]
     assert "Shard protocol validation failed." in recovery_prompt
     assert "shard 'repo' reported failure" in recovery_prompt
+    assert "same assigned scope" in recovery_prompt
+    assert "required result exists" in recovery_prompt
+    assert "same canonical scope" not in recovery_prompt
+    assert "canonical result" not in recovery_prompt
     assert recovery_calls[0][recovery_calls[0].index("--session") + 1] == "root"
     recovery = json.loads((debug / "runtime/root-recovery.json").read_text())
     assert recovery["validator_errors"] == ["shard 'repo' reported failure"]

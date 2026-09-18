@@ -34,7 +34,7 @@ Classify each error before acting:
 - If an individual shard report is missing or substantively incomplete,
   recover only that shard. Prefer continuing the existing worker/session
   when the task mechanism supports it; otherwise retry that exact shard
-  once with the same canonical scope.
+  once with the same assigned scope.
 - Do not re-investigate valid shards.
 - Do not change shard scopes merely to satisfy validation.
 - Do not omit or merge a failed shard.
@@ -46,7 +46,7 @@ Classify each error before acting:
   do not start another worker for it, and preserve its failed status.
 
 After repairs, reconcile the complete shard inventory and status block,
-then ensure the canonical result exists at /results/summary.md."""
+then ensure the required result exists at /results/summary.md."""
 _INTERVAL = re.compile(r"^Requested interval: `(.+?) <= t < (.+?)`$", re.MULTILINE)
 
 
