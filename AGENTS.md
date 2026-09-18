@@ -8,6 +8,61 @@ Tracebase collects private work evidence, derives offline Context Output, and pr
 - For issues and specs, follow [issue tracker conventions](docs/agents/issue-tracker.md); for triage, read [triage labels](docs/agents/triage-labels.md).
 - When changing collection orchestration, diagnostics, or publication, read the [Collection CLI Contract](docs/collection-cli-contract.md). It supersedes the historical failure-output clause.
 
+## Consumer Contracts
+
+Before adding a fact to a prompt or document, identify its consumer and include
+only what that consumer needs to use Tracebase correctly:
+
+- `README.md` is for installation, operation, safe use, user-visible behavior,
+  operational constraints, important limitations, and security/privacy
+  requirements. Keep archive layouts, reconstruction or projection mechanics,
+  internal identity representation, test history, algorithms, and similar
+  implementation details out unless they directly affect correct operation.
+- `CONTEXT.md` is authoritative for archive, collection, identity, observation,
+  projection, attribution, and source-specific semantic contracts. Keep detailed
+  domain and source semantics here instead of duplicating them in the README or
+  model prompts.
+- Summarizer and other model prompts may use only facts observable in their
+  actual input, plus rules needed to interpret that input. They must not depend
+  on archive internals, collector mechanics, projection implementation,
+  hidden/source-native identifiers, path-generation algorithms, historical
+  schemas, or other details unavailable to the model.
+- Implementation and tests may know how higher-level contracts are produced;
+  that knowledge must not automatically propagate into higher layers.
+
+Prefer the weakest sufficient contract. If a consumer can discover a value from
+its actual input, tell it to use that value instead of explaining how the value
+was generated. For example, derive Context item roots from `index.md`; do not
+teach the Summarizer how those roots are numbered, encoded, sorted, or tied to
+archive identity.
+
+Do not propagate implementation changes into every documentation or prompt
+layer. For each affected layer, ask whether its observable contract changed
+before editing it. An internal representation, path, or algorithm change does
+not require README or prompt changes when consumer-visible behavior is
+unchanged.
+
+For README, prompt, or other consumer-facing contract changes, review every new
+fact:
+
+1. Does this consumer need it to behave correctly?
+2. Can the consumer discover it from its actual input instead?
+3. Is it observable behavior, or only an implementation detail?
+4. Would an implementation change require updating this text while the
+   consumer-visible contract stayed the same? If so, move the detail lower.
+
+Prompt and documentation contract tests should check required behavior and
+user-visible guarantees, not incidental prose or implementation details. Prefer
+semantic assertions for evidence coverage, attribution, deriving roots or
+identifiers from observable input, exact/disjoint scopes, and safety or
+correctness invariants. Use exact wording assertions only when the wording is
+an intentional protocol/API contract. Narrow negative assertions may protect an
+explicitly retired concept or schema; avoid broad keyword blacklists.
+
+Keep this policy in `AGENTS.md`. `docs/agents/domain.md` remains focused on
+reading domain documentation and using established domain vocabulary, while
+`CONTEXT.md` defines domain facts and contracts.
+
 ## Development Checks
 
 Use Python 3.14+ and `uv`. Run commands from the repository root:
