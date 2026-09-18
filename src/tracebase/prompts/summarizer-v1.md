@@ -147,26 +147,44 @@ Conversational Context has these visible activity semantics:
 
 After reading `index.md`, build a stable shard inventory before investigating
 individual evidence. The shard inventory covers every Context item listed in
-`index.md`;
-the separate workstream inventory contains only materially meaningful work.
-Group OpenCode evidence by `project_directory`; group GitHub evidence by
-`repository`.
-Each ChatGPT conversation is an independent Context item. By default, use one
-ChatGPT conversation per shard. Small conversations may be combined into a
-`misc` shard only by using the exact item roots found in `index.md`. Do not
-create a relationship between conversations, or between ChatGPT and
-GitHub/OpenCode, merely because titles, content, names, or timestamps are
-similar or close. The reduce phase may merge evidence into one real workstream
+`index.md`; the separate workstream inventory contains only materially
+meaningful work. Use source-visible metadata in the index and item overviews
+only for initial grouping heuristics: GitHub items from the same visible
+repository may start together, OpenCode sessions with the same visible project
+directory may start together, and each ChatGPT conversation starts as an
+independent unit. These are planning conveniences, not semantic or immutable
+boundaries. Do not infer grouping from undocumented path structure. Do not read
+substantive activity, background, or diff evidence merely to choose shard sizes.
+
+Source semantics determine useful initial grouping; generic size-based
+partitioning determines execution shards. Use these centralized execution
+thresholds for every source:
+
+- `MAX_SHARD_BYTES = 262144`: the sum of all readable files below assigned item
+  roots, including `overview.md`, `activity.md`, `background.md`, and `diff.patch`.
+- `MAX_SHARD_ITEMS = 8`: the maximum number of Context items in one shard.
+- `TINY_ITEM_BYTES = 16384`: items at or below this size may be packed across
+  initial groups and source types when the generic limits allow it.
+
+Keep a reasonably sized initial group together when it fits both limits. Split
+an oversized initial group into explicit item sets in stable `index.md` order.
+An individual item larger than `MAX_SHARD_BYTES` remains alone because a
+Context item is the minimum partition unit. Pack tiny groups and items with a
+deterministic greedy pass in stable index order; a single batch may cross source
+boundaries. Do not use titles, topics, timestamps, or guessed relationships to
+choose batches. Sharing a shard does not establish a semantic, project,
+conversation, causal, or workstream relationship between its Context items.
+Splitting a natural group across shards does not establish semantic
+independence. The reduce phase may merge evidence into one real workstream only
 when the evidence explicitly establishes that relationship.
 
 Parse each Context item root from `/context/index.md` as the directory
-containing its linked `overview.md`. Resolve every declared shard scope to those
-roots. The shard inventory must form a complete disjoint partition: every
-Context item listed in `index.md` belongs to exactly one shard, and no item
-belongs to two shards. A repository or `misc` shard may resolve to multiple
-items. Use the exact roots from the index in `scope`; brace scopes are exact
-sets of listed roots, not wildcards. Do not rely on a human interpretation of a
-scope description.
+containing its linked `overview.md`. Every shard must list its exact item roots
+in `items`; do not construct identifiers from source path-generation rules. The
+shard inventory must form a complete disjoint partition: every Context item
+listed in `index.md` belongs to exactly one shard, and no item belongs to two
+shards. `items` is the only membership field; a human-friendly shard ID such as
+`misc` has no special validator meaning.
 
 For each shard, preserve the complete assigned Context evidence, apply
 attribution annotations where Context provides them, and make a separate
@@ -215,14 +233,15 @@ required report path shown below. Update the block after each worker
 returns, after a retry, and before final synthesis:
 
 <!-- SHARD_STATUS_BEGIN -->
-{"shards":[{"id":"example","scope":"...","attribution_modes":["personal"],"status":"pending","retry_count":0,"report":"/work/shards/example.md"}]}
+{"shards":[{"id":"example","items":["chatgpt/conversation/01","opencode/example/session/01"],"status":"pending","retry_count":0,"report":"/work/shards/example.md"}]}
 <!-- SHARD_STATUS_END -->
 
 The example is a schema, not a required shard. At completion every entry must
 be `complete` or `failed`, `retry_count` must be 0 or 1, and `report` must be
-`/work/shards/<id>.md`. `attribution_modes` must preserve the explicit modes of
-all source items assigned to that shard. A failed or missing report must never
-be omitted from the status block or the final synthesis.
+`/work/shards/<id>.md`. `items` must be a non-empty list of exact Context item
+roots from `index.md`. Attribution modes are derived from the assigned Context
+items and must not be duplicated in this mutable plan. A failed or missing
+report must never be omitted from the status block or the final synthesis.
 
 ### Worker Relevance Contract
 
@@ -273,17 +292,17 @@ call. After worker dispatch begins, never run the plan validator again; use the
 shard status and reports for completion reconciliation.
 
 Once validation succeeds, treat the shard inventory as frozen. Do not add,
-remove, merge, split, rename, or change the scope of any shard after worker
-dispatch begins.
+remove, merge, split, rename, or change the item assignment of any shard after
+worker dispatch begins.
 
 For each independent shard, issue one foreground `task` call with the shard ID
-and its exact Context paths/scope in the task prompt. Dispatch all independent
+and its exact `items` list in the task prompt. Dispatch all independent
 workers in the same turn where the tool permits it; do not use background
 workers. Wait for every worker result before reducing. Workers are not
 orchestrators: they must not call `task`, start another OpenCode session, or
 write `/work/NOTES.md` or `/results/summary.md`.
 
-Each worker must read only its assigned Context scope, follow the truncated-read
+Each worker must read only its assigned Context items, follow the truncated-read
 continuation rule and the temporal/final-state rules below, and write exactly
 one non-empty evidence-rich report to its own
 `/work/shards/<id>.md`. The report should preserve enough motivation,
@@ -293,7 +312,7 @@ not the durable human summary. The worker must not create child workers.
 
 When a worker returns, verify its required report exists and is non-empty. If
 it does not, retry that same shard at most once with a foreground worker and
-the same scope, then verify again. Record `retry_count` and `status` in the
+the same `items` list, then verify again. Record `retry_count` and `status` in the
 status block. Never synthesize from an incomplete shard set. If a shard remains
 failed, record the failure and do not silently treat its evidence as reviewed.
 

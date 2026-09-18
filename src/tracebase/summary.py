@@ -34,9 +34,9 @@ Classify each error before acting:
 - If an individual shard report is missing or substantively incomplete,
   recover only that shard. Prefer continuing the existing worker/session
   when the task mechanism supports it; otherwise retry that exact shard
-  once with the same assigned scope.
+  once with the same assigned items.
 - Do not re-investigate valid shards.
-- Do not change shard scopes merely to satisfy validation.
+- Do not change shard item assignments merely to satisfy validation.
 - Do not omit or merge a failed shard.
 - Do not rewrite valid report content except where required to restore
   the protocol.
