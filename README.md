@@ -14,11 +14,11 @@ Tracebase preserves private work evidence in a replayable local archive, generat
 ## Features
 
 - **GitHub collection:** Archive Issues and Pull Requests you authored, commented on, or submitted reviews for, including collaboration context and raw PR diffs.
-- **OpenCode collection:** Preserve source-native session exports with collection metadata.
-- **ChatGPT collection:** Preserve ordinary personal conversations using the authenticated ChatGPT web session.
+- **OpenCode collection:** Archive OpenCode sessions for offline Context generation.
+- **ChatGPT collection:** Archive ordinary personal conversations from an authenticated ChatGPT web session.
 - **Explicit coverage:** Record time ranges and source boundaries, retain successful empty runs, and reject overlapping published ranges for the same logical source.
 - **Offline context:** Generate a disposable, browsable directory from archived evidence without querying the sources again.
-- **Explicit attribution:** Context declares `personal` or `actor_scoped` semantics per source; Summary projects user work before synthesis.
+- **Explicit attribution:** Context records whether each source is `personal` or `actor_scoped` for Summary generation.
 - **Work summaries:** Run the production Summarizer against an archive or existing Context Output and publish a validated Markdown summary with provenance.
 
 Coverage records what the collector observed, not a guarantee of complete historical account activity. Tracebase preserves evidence; it does not generate long-term AI memory.
@@ -32,7 +32,7 @@ uv sync
 uv run tracebase --help
 ```
 
-GitHub collection additionally requires [GitHub CLI](https://cli.github.com/) installed and authenticated with `gh auth login`. OpenCode collection requires the `opencode` CLI on `PATH`; Tracebase starts its own temporary authenticated loopback server.
+GitHub collection additionally requires [GitHub CLI](https://cli.github.com/) installed and authenticated with `gh auth login`. OpenCode collection requires the `opencode` CLI on `PATH`.
 
 ## Usage
 
@@ -52,7 +52,10 @@ uv run tracebase collect github \
 
 ### Sync GitHub Identity
 
-Identity sync is not required for GitHub collection. It is required before generating Context Output that includes GitHub items, so historical Git commits can be marked as `(tracked account)` when their author email matches the authenticated GitHub account. Regular `collect github` still calls `/user` only and does not automatically call `/user/emails`. Identity sync preserves the complete `/user` response and every paginated `/user/emails` response; attribution fields are derived later while reading the profile.
+Identity sync is not required for GitHub collection. Run it before generating
+Context Output that includes GitHub items so historical Git commits can be
+marked as `(tracked account)` when their author email matches the authenticated
+GitHub account.
 
 Identity sync requires a GitHub token with the `user:email` scope. For a GitHub CLI OAuth credential, refresh the scope and then sync using the explicit archive path:
 
@@ -63,17 +66,14 @@ uv run tracebase identity github sync \
   --archive "/path/to/archive"
 ```
 
-The profile is stored under the stable GitHub source identity returned by `/user.node_id`:
-
-```text
-<archive>/profiles/github/<encoded-scope-id>/
-├── profile.json
-├── user.json
-├── emails.001.json
-└── ...
-```
-
-The profile is archive-level mutable metadata keyed by the same stable source scope stored in GitHub Collection Run manifests. It is not part of `runs/`, a Snapshot, or Source-native Evidence. It contains associated GitHub account data, so protect it with the same care as the Raw Archive. A profile can be refreshed without recollecting historical evidence. Skipping identity sync does not affect collection or Context generation when no GitHub items are included. If Context includes GitHub items, the matching stable-ID profile must exist and be valid; otherwise generation fails with the sync command needed to create it. Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output does not perform redaction.
+The identity profile contains sensitive GitHub account data. Protect it with the
+same care as the Raw Archive. You can refresh it without recollecting historical
+evidence. Skipping identity sync does not affect collection or Context generation
+when no GitHub items are included. If Context includes GitHub items, the matching
+profile must exist and be valid; otherwise generation fails and reports the sync
+command needed to create it. Tracebase does not display email addresses from the
+identity profile. Source content rendered into Context Output may itself contain
+email addresses, and Context Output does not redact them.
 
 ### Collect OpenCode Sessions
 
@@ -92,15 +92,18 @@ uv run tracebase collect opencode \
 
 All source collectors require whole-second ISO 8601 timestamps with explicit offsets and `from < to`. Collection Ranges are half-open: `[from, to)`. A published range cannot be collected again for the same logical source; use the previous `--to` as the next `--from` for adjacent runs.
 
-Successful collection prints one summary line to stdout; progress goes to stderr. Published runs live under `archive/runs/`, each with a `run.json` manifest and snapshots. Failed runs remain unpublished; any staging directories already created remain available for inspection. See the [Collection CLI Contract](docs/collection-cli-contract.md) for failure behavior.
+Successful collection prints one summary line to stdout; progress goes to
+stderr. Failed runs remain unpublished. See the [Collection CLI Contract](docs/collection-cli-contract.md) for failure behavior.
 
 ### Collect ChatGPT Conversations
 
-ChatGPT auth and collection require a system Chromium installation. Tracebase uses the same system Chromium executable and persistent profile for authentication and collection. Interactive authentication launches Chromium directly; collection and status use it through Playwright. Playwright's bundled browser binary is not used. On Linux, install the `chromium` system package before using this collector.
+ChatGPT authentication and collection require system Chromium. The dedicated
+Tracebase browser profile contains credential-equivalent sensitive state, stays
+outside the Raw Archive, and must remain private. On Linux, install the
+`chromium` system package before using this collector.
 
-Interactive ChatGPT authentication and collection use the same system Chromium browser and Tracebase-owned profile. This keeps one browser engine and one persistent profile for cookies, OAuth state, and session probing.
-
-Launch the Tracebase-owned persistent browser profile for interactive authentication. This command does not inject Playwright or inspect the session while the browser is open: complete login yourself and close Chromium; the command then checks the saved session automatically. The profile contains credential-equivalent sensitive browser state; it is kept outside the Raw Archive and must remain private:
+Launch the dedicated browser profile for interactive authentication. Complete
+login yourself and close Chromium when you are finished:
 
 ```bash
 uv run tracebase auth chatgpt
@@ -118,9 +121,15 @@ Reset the Tracebase-owned ChatGPT browser/authentication state:
 uv run tracebase auth chatgpt reset
 ```
 
-Reset is the supported account-switching flow: run `reset`, then run `auth chatgpt` again. It deletes only the dedicated browser profile, including its cookies, local storage, and provider login state; it does not delete previously collected ChatGPT Raw Archive data. Reset is refused while another Tracebase ChatGPT browser operation is using the profile.
+Use `reset` when switching accounts, then run `auth chatgpt` again. Reset
+deletes only the dedicated browser profile and does not delete previously
+collected ChatGPT Raw Archive data. Reset is refused while another Tracebase
+ChatGPT browser operation is using the profile.
 
-During interactive authentication, Tracebase leaves Google, Microsoft, Apple, MFA, CAPTCHA, Cloudflare, and other provider verification flows to the user. It does not automate or bypass passwords, account selection, MFA, CAPTCHA, Cloudflare, or browser verification. The launched Chromium process is not controlled by Playwright; close it after completing the normal third-party login flow, and Tracebase automatically inspects the shared profile.
+Tracebase leaves provider login, MFA, CAPTCHA, Cloudflare, and other browser
+verification flows to you. It does not automate or bypass them. Headless mode
+may fail when ChatGPT requires browser verification; use headed mode when an
+interactive browser is appropriate.
 
 Collect ordinary personal ChatGPT conversations with an explicit browser mode:
 
@@ -132,15 +141,17 @@ uv run tracebase collect chatgpt \
   --to 2026-09-02T00:00:00+00:00
 ```
 
-`--browser-mode` accepts `headless` (the default) or `headed`. Headless collection may receive ChatGPT browser verification and then fails cleanly rather than switching modes or bypassing verification. Tracebase does not start, manage, or detect Xvfb or another virtual display. A deployment wrapper may provide one for scheduled headed collection, for example with external `xvfb-run`; that is deployment-layer behavior, not collector behavior. Synthetic automated tests are hermetic and offline-safe: they do not launch Chromium or access provider networks. Manual Linux real-account E2E has passed for direct system-Chromium authentication, Google OAuth, post-exit session verification, `status`, and `reset`; macOS and Windows remain unvalidated and deferred.
-
-ChatGPT discovery uses conversation `update_time` and the same half-open Collection Range `[from, to)`. Discovery `update_time` is validated for message/edit content changes but is not known to advance for every conversation metadata mutation; it is not a complete conversation mutation log. Message-level work-time selection belongs to a later Context projection, not collection. Authentication failures, browser verification, rate limits, or incomplete hydration prevent a successful run from being published.
-
-Known ChatGPT source limitations include mutable offset pagination, provider responses that do not guarantee complete branch history, Canvas/textdocs outside the v1 representation, and conversations deleted before discovery being unavailable for retrospective collection. Discovery excludes Project and Custom GPT conversations when the provider item has a non-null `gizmo_id`; this predicate was validated against synthetic ordinary, Project, and Custom GPT conversations. Other provider metadata may still be incomplete or change without notice.
+`--browser-mode` accepts `headless` (the default) or `headed`. Authentication
+failures, browser verification, rate limits, or unavailable provider data can
+prevent a successful run from being published. Project and Custom GPT
+conversations are currently excluded. Conversations that have already been
+deleted or are no longer available from the provider cannot be recovered
+retrospectively.
 
 ### Generate Context Offline
 
-After collecting evidence, select a work time range to explore. Context extraction chooses one observation per Source Item: the earliest observation completed at or after the request end, or the latest available observation if all observations are earlier.
+After collecting evidence, select a work time range to explore. Tracebase
+generates Context offline from the archived evidence for that interval.
 
 If the selected Context includes GitHub items, the matching GitHub identity profile must already exist and be valid. Run the identity sync first when needed.
 
@@ -152,18 +163,19 @@ uv run tracebase context \
   --output "$HOME/.tracebase/context-2026-09-01"
 ```
 
-Start with `index.md` in the output directory. This range selects work records, not collector observation times. Each source item declares its attribution mode: OpenCode and ChatGPT are `personal`, so conversational text belongs to the user; OpenCode delegated agent/subagent work also belongs to the user. GitHub is `actor_scoped`, so only explicitly marked tracked-account actions and authorship are eligible for the user's Summary. Collaborator evidence remains context-only. Context Output is disposable and does **not** redact sensitive data: treat it with the same confidentiality as the Raw Archive. Third-party or AI-service use requires a separate scope and sanitization decision.
+Start with `index.md` in the output directory. Each source item declares its
+attribution mode: OpenCode and ChatGPT are `personal`, so conversational text
+belongs to the user; GitHub is `actor_scoped`, so only explicitly marked
+tracked-account actions and authorship are eligible for the user's Summary.
+Collaborator evidence remains context-only. Context Output is disposable and
+does **not** redact sensitive data: treat it with the same confidentiality as
+the Raw Archive. Third-party or AI-service use requires a separate scope and
+sanitization decision.
 
-Conversational Context is text-only. OpenCode and ChatGPT output only `user`
-and `assistant` text, classified by message creation time into the requested
-half-open range and bounded earlier background. OpenCode tools, tasks, and other
-non-text activity do not select a session. ChatGPT output follows the provider's
-page-ordered observed current stream; it does not reconstruct branch history,
-regenerations, or edits. ChatGPT placement uses `create_time`, not
-`update_time`. Canvas/textdocs and attachment binaries remain unsupported.
-ChatGPT conversation roots in Context Output use deterministic two-digit numbers
-assigned within that extraction. The numbers are path labels; the Raw Archive
-retains the source conversation IDs.
+Conversational Context contains retained `user` and `assistant` dialogue for
+the requested interval and bounded earlier background that may help explain it.
+Later dialogue is not included. See [CONTEXT.md](CONTEXT.md) for the
+authoritative source and archive semantics.
 
 For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
 
@@ -181,7 +193,7 @@ uv run tracebase summary \
   --output "$HOME/.tracebase/summary-2026-09-01"
 ```
 
-To retain the generated Context Output or inspect non-secret runtime and shard artifacts, provide separate output directories:
+To retain the generated Context Output or debug output, provide separate output directories:
 
 ```bash
 uv run tracebase summary \
@@ -205,7 +217,14 @@ uv run tracebase summary \
   --output "$HOME/.tracebase/summary-2026-09-01"
 ```
 
-Summary Output, retained Context Output, and debug output may contain sensitive work evidence and should be handled like the Raw Archive. The final Summary is a projection of the user's work, not a summary of all activity in Context. Shard workers separate `User work` from `Context-only evidence`, and root synthesis only promotes the former. The selected model provider may receive the Context Output; make a separate derived-data scope and sanitization decision before using a third-party or AI service. The summary is published only after its required shard reports pass validation; failed summaries are not published. For all options, run `uv run tracebase summary --help`.
+Summary Output contains materially meaningful user work rather than all activity
+in Context. Unrelated personal activity and collaborator-only activity are
+excluded. Summary Output, retained Context Output, and debug output may contain
+sensitive work evidence and should be handled like the Raw Archive. The selected
+model provider may receive Context Output, so make a separate derived-data scope
+and sanitization decision before using a third-party or AI service. Failed
+summary generation does not publish a successful Summary output. For all
+options, run `uv run tracebase summary --help`.
 
 ## Development
 
@@ -219,7 +238,7 @@ uv run pymarkdown --strict-config scan README.md AGENTS.md
 uv run pre-commit run --all-files
 ```
 
-The lint script checks Python style, types, dead code, dependencies, and domain documentation. Without `--check`, it also fixes and formats Python files. The full pre-commit suite includes tests and `jscpd` duplication detection. Summary integration requires Docker and OpenCode credentials, so its container workflow is covered by synthetic tests rather than a live model call.
+The lint script checks Python style, types, dead code, dependencies, and domain documentation. Without `--check`, it also fixes and formats Python files. The full pre-commit suite includes tests and `jscpd` duplication detection. Summary integration requires Docker and OpenCode credentials.
 
 See [AGENTS.md](AGENTS.md) for contributor guardrails, [CONTEXT.md](CONTEXT.md) for domain terminology, and [GitHub issue conventions](docs/agents/issue-tracker.md) for planning work.
 
