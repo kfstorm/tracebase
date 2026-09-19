@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 
 from .context_inventory import (
     ContextInventory,
     ContextInventoryError,
-    ContextInventoryItem,
     item_readable_sizes,
     load_context_inventory,
 )
@@ -20,9 +18,8 @@ from .context_inventory import (
 class ShardPolicy:
     """Authoritative generic execution limits for every Context source."""
 
-    max_bytes: int = 256 * 1024
+    max_bytes: int = 64 * 1024
     max_items: int = 8
-    tiny_group_bytes: int = 16 * 1024
 
 
 SHARD_POLICY = ShardPolicy()
@@ -41,148 +38,119 @@ class PlannedShard:
 class _PlanningUnit:
     items: tuple[str, ...]
     readable_bytes: int
-    first_index: int
 
 
-def _split_group(
-    group: tuple[ContextInventoryItem, ...],
-    sizes: dict[str, int],
-    policy: ShardPolicy,
-) -> tuple[_PlanningUnit, ...]:
-    """Split only groups that violate a normal shard limit."""
-    total = sum(sizes[item.root] for item in group)
-    if len(group) <= policy.max_items and total <= policy.max_bytes:
-        return (
-            _PlanningUnit(
-                tuple(item.root for item in group),
-                total,
-                0,
-            ),
-        )
-
-    units: list[_PlanningUnit] = []
-    current: list[ContextInventoryItem] = []
-    current_bytes = 0
-    for item in group:
-        item_bytes = sizes[item.root]
-        exceeds_current = current and (
-            len(current) >= policy.max_items
-            or current_bytes + item_bytes > policy.max_bytes
-        )
-        if exceeds_current:
-            units.append(
-                _PlanningUnit(
-                    tuple(part.root for part in current),
-                    current_bytes,
-                    0,
-                )
-            )
-            current = []
-            current_bytes = 0
-        if item_bytes > policy.max_bytes:
-            if current:
-                units.append(
-                    _PlanningUnit(
-                        tuple(part.root for part in current),
-                        current_bytes,
-                        0,
-                    )
-                )
-                current = []
-                current_bytes = 0
-            units.append(_PlanningUnit((item.root,), item_bytes, 0))
-            continue
-        current.append(item)
-        current_bytes += item_bytes
-    if current:
-        units.append(
-            _PlanningUnit(
-                tuple(part.root for part in current),
-                current_bytes,
-                0,
-            )
-        )
-    return tuple(units)
+@dataclass(slots=True)
+class _DirectoryNode:
+    children: dict[str, _DirectoryNode] = field(default_factory=dict)
+    item_root: str | None = None
 
 
-def _natural_groups(
-    inventory: ContextInventory,
-) -> tuple[tuple[ContextInventoryItem, ...], ...]:
-    groups: dict[str, list[ContextInventoryItem]] = {}
-    for index, item in enumerate(inventory.items):
-        key = item.group if item.group is not None else f"\x00{index}"
-        groups.setdefault(key, []).append(item)
-    return tuple(tuple(group) for group in groups.values())
+def _build_tree(inventory: ContextInventory) -> _DirectoryNode:
+    root = _DirectoryNode()
+    for item in inventory.items:
+        node = root
+        for part in PurePosixPath(item.root).parts:
+            node = node.children.setdefault(part, _DirectoryNode())
+        node.item_root = item.root
+    return root
 
 
-def _with_first_indices(
-    units: Iterable[_PlanningUnit], inventory: ContextInventory
-) -> tuple[_PlanningUnit, ...]:
-    positions = {item.root: index for index, item in enumerate(inventory.items)}
-    return tuple(
-        _PlanningUnit(
-            unit.items,
-            unit.readable_bytes,
-            min(positions[item] for item in unit.items),
-        )
-        for unit in units
+def _node_items(
+    node: _DirectoryNode,
+    positions: dict[str, int],
+) -> tuple[str, ...]:
+    if node.item_root is not None:
+        return (node.item_root,)
+    items: list[str] = []
+    for child in node.children.values():
+        items.extend(_node_items(child, positions))
+    return tuple(sorted(items, key=positions.__getitem__))
+
+
+def _unit(items: tuple[str, ...], sizes: dict[str, int]) -> _PlanningUnit:
+    return _PlanningUnit(
+        items,
+        sum(sizes[item] for item in items),
     )
 
 
-def _pack_tiny_groups(
-    groups: tuple[_PlanningUnit, ...],
-    policy: ShardPolicy,
+def _fits(unit: _PlanningUnit, policy: ShardPolicy) -> bool:
+    return (
+        unit.readable_bytes <= policy.max_bytes and len(unit.items) <= policy.max_items
+    )
+
+
+def _pack(
+    units: tuple[_PlanningUnit, ...], policy: ShardPolicy
 ) -> tuple[_PlanningUnit, ...]:
     packed: list[_PlanningUnit] = []
-    current_items: list[str] = []
+    current: list[str] = []
     current_bytes = 0
-    current_first_index = 0
-    for group in groups:
-        if current_items and (
-            len(current_items) + len(group.items) > policy.max_items
-            or current_bytes + group.readable_bytes > policy.max_bytes
+    for unit in units:
+        if current and (
+            len(current) + len(unit.items) > policy.max_items
+            or current_bytes + unit.readable_bytes > policy.max_bytes
         ):
-            packed.append(
-                _PlanningUnit(tuple(current_items), current_bytes, current_first_index)
-            )
-            current_items = []
+            packed.append(_PlanningUnit(tuple(current), current_bytes))
+            current = []
             current_bytes = 0
-        if not current_items:
-            current_first_index = group.first_index
-        current_items.extend(group.items)
-        current_bytes += group.readable_bytes
-    if current_items:
-        packed.append(
-            _PlanningUnit(tuple(current_items), current_bytes, current_first_index)
-        )
+        current.extend(unit.items)
+        current_bytes += unit.readable_bytes
+    if current:
+        packed.append(_PlanningUnit(tuple(current), current_bytes))
     return tuple(packed)
+
+
+def _plan_node(
+    node: _DirectoryNode,
+    sizes: dict[str, int],
+    positions: dict[str, int],
+    policy: ShardPolicy,
+) -> tuple[tuple[_PlanningUnit, ...], bool]:
+    items = _node_items(node, positions)
+    intact = _unit(items, sizes)
+    if _fits(intact, policy):
+        return (intact,), True
+    if node.item_root is not None:
+        return (intact,), False
+
+    isolated: list[_PlanningUnit] = []
+    packable: list[_PlanningUnit] = []
+    children = sorted(
+        node.children.values(),
+        key=lambda child: min(
+            positions[item] for item in _node_items(child, positions)
+        ),
+    )
+    for child in children:
+        child_units, child_fits = _plan_node(child, sizes, positions, policy)
+        if child_fits:
+            packable.extend(child_units)
+        else:
+            isolated.extend(child_units)
+
+    units = [*isolated, *_pack(tuple(packable), policy)]
+    units.sort(key=lambda unit: min(positions[item] for item in unit.items))
+    return tuple(
+        _PlanningUnit(unit.items, unit.readable_bytes) for unit in units
+    ), False
 
 
 def plan_shards(
     context_dir: Path, policy: ShardPolicy = SHARD_POLICY
 ) -> tuple[PlannedShard, ...]:
-    """Create a stable generic shard partition without reading evidence content."""
+    """Create a stable shard partition from the exact Context directory tree."""
     try:
         inventory = load_context_inventory(context_dir)
         sizes = item_readable_sizes(context_dir, inventory)
     except ContextInventoryError as error:
         raise ValueError(str(error)) from None
 
-    fixed: list[_PlanningUnit] = []
-    tiny: list[_PlanningUnit] = []
-    for group in _natural_groups(inventory):
-        split = _with_first_indices(_split_group(group, sizes, policy), inventory)
-        if len(split) != 1:
-            fixed.extend(split)
-            continue
-        unit = split[0]
-        if unit.readable_bytes <= policy.tiny_group_bytes:
-            tiny.append(unit)
-        else:
-            fixed.append(unit)
-
-    units = [*fixed, *_pack_tiny_groups(tuple(tiny), policy)]
-    units.sort(key=lambda unit: unit.first_index)
+    positions = {item.root: index for index, item in enumerate(inventory.items)}
+    if not inventory.items:
+        return ()
+    units, _root_fits = _plan_node(_build_tree(inventory), sizes, positions, policy)
     return tuple(
         PlannedShard(f"shard-{index:02d}", unit.items, unit.readable_bytes)
         for index, unit in enumerate(units, start=1)

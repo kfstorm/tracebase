@@ -150,11 +150,9 @@ def _bind_runner_to_staging(runner: FakeRunner, parent: Path) -> None:
 def _write_context(
     tmp_path: Path,
     *items: tuple[str, str, str],
-    groups: dict[str, str | None] | None = None,
 ) -> Path:
     result = tmp_path / "context"
     result.mkdir()
-    groups = groups or {}
     links = "".join(
         f"- **{label}** [attribution mode: `{mode}`]({root}/overview.md)\n"
         for root, label, mode in items
@@ -174,7 +172,6 @@ def _write_context(
             {
                 "root": root,
                 "attribution_mode": mode,
-                "group": groups.get(root),
                 "files": ["overview.md"],
             }
         )
@@ -334,13 +331,20 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
     normalized = " ".join(prompt.split())
     required = (
         "Host-created shard plan",
+        "existing host-created `/work/NOTES.md`",
+        "Do not create or recreate the",
+        "Preserve the host-created `SHARD_STATUS` block",
         "/context/index.json",
         "Tracebase creates the complete shard plan deterministically",
         "root model must not create, split, merge, rename, remove, or change",
         "Update only `status` and `retry_count`",
         "Sharing a shard does not establish a semantic",
-        "Splitting a natural group across shards does not establish semantic",
         "exact item roots",
+        "directory tree implied by the exact item roots",
+        "at most 64 KiB",
+        "item count is at most 8",
+        "keep all shards produced from it isolated",
+        "oversized singleton",
         "complete disjoint partition",
         "Worker Relevance Contract",
         "activity.md` contains the only dialogue eligible",
@@ -355,6 +359,8 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
     assert "attribution_modes" not in prompt
     assert "MAX_SHARD_BYTES" not in prompt
     assert "TINY_ITEM_BYTES" not in prompt
+    assert "natural grouping metadata" not in prompt
+    assert "tiny_group_bytes" not in prompt
     assert "validate-summary-shards.py" not in prompt
     assert "For `actor_scoped`, follow the explicit `[User work]`" in normalized
 
@@ -430,10 +436,9 @@ def test_recovery_can_repair_only_the_invalid_shard(tmp_path: Path) -> None:
         tmp_path,
         ("one", "one", "personal"),
         ("two", "two", "personal"),
-        groups={"one": "one", "two": "two"},
     )
-    (source / "one/activity.md").write_bytes(b"x" * 20000)
-    (source / "two/activity.md").write_bytes(b"x" * 20000)
+    (source / "one/activity.md").write_bytes(b"x" * 40000)
+    (source / "two/activity.md").write_bytes(b"x" * 40000)
     output = tmp_path / "summary"
     runner = FakeRunner(
         tmp_path / ".unused",
@@ -512,7 +517,7 @@ def test_plan_accepts_exact_cross_source_partition(tmp_path: Path) -> None:
     assert inspect_shard_plan(tmp_path, context_dir).errors == ()
 
 
-def test_plan_accepts_natural_group_split_without_semantic_claim(
+def test_plan_accepts_directory_subtree_split_without_semantic_claim(
     tmp_path: Path,
 ) -> None:
     context_dir = _write_context(
@@ -655,7 +660,7 @@ def test_plan_applies_generic_byte_limit_and_allows_one_oversized_item(
 
     errors = inspect_shard_plan(tmp_path, context_dir).errors
 
-    assert any("exceeds 262144 readable bytes" in error for error in errors)
+    assert any("exceeds 65536 readable bytes" in error for error in errors)
     assert not any("oversized" in error for error in errors)
 
 

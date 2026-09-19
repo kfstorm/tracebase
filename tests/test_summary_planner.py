@@ -10,12 +10,12 @@ from tracebase.summary_planner import ShardPolicy, plan_shards
 
 def _context(
     tmp_path: Path,
-    items: list[tuple[str, str | None, str, int]],
+    items: list[tuple[str, str, int]],
 ) -> Path:
     context = tmp_path / "context"
     context.mkdir()
     inventory = []
-    for root, group, mode, payload_size in items:
+    for root, mode, payload_size in items:
         item_root = context.joinpath(*root.split("/"))
         item_root.mkdir(parents=True)
         (item_root / "overview.md").write_text(root, encoding="utf-8")
@@ -25,7 +25,6 @@ def _context(
             {
                 "root": root,
                 "attribution_mode": mode,
-                "group": group,
                 "files": ["overview.md"],
             }
         )
@@ -35,12 +34,20 @@ def _context(
     return context
 
 
-def test_inventory_preserves_order_and_generic_metadata(tmp_path: Path) -> None:
+def test_policy_has_only_the_authoritative_limits() -> None:
+    policy = ShardPolicy()
+
+    assert policy.max_bytes == 64 * 1024
+    assert policy.max_items == 8
+    assert not hasattr(policy, "tiny_group_bytes")
+
+
+def test_inventory_preserves_order_without_extra_metadata(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
         [
-            ("synthetic/source/item-a", "opaque-a", "personal", 0),
-            ("future/source/item-b", None, "actor_scoped", 0),
+            ("synthetic/source/item-a", "personal", 0),
+            ("future/source/item-b", "actor_scoped", 0),
         ],
     )
 
@@ -51,8 +58,7 @@ def test_inventory_preserves_order_and_generic_metadata(tmp_path: Path) -> None:
         "future/source/item-b",
     ]
     assert inventory.items[0].attribution_mode.value == "personal"
-    assert inventory.items[0].group == "opaque-a"
-    assert inventory.items[1].group is None
+    assert not hasattr(inventory.items[0], "group")
 
 
 @pytest.mark.parametrize(
@@ -61,12 +67,13 @@ def test_inventory_preserves_order_and_generic_metadata(tmp_path: Path) -> None:
         lambda value: value["items"].append(value["items"][0].copy()),
         lambda value: value["items"][0].__setitem__("root", "missing/item"),
         lambda value: value["items"][0].__setitem__("attribution_mode", "unknown"),
+        lambda value: value["items"][0].__setitem__("group", "forbidden"),
     ],
 )
 def test_inventory_rejects_duplicate_missing_or_malformed_items(
     tmp_path: Path, mutate
 ) -> None:
-    context = _context(tmp_path, [("one", None, "personal", 0)])
+    context = _context(tmp_path, [("one", "personal", 0)])
     inventory_path = context / "index.json"
     value = json.loads(inventory_path.read_text(encoding="utf-8"))
     mutate(value)
@@ -76,96 +83,104 @@ def test_inventory_rejects_duplicate_missing_or_malformed_items(
         load_context_inventory(context)
 
 
+def test_inventory_rejects_overlapping_item_roots(tmp_path: Path) -> None:
+    context = _context(
+        tmp_path,
+        [("project", "personal", 0), ("project/item", "personal", 0)],
+    )
+
+    with pytest.raises(ContextInventoryError, match="overlaps"):
+        load_context_inventory(context)
+
+
 def test_inventory_missing_item_directory_is_not_measured_as_zero(
     tmp_path: Path,
 ) -> None:
-    context = _context(tmp_path, [("one", None, "personal", 0)])
+    context = _context(tmp_path, [("one", "personal", 0)])
     shutil.rmtree(context / "one")
 
     with pytest.raises(ContextInventoryError, match="directory"):
         load_context_inventory(context)
 
 
-def test_normal_natural_group_remains_intact(tmp_path: Path) -> None:
-    context = _context(
-        tmp_path,
-        [("one", "group", "personal", 9000), ("two", "group", "personal", 9000)],
-    )
-
-    plan = plan_shards(context)
-
-    assert [shard.items for shard in plan] == [("one", "two")]
-
-
-def test_oversized_multi_item_group_splits_in_stable_order(tmp_path: Path) -> None:
-    context = _context(
-        tmp_path,
-        [("one", "group", "personal", 60), ("two", "group", "personal", 60)],
-    )
-
-    plan = plan_shards(
-        context, ShardPolicy(max_bytes=100, max_items=8, tiny_group_bytes=0)
-    )
-
-    assert [shard.items for shard in plan] == [("one",), ("two",)]
-
-
-def test_oversized_item_remains_alone(tmp_path: Path) -> None:
-    context = _context(tmp_path, [("one", "group", "personal", 200)])
-
-    plan = plan_shards(
-        context, ShardPolicy(max_bytes=100, max_items=8, tiny_group_bytes=0)
-    )
-
-    assert plan[0].items == ("one",)
-    assert plan[0].readable_bytes > 100
-
-
-def test_tiny_groups_pack_across_source_boundaries(tmp_path: Path) -> None:
+def test_intact_small_subtrees_pack_across_sources(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
         [
-            ("github/item", "github-group", "actor_scoped", 1),
-            ("future/item", "future-group", "personal", 1),
-        ],
-    )
-
-    plan = plan_shards(context)
-
-    assert [shard.items for shard in plan] == [("github/item", "future/item")]
-
-
-def test_non_tiny_natural_groups_are_not_cross_packed(tmp_path: Path) -> None:
-    context = _context(
-        tmp_path,
-        [
-            ("one", "one", "personal", 17000),
-            ("two", "two", "personal", 17000),
-        ],
-    )
-
-    plan = plan_shards(context)
-
-    assert [shard.items for shard in plan] == [("one",), ("two",)]
-
-
-def test_group_aggregate_controls_tiny_eligibility(tmp_path: Path) -> None:
-    context = _context(
-        tmp_path,
-        [
-            ("group/one", "natural", "personal", 6000),
-            ("group/two", "natural", "personal", 6000),
-            ("group/three", "natural", "personal", 6000),
-            ("other", "other", "personal", 1),
+            ("github/item", "actor_scoped", 20_000),
+            ("opencode/item", "personal", 25_000),
+            ("chatgpt/item", "personal", 15_000),
         ],
     )
 
     plan = plan_shards(context)
 
     assert [shard.items for shard in plan] == [
-        ("group/one", "group/two", "group/three"),
-        ("other",),
+        ("github/item", "opencode/item", "chatgpt/item")
     ]
+    assert plan[0].readable_bytes <= 64 * 1024
+
+
+def test_overflowing_subtree_is_isolated_from_intact_siblings(tmp_path: Path) -> None:
+    context = _context(
+        tmp_path,
+        [
+            ("github/repo/item-a", "actor_scoped", 90_000),
+            ("opencode/item", "personal", 30_000),
+            ("chatgpt/item", "personal", 20_000),
+        ],
+    )
+
+    plan = plan_shards(context)
+
+    assert [shard.items for shard in plan] == [
+        ("github/repo/item-a",),
+        ("opencode/item", "chatgpt/item"),
+    ]
+
+
+def test_overflowing_project_subtree_does_not_use_sibling_capacity(
+    tmp_path: Path,
+) -> None:
+    context = _context(
+        tmp_path,
+        [
+            ("github/project/item-a", "actor_scoped", 40_000),
+            ("github/project/item-b", "actor_scoped", 40_000),
+            ("other/item", "personal", 20_000),
+        ],
+    )
+
+    plan = plan_shards(context)
+
+    assert [shard.items for shard in plan] == [
+        ("github/project/item-a",),
+        ("github/project/item-b",),
+        ("other/item",),
+    ]
+
+
+def test_item_count_triggers_recursive_splitting(tmp_path: Path) -> None:
+    context = _context(
+        tmp_path,
+        [(f"project/item-{index}", "personal", 1) for index in range(9)],
+    )
+
+    plan = plan_shards(context)
+
+    assert [shard.items for shard in plan] == [
+        tuple(f"project/item-{index}" for index in range(8)),
+        ("project/item-8",),
+    ]
+
+
+def test_oversized_item_remains_alone(tmp_path: Path) -> None:
+    context = _context(tmp_path, [("one", "personal", 200)])
+
+    plan = plan_shards(context, ShardPolicy(max_bytes=100, max_items=8))
+
+    assert plan[0].items == ("one",)
+    assert plan[0].readable_bytes > 100
 
 
 def test_item_limit_is_enforced_without_splitting_a_valid_item(
@@ -173,22 +188,23 @@ def test_item_limit_is_enforced_without_splitting_a_valid_item(
 ) -> None:
     context = _context(
         tmp_path,
-        [(f"item-{index}", "group", "personal", 1) for index in range(3)],
+        [(f"item-{index}", "personal", 1) for index in range(3)],
     )
 
-    plan = plan_shards(
-        context, ShardPolicy(max_bytes=100_000, max_items=2, tiny_group_bytes=0)
-    )
+    plan = plan_shards(context, ShardPolicy(max_bytes=100_000, max_items=2))
 
-    assert [shard.items for shard in plan] == [("item-0", "item-1"), ("item-2",)]
+    assert [shard.items for shard in plan] == [
+        ("item-0", "item-1"),
+        ("item-2",),
+    ]
 
 
-def test_stable_input_and_opaque_roots_produce_stable_plan(tmp_path: Path) -> None:
+def test_stable_input_produces_stable_plan(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
         [
-            ("source-a/opaque-1", "same", "personal", 9000),
-            ("source-b/opaque-2", "same", "personal", 9000),
+            ("source-z/opaque-1", "personal", 9000),
+            ("source-a/opaque-2", "personal", 9000),
         ],
     )
 
@@ -196,3 +212,4 @@ def test_stable_input_and_opaque_roots_produce_stable_plan(tmp_path: Path) -> No
     second = plan_shards(context)
 
     assert first == second
+    assert first[0].items == ("source-z/opaque-1", "source-a/opaque-2")

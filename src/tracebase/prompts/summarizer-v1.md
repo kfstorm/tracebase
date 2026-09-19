@@ -86,13 +86,14 @@ It is durable state, not an optional prompt. If the session is compacted, or you
 are uncertain about your progress, reread `/work/TASK.md` and
 `/work/NOTES.md` before continuing.
 
-Maintain `/work/NOTES.md` as durable working memory throughout the
-investigation. Update it as you discover workstreams, important facts, evidence
-locations, decisions and reasoning, temporal distinctions, unresolved
-questions, and tentative conclusions. Keep the shard inventory for coverage
-separate from the workstream inventory for materially meaningful work. Do not
-rely entirely on conversational context. NOTES is scratch space and does not
-need a rigid format.
+Read and maintain the existing host-created `/work/NOTES.md` as durable working
+memory throughout the investigation. Update it as you discover workstreams,
+important facts, evidence locations, decisions and reasoning, temporal
+distinctions, unresolved questions, and tentative conclusions. Keep the shard
+inventory for coverage separate from the workstream inventory for materially
+meaningful work. Do not rely entirely on conversational context. NOTES is
+scratch space and does not need a rigid format. Do not create or recreate the
+file.
 
 NOTES is internal, evidence-rich working memory. It can and should preserve the
 workstream inventory, Context evidence locations, PR and Issue IDs, commit SHAs,
@@ -108,8 +109,8 @@ Explore it as needed. Start from index.md and inspect source-specific views
 when useful. You may use multiple tool calls and organize your investigation
 as you see fit.
 
-After reading `/work/TASK.md` and `/context/index.md`, create `/work/NOTES.md` immediately.
-Before reviewing individual evidence, record an
+After reading `/work/TASK.md`, `/work/NOTES.md`, and `/context/index.md`, use
+the existing NOTES file immediately. Before reviewing individual evidence, record an
 inventory of every materially distinct requested-interval workstream you can
 identify. Incrementally update the NOTES inventory and each workstream's facts,
 evidence locations, temporal distinctions, and status as you investigate; do
@@ -149,22 +150,28 @@ Conversational Context has these visible activity semantics:
 
 Tracebase creates the complete shard plan deterministically before this root
 session starts. `/context/index.json` is the authoritative machine-readable
-inventory of exact item roots, attribution modes, natural grouping metadata,
-and expected files. `index.md` remains the human-readable Context index, but it
-must not be parsed to infer shard membership.
+inventory of exact item roots, attribution modes, and expected files. `index.md`
+remains the human-readable Context index, but it must not be parsed to infer
+shard membership.
 
 Tracebase has already measured the readable files, created `/work/shards/`,
 written `/work/NOTES.md`, and validated the complete pending shard inventory.
 The inventory is an exact disjoint partition and its item assignments are
-frozen before dispatch. Sharing a shard does not establish a semantic, causal,
-project, conversation, or workstream relationship. Splitting a natural group
-across shards does not establish semantic independence.
+frozen before dispatch. Shard planning uses only the directory tree implied by
+the exact item roots. An intact subtree is packable only when its total readable
+bytes are at most 64 KiB and its item count is at most 8. Fitting sibling
+subtrees may be greedily packed together, including across sources. If a
+subtree must be split, recursively split only within that subtree and keep all
+shards produced from it isolated from content outside it. A single item larger
+than 64 KiB remains an oversized singleton. Sharing a shard does not establish
+a semantic, causal, project, repository, conversation, or workstream
+relationship; shard boundaries are execution-only.
 The host-created inventory is a complete disjoint partition: every Context item
 belongs to exactly one shard and no item belongs to two shards.
 
 The root model must not create, split, merge, rename, remove, or change the
 `items` of any shard. Do not calculate file sizes, inspect substantive item
-files for planning, infer natural groups, or repair planning errors. Do not run
+files for planning, infer semantic relationships, or repair planning errors. Do not run
 a pre-dispatch plan validator. Dispatch exactly the host-created shards and
 preserve each exact assigned item list in every worker task. Host-side
 reconciliation may detect assignment corruption, but the root must never repair
@@ -211,11 +218,11 @@ for interpretation, including the reviewed non-work exclusion state, but never
 promote it as a workstream, restate it as the user's work, or leak the concrete
 non-work content into the final Summary.
 
-Maintain the following machine-readable block in `/work/NOTES.md` as the
+Preserve the host-created `SHARD_STATUS` block in `/work/NOTES.md` as the
 orchestration state. Tracebase has written the complete pending block before
-the root starts. Use the existing safe stable shard IDs and required report
-paths. Update only `status` and `retry_count` after each worker returns, after a
-retry, and before final synthesis:
+the root starts. Preserve its safe stable shard IDs, exact `items`, and required
+report paths. Update only `status` and `retry_count` after each worker returns,
+after a retry, and before final synthesis:
 
 <!-- SHARD_STATUS_BEGIN -->
 {"shards":[{"id":"example","items":["chatgpt/conversation/01","opencode/example/session/01"],"status":"pending","retry_count":0,"report":"/work/shards/example.md"}]}

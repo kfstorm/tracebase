@@ -9,7 +9,7 @@ from typing import Any
 
 from .attribution import AttributionMode
 
-_INVENTORY_FIELDS = {"root", "attribution_mode", "group", "files"}
+_INVENTORY_FIELDS = {"root", "attribution_mode", "files"}
 
 
 class ContextInventoryError(ValueError):
@@ -22,7 +22,6 @@ class ContextInventoryItem:
 
     root: str
     attribution_mode: AttributionMode
-    group: str | None
     files: tuple[str, ...]
 
 
@@ -78,6 +77,13 @@ def load_context_inventory(context_dir: Path) -> ContextInventory:
             raise ContextInventoryError(
                 f"Context inventory root {root!r} is duplicated"
             )
+        if any(
+            root.startswith(existing + "/") or existing.startswith(root + "/")
+            for existing in roots
+        ):
+            raise ContextInventoryError(
+                f"Context inventory root {root!r} overlaps another item root"
+            )
         roots.add(root)
 
         mode = raw_item.get("attribution_mode")
@@ -91,12 +97,6 @@ def load_context_inventory(context_dir: Path) -> ContextInventory:
             raise ContextInventoryError(
                 f"Context inventory attribution mode for {root!r} is invalid"
             ) from None
-
-        group = raw_item.get("group")
-        if group is not None and (not isinstance(group, str) or not group):
-            raise ContextInventoryError(
-                f"Context inventory group for {root!r} is invalid"
-            )
 
         raw_files = raw_item.get("files")
         if not isinstance(raw_files, list) or not raw_files:
@@ -132,7 +132,7 @@ def load_context_inventory(context_dir: Path) -> ContextInventory:
                 raise ContextInventoryError(
                     f"Context item {root!r} is missing expected file {file_path!r}"
                 )
-        items.append(ContextInventoryItem(root, attribution_mode, group, tuple(files)))
+        items.append(ContextInventoryItem(root, attribution_mode, tuple(files)))
 
     return ContextInventory(tuple(items))
 

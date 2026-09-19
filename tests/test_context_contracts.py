@@ -3430,7 +3430,11 @@ def test_personal_opencode_delegated_work_is_user_work_and_exposes_mode(
     assert "attribution mode: `personal`" in index
     assert inventory["items"][0]["root"] == "opencode/workspace/example/session/01"
     assert inventory["items"][0]["attribution_mode"] == "personal"
-    assert inventory["items"][0]["group"] == "/workspace/example"
+    assert set(inventory["items"][0]) == {
+        "root",
+        "attribution_mode",
+        "files",
+    }
     assert inventory["items"][0]["files"] == ["overview.md", "activity.md"]
     assert "- Attribution mode: `personal`" in overview
     assert "Attribution mode: `personal`" in activity

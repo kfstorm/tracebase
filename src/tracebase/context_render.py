@@ -113,7 +113,6 @@ def _write_inventory(
             {
                 "root": item.path,
                 "attribution_mode": item.attribution_mode.value,
-                "group": rendered.index.group,
                 "files": list(rendered.files),
             }
             for item, rendered in items
