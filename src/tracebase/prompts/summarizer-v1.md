@@ -148,24 +148,15 @@ Conversational Context has these visible activity semantics:
 
 ### Host-created shard plan
 
-Tracebase creates the complete shard plan deterministically before this root
-session starts. `/context/index.json` is the authoritative machine-readable
-inventory of exact item roots, attribution modes, and expected files. `index.md`
-remains the human-readable Context index, but it must not be parsed to infer
-shard membership.
-
-Tracebase has already measured the readable files, created `/work/shards/`,
-written `/work/NOTES.md`, and validated the complete pending shard inventory.
+Tracebase has already generated and validated the complete shard plan before
+this root session starts.
 The complete plan is frozen before dispatch. Shard membership is an
 execution-only partition and carries no semantic, causal, project, repository,
 conversation, or workstream meaning.
 
 Preserve every host-assigned shard ID, exact `items` list, and report path. Do
 not re-plan, split, merge, rename, remove, or otherwise change shard
-membership. Dispatch exactly the host-created shards and preserve each exact
-assigned item list in every worker task. Host-side reconciliation may detect
-assignment corruption, but the root must never repair it by changing
-membership.
+membership. Dispatch exactly the host-created shards.
 
 For each shard, preserve the complete assigned Context evidence, apply
 attribution annotations where Context provides them, and make a separate
@@ -208,23 +199,8 @@ for interpretation, including the reviewed non-work exclusion state, but never
 promote it as a workstream, restate it as the user's work, or leak the concrete
 non-work content into the final Summary.
 
-Preserve the host-created `SHARD_STATUS` block in `/work/NOTES.md` as the
-orchestration state. Tracebase has written the complete pending block before
-the root starts. Preserve its safe stable shard IDs, exact `items`, and required
-report paths. Update only `status` and `retry_count` after each worker returns,
-after a retry, and before final synthesis:
-
-<!-- SHARD_STATUS_BEGIN -->
-{"shards":[{"id":"example","items":["chatgpt/conversation/01","opencode/example/session/01"],"status":"pending","retry_count":0,"report":"/work/shards/example.md"}]}
-<!-- SHARD_STATUS_END -->
-
-The example is a schema, not a required shard. At completion every entry must
-be `complete` or `failed`, `retry_count` must be 0 or 1, and `report` must be
-`/work/shards/<id>.md`. `items` must remain the non-empty exact Context item
-roots supplied by Tracebase. Attribution modes are derived from the assigned
-Context items and must not be duplicated in this mutable plan. A failed or
-missing report must never be omitted from the status block or the final
-synthesis.
+Maintain the existing host-created `SHARD_STATUS` block in `/work/NOTES.md`.
+Modify only `status` and `retry_count`.
 
 ### Worker Relevance Contract
 

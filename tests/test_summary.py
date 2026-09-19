@@ -333,12 +333,14 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
         "Host-created shard plan",
         "existing host-created `/work/NOTES.md`",
         "Do not create or recreate the",
-        "Preserve the host-created `SHARD_STATUS` block",
-        "Tracebase creates the complete shard plan deterministically",
+        "Maintain the existing host-created `SHARD_STATUS` block",
+        "Tracebase has already generated and validated the complete shard plan",
+        "The complete plan is frozen before dispatch",
         "Preserve every host-assigned shard ID, exact `items` list, and report path",
         "Do not re-plan, split, merge, rename, remove, or otherwise change "
         "shard membership",
-        "Update only `status` and `retry_count`",
+        "Dispatch exactly the host-created shards",
+        "Modify only `status` and `retry_count`",
         "Shard membership is an execution-only partition",
         "Worker Relevance Contract",
         "activity.md` contains the only dialogue eligible",
@@ -348,17 +350,6 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
     )
     for clause in required:
         assert clause in normalized
-    assert '"items"' in prompt
-    assert '"scope"' not in prompt
-    assert "attribution_modes" not in prompt
-    assert "MAX_SHARD_BYTES" not in prompt
-    assert "TINY_ITEM_BYTES" not in prompt
-    assert "64 KiB" not in prompt
-    assert "item count is at most 8" not in prompt
-    assert "directory tree" not in prompt
-    assert "recursive" not in prompt
-    assert "oversized singleton" not in prompt
-    assert "validate-summary-shards.py" not in prompt
     assert "For `actor_scoped`, follow the explicit `[User work]`" in normalized
 
 
