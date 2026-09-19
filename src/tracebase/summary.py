@@ -16,7 +16,8 @@ from typing import Any, Protocol
 from .context import ContextRequest, generate_context
 from .summary_container import ContainerMounts, ContainerRunner, ensure_image
 from .summary_opencode import prepare_config, prepare_state
-from .summary_shards import inspect_shards
+from .summary_planner import PlannedShard, plan_shards, write_initial_plan
+from .summary_shards import inspect_shard_plan, inspect_shards
 
 OPENCODE_VERSION = "1.18.29"
 IMAGE = f"tracebase-opencode:{OPENCODE_VERSION}"
@@ -34,9 +35,9 @@ Classify each error before acting:
 - If an individual shard report is missing or substantively incomplete,
   recover only that shard. Prefer continuing the existing worker/session
   when the task mechanism supports it; otherwise retry that exact shard
-  once with the same canonical scope.
+  once with the same assigned items.
 - Do not re-investigate valid shards.
-- Do not change shard scopes merely to satisfy validation.
+- Do not change shard item assignments merely to satisfy validation.
 - Do not omit or merge a failed shard.
 - Do not rewrite valid report content except where required to restore
   the protocol.
@@ -46,7 +47,7 @@ Classify each error before acting:
   do not start another worker for it, and preserve its failed status.
 
 After repairs, reconcile the complete shard inventory and status block,
-then ensure the canonical result exists at /results/summary.md."""
+then ensure the required result exists at /results/summary.md."""
 _INTERVAL = re.compile(r"^Requested interval: `(.+?) <= t < (.+?)`$", re.MULTILINE)
 
 
@@ -215,6 +216,7 @@ def _run_recovery(
     result_path: Path,
     work: Path,
     context: Path,
+    expected_plan: tuple[PlannedShard, ...],
 ) -> tuple[tuple[str, ...], bool]:
     recovery = [
         *command[:-1],
@@ -227,7 +229,7 @@ def _run_recovery(
         resumed.stdout, encoding="utf-8"
     )
     (runtime / "root-recovery.stderr.log").write_text(resumed.stderr, encoding="utf-8")
-    final_errors = inspect_shards(work, context).errors
+    final_errors = inspect_shards(work, context, expected_plan=expected_plan).errors
     final_result_present = _has_result(result_path)
     _write_json(
         runtime / "root-recovery.json",
@@ -339,6 +341,27 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         task = work / "TASK.md"
         task.write_bytes(prompt.read_bytes())
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
+        try:
+            shard_plan = plan_shards(context)
+            write_initial_plan(work, shard_plan)
+        except ValueError as error:
+            raise SummaryError(
+                f"Context inventory or shard planning failed: {error}"
+            ) from None
+        plan_errors = inspect_shard_plan(work, context).errors
+        if plan_errors:
+            raise SummaryError(
+                "Tracebase generated an invalid shard plan: " + "; ".join(plan_errors)
+            )
+        provenance["shard_plan"] = [
+            {
+                "id": shard.id,
+                "items": list(shard.items),
+                "readable_bytes": shard.readable_bytes,
+            }
+            for shard in shard_plan
+        ]
+        expected_plan = shard_plan
         dockerfile = Path(__file__).parent / "container/Dockerfile"
         if runner is None:
             config = prepare_state(state, request.model)
@@ -350,7 +373,6 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                     work,
                     results,
                     state,
-                    Path(__file__).parent / "summary_shard_validator.py",
                     task=task,
                 ),
             )
@@ -362,7 +384,9 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         root_id, command = _run_stage(
             runtime, runner, config, request.model, request.variant
         )
-        validation_errors = inspect_shards(work, context).errors
+        validation_errors = inspect_shards(
+            work, context, expected_plan=expected_plan
+        ).errors
         result_missing = not _has_result(results / "summary.md")
         if validation_errors or result_missing:
             validation_errors, result_present = _run_recovery(
@@ -376,6 +400,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 results / "summary.md",
                 work,
                 context,
+                expected_plan,
             )
             if not result_present:
                 raise SummaryError("Summarizer result /results/summary.md is missing")

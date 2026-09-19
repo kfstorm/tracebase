@@ -243,18 +243,42 @@ def publish_chatgpt(
     *,
     messages: list[dict[str, object]] | None = None,
     older_pages: list[list[dict[str, object]]] | None = None,
+    title: str = "Synthetic conversation",
 ) -> None:
     current = run(archive, "chatgpt-run", "chatgpt")
-    detail_messages = messages or [
-        {
-            "id": "chatgpt-current",
-            "author": {"role": "user"},
-            "create_time": 1767229200,
-            "update_time": 1767229200,
-            "content": {"content_type": "text", "parts": ["conversation"]},
-        }
-    ]
-    older_pages = older_pages or []
+    _write_chatgpt_snapshot(
+        current,
+        source_id,
+        messages or [chatgpt_message("chatgpt-current", 1767229200)],
+        older_pages or [],
+        title,
+    )
+    current.publish({"selected_conversation_count": 1})
+
+
+def publish_chatgpt_conversations(
+    archive: Archive,
+    conversations: tuple[tuple[str, str, str, int], ...],
+) -> None:
+    current = run(archive, "chatgpt-run", "chatgpt")
+    for source_id, title, message_id, timestamp in conversations:
+        _write_chatgpt_snapshot(
+            current,
+            source_id,
+            [chatgpt_message(message_id, timestamp)],
+            [],
+            title,
+        )
+    current.publish({"selected_conversation_count": len(conversations)})
+
+
+def _write_chatgpt_snapshot(
+    current: CollectionRun,
+    source_id: str,
+    detail_messages: list[dict[str, object]],
+    older_pages: list[list[dict[str, object]]],
+    title: str,
+) -> None:
     evidence_files = [
         {
             "path": "conversation.json",
@@ -291,7 +315,7 @@ def publish_chatgpt(
         json.dumps(
             {
                 "id": source_id,
-                "title": "Synthetic conversation",
+                "title": title,
                 "current_node": detail_messages[-1]["id"],
                 "messages": detail_messages,
             }
@@ -303,7 +327,16 @@ def publish_chatgpt(
             f"messages.{index:03d}.json",
             json.dumps({"messages": page_messages}).encode(),
         )
-    current.publish({"selected_conversation_count": 1})
+
+
+def chatgpt_message(message_id: str, timestamp: int) -> dict[str, object]:
+    return {
+        "id": message_id,
+        "author": {"role": "user"},
+        "create_time": timestamp,
+        "update_time": timestamp,
+        "content": {"content_type": "text", "parts": [message_id]},
+    }
 
 
 def files(output: Path) -> set[str]:
@@ -752,7 +785,42 @@ def test_context_projects_chatgpt_alongside_other_sources(
     assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
         output
     )
-    assert "chatgpt/conversation/Y29udmVyc2F0aW9uLTE/overview.md" in files(output)
+    assert "chatgpt/conversation/01/overview.md" in files(output)
+
+
+def test_chatgpt_context_numbers_conversations_by_activity_title_and_source_id(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    timestamp = 1767229200
+    publish_chatgpt_conversations(
+        archive,
+        (
+            ("conversation-z", "Alpha", "message-z", timestamp),
+            ("conversation-a", "Alpha", "message-a", timestamp),
+            ("conversation-b", "Beta", "message-b", timestamp - 60),
+        ),
+    )
+
+    output = tmp_path / "output"
+    result = extract_context(request(), load_archive(archive.root), archive.root)
+    generate_context(archive.root, request(), output)
+
+    assert {
+        item.snapshot.manifest["source_id"]: item.path for item in result.items
+    } == {
+        "conversation-b": "chatgpt/conversation/01",
+        "conversation-a": "chatgpt/conversation/02",
+        "conversation-z": "chatgpt/conversation/03",
+    }
+    assert [
+        (output / f"chatgpt/conversation/{number}/overview.md")
+        .read_text()
+        .splitlines()[0]
+        for number in ("01", "02", "03")
+    ] == ["# Beta", "# Alpha", "# Alpha"]
+    assert "conversation-a" not in "\n".join(item.path for item in result.items)
 
 
 @pytest.mark.parametrize(
@@ -890,7 +958,7 @@ def test_empty_output_has_only_useful_index_without_front_matter(
     archive.mkdir()
     output = tmp_path / "output"
     generate_context(archive, request(), output)
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
     index = (output / "index.md").read_text()
     assert "Requested interval" in index
     assert "No OpenCode root sessions are available.\n\n## ChatGPT" in index
@@ -932,7 +1000,7 @@ def test_empty_removed_run_directory_is_tolerated(tmp_path: Path) -> None:
     output = tmp_path / "output"
     generate_context(archive, request(), output)
 
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
 
 
 def test_empty_published_run_without_snapshots_directory_is_tolerated(
@@ -946,7 +1014,7 @@ def test_empty_published_run_without_snapshots_directory_is_tolerated(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
 
 
 def test_nonempty_unregistered_run_content_fails(tmp_path: Path) -> None:
@@ -1731,7 +1799,7 @@ def test_github_context_without_selected_items_does_not_require_profile(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
 
 
 def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
@@ -2382,7 +2450,7 @@ def test_opencode_non_text_selection_has_local_context_limitation(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
     assert not list(output.rglob("activity.md"))
     assert "## Gaps" not in (output / "index.md").read_text()
 
@@ -2928,7 +2996,7 @@ def test_opencode_in_range_tool_keeps_earlier_text_in_background(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
 
 
 def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:
@@ -3356,9 +3424,18 @@ def test_personal_opencode_delegated_work_is_user_work_and_exposes_mode(
     generate_context(archive.root, request(), output)
 
     index = (output / "index.md").read_text()
+    inventory = json.loads((output / "index.json").read_text())
     overview = text(output, "overview.md")
     activity = text(output, "activity.md")
     assert "attribution mode: `personal`" in index
+    assert inventory["items"][0]["root"] == "opencode/workspace/example/session/01"
+    assert inventory["items"][0]["attribution_mode"] == "personal"
+    assert set(inventory["items"][0]) == {
+        "root",
+        "attribution_mode",
+        "files",
+    }
+    assert inventory["items"][0]["files"] == ["overview.md", "activity.md"]
     assert "- Attribution mode: `personal`" in overview
     assert "Attribution mode: `personal`" in activity
     assert "delegated agent or subagent" in overview

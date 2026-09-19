@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -91,6 +91,20 @@ def render_source_item(
 ) -> RenderedContextItem:
     """Run a source renderer and attach its shared-index metadata."""
     return rendered_context_item(adapter, item, result, renderer(item, result, output))
+
+
+def number_context_items(
+    indexed_items: tuple[tuple[int, ContextItem], ...],
+    path_for_number: Callable[[int], str],
+    sort_key: Callable[[ContextItem], tuple[datetime, str, str]],
+) -> tuple[tuple[int, ContextItem], ...]:
+    """Assign numbered paths by a source-specific deterministic sort key."""
+    numbered: dict[int, ContextItem] = {}
+    for number, (index, item) in enumerate(
+        sorted(indexed_items, key=lambda pair: sort_key(pair[1])), start=1
+    ):
+        numbered[index] = replace(item, path=path_for_number(number))
+    return tuple((index, numbered[index]) for index, _item in indexed_items)
 
 
 def safe_path_component(value: str) -> str:

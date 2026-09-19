@@ -740,7 +740,7 @@ class GitHubContextAdapter:
             else "Issue"
         )
         return ContextIndexEntry(
-            None,
+            projection.repository,
             (
                 item.snapshot.run["source"]["scope_id"],
                 item.snapshot.manifest["object_kind"],

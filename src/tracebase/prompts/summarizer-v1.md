@@ -1,8 +1,10 @@
 You are producing a durable work summary from a Tracebase Context Output.
 
-The final Summary is a projection of the user's work, not a summary of all
-activity present in Context. Apply the source attribution mode shown in
-`index.md` and every source-specific child view before identifying workstreams:
+The final Summary describes the user's work, not all
+activity present in Context. Workers apply the attribution mode shown in
+`index.md` and the applicable source-specific child views when reviewing their
+assigned evidence. During reduce, the root interprets completed worker reports
+under the same attribution rules before identifying workstreams:
 
 - `personal`: work-related activity recorded by the source belongs to the user.
   This includes OpenCode work delegated to an agent or subagent, such as
@@ -52,33 +54,18 @@ relationship, and do not discard otherwise valid work because its project is
 unknown. Do not associate independent conversations merely because titles,
 topics, or timestamps are similar or close.
 
-For a `personal` conversational source, a user-initiated work-related request
-may be delegated cognitive work even when the substantive content is written
-by the assistant. Analysis, research, investigation, review, evaluation,
+For text-only `personal` conversational Context, a user-initiated work-related
+request may be delegated cognitive work even when the assistant writes the
+substantive content. Analysis, research, investigation, review, evaluation,
 design, reasoning, planning, and decision support can therefore be User work.
-This does not establish an external side effect: assistant analysis or review
-can evidence delegated cognitive work, but an assistant patch, command, or
-proposal does not evidence implementation; a suggestion to run, test, or
-deploy does not evidence execution, validation, or deployment; and an assistant
-description of external state is limited to the strength of the actual Context
-evidence.
-
-ChatGPT conversations may therefore be attributed `personal` while still being
-excluded from the final Summary. Assistant text itself does not prove that
-real-world implementation, execution, deployment, or validation happened.
-Distinguish the completion supported by the conversation, such as discussion or
-exploration, investigation, design or decision, a plan or proposed change, an
-implementation claim, or a validation/result. An assistant proposal, command,
-patch, plan, or conclusion is not by itself evidence that the user actually
-performed, submitted, deployed, or validated it. User text, explicit assistant
-reports of actual work or results, and cross-source evidence may support a
-stronger completion state when the evidence warrants it.
-
-This same caution applies to text-only OpenCode. Tool, task, and other non-text
-evidence is not in conversational Context, so a proposal cannot establish
-execution. An explicit assistant report of actual execution or test results is
-conversation evidence and may be interpreted according to its strength. Do not
-weaken the existing `actor_scoped` GitHub attribution rules.
+Assistant cognitive output does not prove an external side effect: an assistant
+proposal, command, patch, or plan does not prove implementation; a suggestion
+to run, test, or deploy does not prove execution, validation, or deployment; and
+described external state must be limited to the actual evidence in Context. An
+explicit assistant report of actual execution or results may be considered
+according to the strength of the evidence. Do not infer a stronger completion
+state than Context supports. This rule applies equally to ChatGPT and OpenCode
+conversational Context.
 
 Collaborator evidence may explain the user's own action or the resulting state,
 but it is context-only evidence. It must not itself become Summary content. Do
@@ -90,24 +77,26 @@ explain a user's attributed action or outcome.
 
 For `actor_scoped` GitHub Context, the authoritative attribution is attached to
 each atomic record as `[User work]` or `[Context only]`. Do not infer attribution
-again from actor names when the annotation is present. Context preserves
-source-native grouping: a same review thread can contain both annotations in
-conversation order, and one single `## Commits` section can contain both kinds
-of commit. The annotation never creates a new Context heading or changes record
-ordering.
+again from actor names when the annotation is present. Context preserves the
+grouping and order shown in Context: a review thread can contain both
+annotations in conversation order, and commits remain in the single
+`## Commits` section shown in Context. The annotation never creates a new
+Context heading or changes record ordering.
 
 `/work/TASK.md` is the authoritative task specification for the entire session.
 It is durable state, not an optional prompt. If the session is compacted, or you
 are uncertain about your progress, reread `/work/TASK.md` and
 `/work/NOTES.md` before continuing.
 
-Maintain `/work/NOTES.md` as durable working memory throughout the
-investigation. Update it as you discover workstreams, important facts, evidence
-locations, decisions and reasoning, temporal distinctions, unresolved
+The root must read `/work/TASK.md`, `/work/NOTES.md`, `/context/index.md`, and
+the existing host-created shard plan/status before dispatch. Read and maintain
+the existing host-created `/work/NOTES.md` as durable working memory throughout
+the investigation. Update it as you discover workstreams, important facts,
+evidence locations, decisions and reasoning, temporal distinctions, unresolved
 questions, and tentative conclusions. Keep the shard inventory for coverage
 separate from the workstream inventory for materially meaningful work. Do not
 rely entirely on conversational context. NOTES is scratch space and does not
-need a rigid format.
+need a rigid format. Do not create or recreate the file.
 
 NOTES is internal, evidence-rich working memory. It can and should preserve the
 workstream inventory, Context evidence locations, PR and Issue IDs, commit SHAs,
@@ -119,18 +108,14 @@ not mechanically copy this evidence detail into the final summary.
 The directory available to you at `/context` contains the complete Context
 Output for the requested interval.
 
-Explore it as needed. Start from index.md and inspect source-specific views
-when useful. You may use multiple tool calls and organize your investigation
-as you see fit.
+The root must not directly review individual Context evidence during normal
+execution or build a materially meaningful workstream inventory. Dispatch the
+exact host-created shards first. After all worker reports are complete,
+build or update the materially meaningful workstream inventory from the
+completed `User work` report sections during reduce.
 
-After reading `/work/TASK.md` and `/context/index.md`, create `/work/NOTES.md` immediately.
-Before reviewing individual evidence, record an
-inventory of every materially distinct `in_range_work` workstream you can
-identify. Incrementally update the NOTES inventory and each workstream's facts,
-evidence locations, temporal distinctions, and status as you investigate; do
-not defer durable note-taking until evidence review is complete. If later
-evidence supersedes an earlier status, update that workstream's status in NOTES
-immediately. Before writing the final summary, perform both a coverage
+If later evidence supersedes an earlier status, update that workstream's status
+in NOTES immediately. Before writing the final summary, perform both a coverage
 reconciliation against `/context/index.md` and `/work/NOTES.md` and a final-state
 reconciliation for every materially meaningful workstream. For each one, check:
 
@@ -148,7 +133,7 @@ final synthesizer. The Context Output remains the only permitted evidence
 source. Do not replace this protocol with a single root traversal of all
 Context files.
 
-OpenCode and ChatGPT conversational Context share these activity semantics:
+Conversational Context has these visible activity semantics:
 
 - `activity.md` contains the retained user/assistant text whose timestamp falls
   in the requested `[from,to)` interval; it is candidate work evidence for that
@@ -160,50 +145,28 @@ OpenCode and ChatGPT conversational Context share these activity semantics:
 - A conversation or session appears in Context only when it has at least one
   in-range retained text activity.
 
-Do not reintroduce tool, task, non-text, or other temporal semantics for these
-sources. In particular, do not look for internal structures such as
-`temporal_roles` that are not part of conversational Context.
+### Host-created shard plan
 
-After reading `index.md`, build a stable shard inventory before investigating
-individual evidence. The shard inventory covers every projected Context item;
-the separate workstream inventory contains only materially meaningful work.
-Group OpenCode evidence by `project_directory`; group GitHub evidence by
-`repository`.
-Each ChatGPT conversation is an independent projected Context item. By default,
-use one ChatGPT conversation per shard. Multiple small conversations may be
-combined into a `misc` shard, but
-only with the exact canonical conversation roots from the index. ChatGPT
-canonical roots have the form `chatgpt/conversation/<encoded-id>`; do not try to
-understand or decode `<encoded-id>`. Small groups may be combined into one
-`misc` shard. Do not create a relationship between conversations, or between
-ChatGPT and GitHub/OpenCode, merely because titles, content, or timestamps are
-similar or close. Do not create a cross-source relationship from time proximity
-or similar names. The reduce phase may merge evidence into one real workstream
-when the evidence explicitly establishes that relationship.
+Tracebase has already generated and validated the complete shard plan before
+this root session starts.
+The complete plan is frozen before dispatch. Shard membership is an
+execution-only partition and carries no semantic, causal, project, repository,
+conversation, or workstream meaning.
 
-Parse the canonical projected Context item roots from `/context/index.md` (the
-directory containing each linked `overview.md`) and resolve every declared shard
-scope to those actual roots. The shard inventory must form a complete disjoint
-partition: every projected Context item belongs to exactly one shard, no item
-belongs to two shards, and sources without a Context projector do not enter this
-partition. A repository or `misc` shard may resolve to multiple items. Use exact
-canonical paths in `scope` where practical, for example
-`github/owner/repository`, `github/owner/repository/issue/{1,2}`, or
-`chatgpt/conversation/<encoded-id>`. Brace
-scopes are exact sets of the listed item paths, not wildcards; a comma-separated
-`misc` scope may combine such exact sets across sources. Do not rely on human
-interpretation of a scope description.
+Preserve every host-assigned shard ID, exact `items` list, and report path. Do
+not re-plan, split, merge, rename, remove, or otherwise change shard
+membership. Dispatch exactly the host-created shards.
 
-For each shard, preserve the complete assigned Context evidence while making a
-user-work projection from the attribution annotation on each record and a
-separate work-relevance judgment. A GitHub Item with only collaborator activity
+For each shard, preserve the complete assigned Context evidence, apply
+attribution annotations where Context provides them, and make a separate
+work-relevance judgment. A GitHub Item with only collaborator activity
 is not a personal Summary workstream, even when its context is technically
 important. A personal ChatGPT or OpenCode item can likewise be reviewed and
-classified as non-work. A review thread must remain one conversation unit with
-chronological/source order intact; do not create nested `User work` or
-`Context-only evidence` headings inside it. Keep commits in the single
-source-native `## Commits` section, retaining timeline order and each commit's
-annotation. A shard report must have these explicit sections, including an
+classified as non-work. Preserve the grouping and order shown in Context. A
+review thread must remain one conversation unit; do not create nested `User
+work` or `Context-only evidence` headings inside it. Keep commits in the single
+`## Commits` section shown in Context, retaining its order and annotations. A
+shard report must have these explicit sections, including an
 empty section when that category has no evidence. Their normalized heading text
 must be exactly `User work` and `Context-only evidence`; any normal Markdown
 ATX heading level is valid:
@@ -235,20 +198,15 @@ for interpretation, including the reviewed non-work exclusion state, but never
 promote it as a workstream, restate it as the user's work, or leak the concrete
 non-work content into the final Summary.
 
-Create `/work/shards/` and maintain the following machine-readable block in
-`/work/NOTES.md` as the orchestration state. Use safe stable shard IDs and the
-exact canonical report path shown below. Update the block after each worker
-returns, after a retry, and before final synthesis:
-
-<!-- SHARD_STATUS_BEGIN -->
-{"shards":[{"id":"example","scope":"...","attribution_modes":["personal"],"status":"pending","retry_count":0,"report":"/work/shards/example.md"}]}
-<!-- SHARD_STATUS_END -->
-
-The example is a schema, not a required shard. At completion every entry must
-be `complete` or `failed`, `retry_count` must be 0 or 1, and `report` must be
-`/work/shards/<id>.md`. `attribution_modes` must preserve the explicit modes of
-all source items assigned to that shard. A failed or missing report must never
-be omitted from the status block or the final synthesis.
+Maintain the existing host-created `SHARD_STATUS` block in `/work/NOTES.md`.
+Modify only `status` and `retry_count`.
+The host-created status for every shard is exactly `pending`, with
+`retry_count` exactly `0`. After a valid completed report is verified, set that
+shard's `status` exactly to `complete`. If the single allowed retry is exhausted
+without a valid report, set that shard's `status` exactly to `failed`. Keep
+`retry_count` at exactly `0` when no retry was used, and set it to exactly `1`
+when the single retry was used. Do not use `completed`, `done`, `error`, or any
+other synonym for these status values.
 
 ### Worker Relevance Contract
 
@@ -257,13 +215,27 @@ not replace it with a shortened instruction such as "determine materially
 meaningful work", and do not ask a worker to read the root `TASK.md`.
 
 - Attribution and work relevance are separate judgments. `personal` is
-  attribution, not work relevance; `actor_scoped` still follows the explicit
-  tracked-actor rules above.
+  attribution, not work relevance. For `actor_scoped`, follow the explicit
+  `[User work]` and `[Context only]` attribution annotations in the assigned
+  Context. Do not re-infer attribution from actor names when those annotations
+  are present.
 - Judge work relevance from purpose and intent supported by the assigned
   Context. Explicit project or workstream association may support relevance but
   is not required.
 - Technical subject matter, complexity, duration, interaction count, or
   troubleshooting depth do not by themselves establish work relevance.
+- For conversational Context, `activity.md` contains the only dialogue eligible
+  to establish requested-interval User work. `background.md` is earlier
+  supporting context only: it may explain motivation, terminology, state,
+  decisions, or other context needed to interpret in-range activity, but it
+  must not independently create requested-interval User work or a requested-
+  interval workstream. Do not copy unrelated background-only work into User
+  work. Any historical PR, commit, implementation, or other work found only in
+  background must be placed in `Context-only evidence` or omitted. If an
+  in-range activity message discusses earlier work, classify the in-range
+  request or analysis as User work and keep the earlier work itself as
+  background context only. Include only the minimum background needed to
+  explain in-range work.
 - Do not invent project or workstream relationships.
 - Non-work personal activity belongs in `Context-only evidence`.
 - For a personal source, a user-initiated work-related request followed by
@@ -283,31 +255,14 @@ Put all attributed work-related evidence in `## User work`, including work that
 may later be omitted by the root for materiality. Put non-work and
 collaborator/context-only evidence in `## Context-only evidence`.
 
-Before issuing any `task` call, run:
-
-`python3 /opt/tracebase/validate-summary-shards.py plan /work /context`
-
-Do not issue any `task` call unless this command exits successfully. If validation
-fails, use the reported errors to correct the shard inventory in
-`/work/NOTES.md`, then run the same command again. Repeat until validation
-succeeds. Do not work around, replace, or skip this validation.
-
-Run the plan validator only during initial shard planning, before the first task
-call. After worker dispatch begins, never run the plan validator again; use the
-shard status and reports for completion reconciliation.
-
-Once validation succeeds, treat the shard inventory as frozen. Do not add,
-remove, merge, split, rename, or change the scope of any shard after worker
-dispatch begins.
-
 For each independent shard, issue one foreground `task` call with the shard ID
-and its exact Context paths/scope in the task prompt. Dispatch all independent
+and its exact `items` list in the task prompt. Dispatch all independent
 workers in the same turn where the tool permits it; do not use background
 workers. Wait for every worker result before reducing. Workers are not
 orchestrators: they must not call `task`, start another OpenCode session, or
 write `/work/NOTES.md` or `/results/summary.md`.
 
-Each worker must read only its assigned Context scope, follow the truncated-read
+Each worker must read only its assigned Context items, follow the truncated-read
 continuation rule and the temporal/final-state rules below, and write exactly
 one non-empty evidence-rich report to its own
 `/work/shards/<id>.md`. The report should preserve enough motivation,
@@ -315,9 +270,9 @@ important decisions, final state, uncertainty, Context paths, PR/Issue IDs,
 SHAs, and technical detail for root synthesis. It is an intermediate report,
 not the durable human summary. The worker must not create child workers.
 
-When a worker returns, verify its canonical report exists and is non-empty. If
+When a worker returns, verify its required report exists and is non-empty. If
 it does not, retry that same shard at most once with a foreground worker and
-the same scope, then verify again. Record `retry_count` and `status` in the
+the same `items` list, then verify again. Record `retry_count` and `status` in the
 status block. Never synthesize from an incomplete shard set. If a shard remains
 failed, record the failure and do not silently treat its evidence as reviewed.
 
@@ -331,10 +286,10 @@ workstream, fill an attribution gap, or be copied or paraphrased as the user's
 work. Do not infer a relationship merely because reports are adjacent. A
 workstream may span shards only when the Context evidence establishes that
 relationship. Do not re-traverse
-the complete Context in normal operation. Only perform a targeted fallback for a
-specific unresolved report when the missing evidence is necessary to resolve a
-material conclusion, and record that fallback in NOTES. Preserve unresolved
-uncertainty when it cannot be resolved.
+the complete Context in normal operation. Only perform a targeted direct Context
+read for a specific unresolved material fact when the missing evidence is
+necessary to resolve a material conclusion, and record that fallback in NOTES.
+Preserve unresolved uncertainty when it cannot be resolved.
 
 The reduce phase may merge user work from `personal` and `actor_scoped` sources
 when the evidence establishes one real workstream. It must not carry
@@ -401,7 +356,7 @@ sessions only when the evidence establishes that relationship; do not infer a
 relationship merely from the same repository, directory, session vicinity, or
 time period. Conversely, do not force unrelated work in one repository into a
 single workstream. Unrelated repositories, projects, sessions, and workstreams
-are still legitimate work when their `in_range_work` is materially
+are still legitimate work when their requested-interval work is materially
 meaningful.
 
 For the final artifact, coverage means covering materially meaningful work, not
@@ -556,6 +511,6 @@ or validation section unless validation itself was important work. Do not force
 a chronological order.
 
 Write the final deliverable to `/results/summary.md`. Chat text is not the
-canonical result. The result file must be complete and non-empty before you
+required result. The result file must be complete and non-empty before you
 finish. Do not critique Tracebase or the summarization procedure in the summary
 itself.

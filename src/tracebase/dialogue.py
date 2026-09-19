@@ -23,6 +23,13 @@ class DialogueTranscript:
     background: tuple[DialogueTurn, ...]
 
 
+def dialogue_sort_key(
+    transcript: DialogueTranscript, title: str, source_id: str
+) -> tuple[datetime, str, str]:
+    """Order conversational items by retained activity and stable metadata."""
+    return min(turn.timestamp for turn in transcript.activity), title, source_id
+
+
 def project_dialogue(
     turns: Iterable[DialogueTurn],
     start: datetime,
@@ -118,6 +125,7 @@ def render_dialogue_files(
 __all__ = [
     "DialogueTranscript",
     "DialogueTurn",
+    "dialogue_sort_key",
     "format_timestamp",
     "project_dialogue",
     "render_dialogue",

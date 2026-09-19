@@ -1,4 +1,4 @@
-"""Shared validation for the Summarizer's shard protocol."""
+"""Shared validation for the Summarizer's generic shard protocol."""
 
 from __future__ import annotations
 
@@ -9,6 +9,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from tracebase.context_inventory import (  # type: ignore[import-untyped]
+        ContextInventory,
+        ContextInventoryError,
+        item_readable_sizes,
+        load_context_inventory,
+    )
+    from tracebase.summary_planner import (  # type: ignore[import-untyped]
+        SHARD_POLICY,
+        PlannedShard,
+    )
+else:
+    from .context_inventory import (
+        ContextInventory,
+        ContextInventoryError,
+        item_readable_sizes,
+        load_context_inventory,
+    )
+    from .summary_planner import SHARD_POLICY, PlannedShard
+
 _STATUS_BLOCK = re.compile(
     r"<!--\s*SHARD_STATUS_BEGIN\s*-->(.*?)<!--\s*SHARD_STATUS_END\s*-->",
     re.DOTALL,
@@ -17,14 +38,8 @@ _SHARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _USER_WORK_SECTION = "## User work"
 _CONTEXT_ONLY_SECTION = "## Context-only evidence"
-_ATTRIBUTION_MODE_VALUES = {"personal", "actor_scoped"}
-_ATTRIBUTION_MODE = re.compile(r"attribution mode: `([^`]+)`")
-_CONTEXT_LINK = re.compile(r"\]\(([^)]+)\)")
-_GITHUB_SCOPE = re.compile(r"(?:GitHub )?repository (?P<repo>[^,;:]+)")
-_OPENCODE_SCOPE = re.compile(r"OpenCode(?: project)? (?P<project>[^:;]+)")
-_BRACE_SCOPE = re.compile(r"(?P<prefix>[^{}]+?)\/\{(?P<items>[^{}]+)\}\Z")
-_GITHUB_REPOSITORY_SEPARATOR_COUNT = 2
 _PLAN_ARGUMENT_COUNT = 3
+_SHARD_FIELDS = {"id", "items", "status", "retry_count", "report"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,94 +64,6 @@ def _status_data(notes: str) -> Any:
         raise ValueError("NOTES.md SHARD_STATUS block is not valid JSON") from error
 
 
-def _context_items(index_lines: tuple[str, ...]) -> dict[str, str]:
-    """Return projected item roots and their declared attribution modes."""
-    items: dict[str, str] = {}
-    for line in index_lines:
-        mode = _ATTRIBUTION_MODE.search(line)
-        if mode is None:
-            continue
-        for target in _CONTEXT_LINK.findall(line):
-            if not target.endswith("/overview.md"):
-                continue
-            root = target.removesuffix("/overview.md").removeprefix("./")
-            items[root] = mode.group(1)
-    return items
-
-
-def _scope_parts(scope: str) -> tuple[str, ...]:
-    parts: list[str] = []
-    start = 0
-    depth = 0
-    for index, character in enumerate(scope):
-        if character == "{":
-            depth += 1
-        elif character == "}":
-            depth = max(depth - 1, 0)
-        elif character == "," and depth == 0:
-            parts.append(scope[start:index].strip())
-            start = index + 1
-    parts.append(scope[start:].strip())
-    return tuple(part for part in parts if part)
-
-
-def _source_scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
-    selectors: list[tuple[str, bool]] = []
-    for part in _scope_parts(scope.removeprefix("misc:").strip()):
-        match = _BRACE_SCOPE.fullmatch(part)
-        if match is not None:
-            prefix = match.group("prefix").rstrip("/")
-            selectors.extend(
-                (f"{prefix}/{item.strip()}", False)
-                for item in match.group("items").split(",")
-                if item.strip()
-            )
-            continue
-        path = part.rstrip("/")
-        is_broad = (
-            path.startswith("github/")
-            and path.count("/") == _GITHUB_REPOSITORY_SEPARATOR_COUNT
-        ) or (path.startswith("opencode/") and "/session/" not in path)
-        selectors.append((path, is_broad))
-    return tuple(selectors)
-
-
-def _scope_selectors(scope: str) -> tuple[tuple[str, bool], ...]:
-    cleaned = scope.split(" (", 1)[0].strip()
-    if cleaned.startswith("/context/"):
-        selector = cleaned.removeprefix("/context/").rstrip("/")
-        return (
-            (
-                selector,
-                not (selector == "chatgpt" or selector.startswith("chatgpt/")),
-            ),
-        )
-    if cleaned.startswith(("github/", "opencode/", "misc:")):
-        return _source_scope_selectors(cleaned)
-    github_scope = _GITHUB_SCOPE.match(cleaned)
-    if github_scope is not None:
-        return ((f"github/{github_scope.group('repo').strip()}", True),)
-    opencode_scope = _OPENCODE_SCOPE.match(cleaned)
-    if opencode_scope is not None:
-        return ((f"opencode{opencode_scope.group('project').strip()}", True),)
-    selectors: list[tuple[str, bool]] = []
-    for part in _scope_parts(cleaned):
-        selectors.extend(_source_scope_selectors(part))
-    return tuple(selectors)
-
-
-def _scope_items(scope: str, item_roots: set[str]) -> frozenset[str]:
-    selectors = _scope_selectors(scope)
-    return frozenset(
-        root
-        for root in item_roots
-        if any(
-            root == selector or (broad and root.startswith(f"{selector}/"))
-            for selector, broad in selectors
-        )
-    )
-
-
 def _normalized_headings(report: str) -> set[str]:
     headings: set[str] = set()
     fenced = False
@@ -157,19 +84,52 @@ def _normalized_headings(report: str) -> set[str]:
 
 def _read_context(
     context_dir: Path,
-) -> tuple[dict[str, str], bool, list[str]]:
+) -> tuple[ContextInventory | None, bool, list[str]]:
     errors: list[str] = []
     try:
-        index_lines = tuple(
-            (context_dir / "index.md").read_text(encoding="utf-8").splitlines()
+        inventory = load_context_inventory(context_dir)
+    except ContextInventoryError as error:
+        return None, True, [str(error)]
+    return inventory, False, errors
+
+
+def _validate_items(
+    shard_id: str,
+    value: Any,
+    context_items: frozenset[str],
+    memberships: dict[str, list[str]],
+    *,
+    check_membership: bool,
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(value, list) or not value:
+        return [f"shard {shard_id!r} items must be a non-empty list"]
+    if len(value) > SHARD_POLICY.max_items:
+        errors.append(
+            f"shard {shard_id!r} has more than {SHARD_POLICY.max_items} Context items"
         )
-    except OSError, UnicodeError:
-        return {}, True, ["could not read Context index"]
-    return _context_items(index_lines), False, errors
+    local: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item:
+            errors.append(f"shard {shard_id!r} contains a malformed item")
+            continue
+        if item in local:
+            errors.append(f"shard {shard_id!r} declares item {item!r} more than once")
+            continue
+        local.add(item)
+        if check_membership and item not in context_items:
+            errors.append(f"shard {shard_id!r} contains unknown Context item {item!r}")
+        elif check_membership:
+            memberships[item].append(shard_id)
+    return errors
 
 
 def _validate_common(
-    work_dir: Path, context_dir: Path | None, *, pre_dispatch: bool
+    work_dir: Path,
+    context_dir: Path | None,
+    *,
+    pre_dispatch: bool,
+    expected_plan: tuple[PlannedShard, ...] | None = None,
 ) -> _CommonValidation:
     notes_path = work_dir / "NOTES.md"
     try:
@@ -184,42 +144,77 @@ def _validate_common(
     if not isinstance(data, dict) or not isinstance(data.get("shards"), list):
         return _CommonValidation(("SHARD_STATUS.shards must be a list",))
 
-    if context_dir is not None and not data["shards"]:
-        try:
-            has_context = any(path.is_file() for path in context_dir.rglob("*"))
-        except OSError:
-            has_context = True
-        if has_context:
-            return _CommonValidation(("non-empty Context has no declared shards",))
-
     errors: list[str] = []
-    context_items: dict[str, str] = {}
+    context_inventory: ContextInventory | None = None
+    context_items: frozenset[str] = frozenset()
+    context_sizes: dict[str, int] = {}
     index_error = False
     if context_dir is not None:
-        context_items, index_error, context_errors = _read_context(context_dir)
+        context_inventory, index_error, context_errors = _read_context(context_dir)
         errors.extend(context_errors)
-    item_roots = set(context_items)
-    resolved_items_by_shard: dict[str, frozenset[str]] = {}
-    seen: set[str] = set()
-    for item in data["shards"]:
-        if not isinstance(item, dict):
+        if not index_error:
+            assert context_inventory is not None
+            context_items = frozenset(item.root for item in context_inventory.items)
+            try:
+                context_sizes = item_readable_sizes(context_dir, context_inventory)
+            except ContextInventoryError as error:
+                errors.append(str(error))
+        if not index_error and not data["shards"] and context_items:
+            errors.append("non-empty Context has no declared shards")
+
+    seen_shard_ids: set[str] = set()
+    actual_shard_ids: list[str] = []
+    memberships: dict[str, list[str]] = {item: [] for item in context_items}
+    expected_by_id = (
+        {shard.id: shard for shard in expected_plan}
+        if expected_plan is not None
+        else {}
+    )
+    for shard in data["shards"]:
+        if not isinstance(shard, dict):
             errors.append("each shard status must be an object")
             continue
-        shard_id = item.get("id")
+
+        shard_id = shard.get("id")
         if not isinstance(shard_id, str) or _SHARD_ID.fullmatch(shard_id) is None:
             errors.append("shard id is invalid")
             continue
-        if shard_id in seen:
+        if shard_id in seen_shard_ids:
             errors.append(f"shard {shard_id!r} is declared more than once")
             continue
-        seen.add(shard_id)
+        seen_shard_ids.add(shard_id)
+        actual_shard_ids.append(shard_id)
 
-        retry_count = item.get("retry_count", 0)
-        status = item.get("status")
+        if expected_plan is not None:
+            expected = expected_by_id.get(shard_id)
+            if expected is None:
+                errors.append(f"shard {shard_id!r} was not in the host-generated plan")
+            else:
+                declared_items = shard.get("items")
+                actual_items = (
+                    tuple(declared_items) if isinstance(declared_items, list) else ()
+                )
+                if actual_items != expected.items:
+                    errors.append(
+                        f"shard {shard_id!r} changed its host-assigned item list"
+                    )
+
+        unknown_fields = sorted(set(shard) - _SHARD_FIELDS)
+        if unknown_fields:
+            errors.append(
+                f"shard {shard_id!r} has unknown fields: " + ", ".join(unknown_fields)
+            )
+
+        retry_count = shard.get("retry_count")
+        status = shard.get("status")
         if pre_dispatch:
             if status != "pending":
                 errors.append(f"shard {shard_id!r} is not pending")
-            if retry_count != 0 or isinstance(retry_count, bool):
+            if (
+                not isinstance(retry_count, int)
+                or isinstance(retry_count, bool)
+                or retry_count != 0
+            ):
                 errors.append(
                     f"shard {shard_id!r} retry_count must be 0 before dispatch"
                 )
@@ -233,41 +228,49 @@ def _validate_common(
             elif status != "complete":
                 errors.append(f"shard {shard_id!r} is not in a terminal state")
 
-        attribution_modes = item.get("attribution_modes")
-        if (
-            not isinstance(attribution_modes, list)
-            or not attribution_modes
-            or not all(
-                isinstance(mode, str) and mode in _ATTRIBUTION_MODE_VALUES
-                for mode in attribution_modes
-            )
-        ):
-            errors.append(f"shard {shard_id!r} attribution modes are invalid")
-
-        scope = item.get("scope")
         if context_dir is not None and not index_error:
-            if not isinstance(scope, str) or not scope:
-                errors.append(f"shard {shard_id!r} scope is invalid")
-            elif not isinstance(attribution_modes, list):
-                pass
-            else:
-                resolved_items = _scope_items(scope, item_roots)
-                resolved_items_by_shard[shard_id] = resolved_items
-                expected_modes = {context_items[root] for root in resolved_items}
-                if not resolved_items:
+            errors.extend(
+                _validate_items(
+                    shard_id,
+                    shard.get("items"),
+                    context_items,
+                    memberships,
+                    check_membership=True,
+                )
+            )
+        else:
+            errors.extend(
+                _validate_items(
+                    shard_id,
+                    shard.get("items"),
+                    context_items,
+                    memberships,
+                    check_membership=False,
+                )
+            )
+
+        if context_dir is not None and not index_error:
+            declared_items = shard.get("items")
+            if isinstance(declared_items, list) and all(
+                isinstance(item, str) and item in context_items
+                for item in declared_items
+            ):
+                shard_bytes = sum(context_sizes[item] for item in declared_items)
+                oversized_item = (
+                    len(declared_items) == 1
+                    and context_sizes[declared_items[0]] > SHARD_POLICY.max_bytes
+                )
+                if shard_bytes > SHARD_POLICY.max_bytes and not oversized_item:
                     errors.append(
-                        f"shard {shard_id!r} scope does not match Context items"
-                    )
-                elif expected_modes != set(attribution_modes):
-                    errors.append(
-                        f"shard {shard_id!r} attribution modes do not match Context"
+                        f"shard {shard_id!r} exceeds "
+                        f"{SHARD_POLICY.max_bytes} readable bytes"
                     )
 
         expected_report = f"/work/shards/{shard_id}.md"
-        if item.get("report") != expected_report:
+        if shard.get("report") != expected_report:
             errors.append(f"shard {shard_id!r} has a non-canonical report path")
 
-        if not pre_dispatch and item.get("report") == expected_report:
+        if not pre_dispatch and shard.get("report") == expected_report:
             report_path = work_dir / "shards" / f"{shard_id}.md"
             if report_path.is_symlink() or not report_path.is_file():
                 errors.append(f"shard {shard_id!r} canonical report is missing")
@@ -277,8 +280,8 @@ def _validate_common(
                     if not report_text.strip():
                         errors.append(f"shard {shard_id!r} canonical report is empty")
                     elif not {
-                        "user work",
-                        "context-only evidence",
+                        _USER_WORK_SECTION.casefold()[3:],
+                        _CONTEXT_ONLY_SECTION.casefold()[3:],
                     }.issubset(_normalized_headings(report_text)):
                         errors.append(
                             f"shard {shard_id!r} report does not separate user work "
@@ -288,18 +291,29 @@ def _validate_common(
                     errors.append(f"shard {shard_id!r} canonical report cannot be read")
 
     if context_dir is not None and not index_error:
-        memberships: dict[str, list[str]] = {root: [] for root in item_roots}
-        for shard_id, resolved_items in resolved_items_by_shard.items():
-            for root in resolved_items:
-                memberships[root].append(shard_id)
-        for root, owners in sorted(memberships.items()):
+        for item, owners in sorted(memberships.items()):
             if not owners:
-                errors.append(f"Context item {root!r} is not covered by any shard")
+                errors.append(f"Context item {item!r} is not covered by any shard")
             elif len(owners) > 1:
                 errors.append(
-                    f"Context item {root!r} is covered by multiple shards: "
+                    f"Context item {item!r} is covered by multiple shards: "
                     + ", ".join(owners)
                 )
+    if expected_plan is not None:
+        expected_shard_ids = tuple(shard.id for shard in expected_plan)
+        if len(data["shards"]) != len(expected_plan):
+            errors.append(
+                "SHARD_STATUS.shards count differs from the host-generated plan"
+            )
+        if tuple(actual_shard_ids) != expected_shard_ids:
+            errors.append(
+                "SHARD_STATUS.shards order differs from the host-generated plan"
+            )
+        missing = set(expected_shard_ids) - seen_shard_ids
+        errors.extend(
+            f"host-generated shard {shard_id!r} is missing"
+            for shard_id in sorted(missing)
+        )
     return _CommonValidation(tuple(errors))
 
 
@@ -311,11 +325,19 @@ def inspect_shard_plan(work_dir: Path, context_dir: Path) -> ShardObservability:
 
 
 def inspect_shards(
-    work_dir: Path, context_dir: Path | None = None
+    work_dir: Path,
+    context_dir: Path | None = None,
+    *,
+    expected_plan: tuple[PlannedShard, ...] | None = None,
 ) -> ShardObservability:
-    """Check every declared shard has one non-empty canonical report."""
+    """Validate terminal shard state, coverage, and non-empty reports."""
     return ShardObservability(
-        _validate_common(work_dir, context_dir, pre_dispatch=False).errors
+        _validate_common(
+            work_dir,
+            context_dir,
+            pre_dispatch=False,
+            expected_plan=expected_plan,
+        ).errors
     )
 
 
