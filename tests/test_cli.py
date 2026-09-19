@@ -763,6 +763,24 @@ class TestCollectionCli:
             assert "invalid command arguments" in result.stderr
             assert not (Path(directory) / ".staging").exists()
 
+    def test_cli_rejects_empty_archive_value(self) -> None:
+        result = self.run_cli(
+            "collect",
+            "opencode",
+            "--archive",
+            "",
+            "--instance-id",
+            "instance-1",
+            "--from",
+            "2026-01-01T00:00:00+00:00",
+            "--to",
+            "2026-01-01T01:00:00+00:00",
+        )
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "invalid command arguments" in result.stderr
+
     @pytest.mark.parametrize(
         ("from_text", "to_text"),
         [

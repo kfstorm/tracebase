@@ -82,7 +82,9 @@ def _fits(unit: _PlanningUnit, policy: ShardPolicy) -> bool:
 
 
 def _pack(
-    units: tuple[_PlanningUnit, ...], policy: ShardPolicy
+    units: tuple[_PlanningUnit, ...],
+    policy: ShardPolicy,
+    positions: dict[str, int],
 ) -> tuple[_PlanningUnit, ...]:
     """Pack fitting units in deterministic inventory order."""
     packed: list[_PlanningUnit] = []
@@ -93,13 +95,21 @@ def _pack(
             len(current) + len(unit.items) > policy.max_items
             or current_bytes + unit.readable_bytes > policy.max_bytes
         ):
-            packed.append(_PlanningUnit(tuple(current), current_bytes))
+            packed.append(
+                _PlanningUnit(
+                    tuple(sorted(current, key=positions.__getitem__)), current_bytes
+                )
+            )
             current = []
             current_bytes = 0
         current.extend(unit.items)
         current_bytes += unit.readable_bytes
     if current:
-        packed.append(_PlanningUnit(tuple(current), current_bytes))
+        packed.append(
+            _PlanningUnit(
+                tuple(sorted(current, key=positions.__getitem__)), current_bytes
+            )
+        )
     return tuple(packed)
 
 
@@ -131,7 +141,7 @@ def _plan_node(
         else:
             isolated.extend(child_units)
 
-    units = [*isolated, *_pack(tuple(packable), policy)]
+    units = [*isolated, *_pack(tuple(packable), policy, positions)]
     units.sort(key=lambda unit: min(positions[item] for item in unit.items))
     return tuple(
         _PlanningUnit(unit.items, unit.readable_bytes) for unit in units

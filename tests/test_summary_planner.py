@@ -161,6 +161,30 @@ def test_intact_siblings_may_pack_around_isolated_overflow_units(
     ]
 
 
+def test_packed_items_follow_interleaved_inventory_order(
+    tmp_path: Path,
+) -> None:
+    context = _context(
+        tmp_path,
+        [
+            ("a/item-1", "personal", 10_000),
+            ("b/item-1", "personal", 40_000),
+            ("c/item-1", "personal", 10_000),
+            ("a/item-2", "personal", 10_000),
+            ("b/item-2", "personal", 40_000),
+            ("c/item-2", "personal", 10_000),
+        ],
+    )
+
+    plan = plan_shards(context)
+
+    assert [shard.items for shard in plan] == [
+        ("a/item-1", "c/item-1", "a/item-2", "c/item-2"),
+        ("b/item-1",),
+        ("b/item-2",),
+    ]
+
+
 def test_overflowing_project_subtree_does_not_use_sibling_capacity(
     tmp_path: Path,
 ) -> None:

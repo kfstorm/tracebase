@@ -39,6 +39,12 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise ArchiveError("invalid command arguments")
 
 
+def _non_empty_argument(value: str) -> str:
+    if not value:
+        raise argparse.ArgumentTypeError("value must not be empty")
+    return value
+
+
 def _publish(
     run: CollectionRun, result: CollectionResult, reporter: ProgressReporter
 ) -> Path:
@@ -93,7 +99,7 @@ def _parser() -> argparse.ArgumentParser:
         source_parser = source_commands.add_parser(
             source, add_help=True, allow_abbrev=False
         )
-        source_parser.add_argument("--archive", required=True)
+        source_parser.add_argument("--archive", required=True, type=_non_empty_argument)
         source_parser.add_argument("--from", dest="from_text", required=True)
         source_parser.add_argument("--to", dest="to_text", required=True)
         if source == "chatgpt":
@@ -105,13 +111,13 @@ def _parser() -> argparse.ArgumentParser:
         if source == "opencode":
             source_parser.add_argument("--instance-id", required=True)
     context = commands.add_parser("context", add_help=True, allow_abbrev=False)
-    context.add_argument("--archive", required=True)
+    context.add_argument("--archive", required=True, type=_non_empty_argument)
     context.add_argument("--from", dest="from_text", required=True)
     context.add_argument("--to", dest="to_text", required=True)
     context.add_argument("--output", required=True)
     summary = commands.add_parser("summary", add_help=True, allow_abbrev=False)
     inputs = summary.add_mutually_exclusive_group(required=True)
-    inputs.add_argument("--archive")
+    inputs.add_argument("--archive", type=_non_empty_argument)
     inputs.add_argument("--context")
     summary.add_argument("--from", dest="from_text")
     summary.add_argument("--to", dest="to_text")
@@ -131,7 +137,7 @@ def _parser() -> argparse.ArgumentParser:
     sync_identity = identity_actions.add_parser(
         "sync", add_help=True, allow_abbrev=False
     )
-    sync_identity.add_argument("--archive", required=True)
+    sync_identity.add_argument("--archive", required=True, type=_non_empty_argument)
     return parser
 
 
