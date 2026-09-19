@@ -16,7 +16,7 @@ from typing import Any, Protocol
 from .context import ContextRequest, generate_context
 from .summary_container import ContainerMounts, ContainerRunner, ensure_image
 from .summary_opencode import prepare_config, prepare_state
-from .summary_planner import plan_shards, write_initial_plan
+from .summary_planner import PlannedShard, plan_shards, write_initial_plan
 from .summary_shards import inspect_shard_plan, inspect_shards
 
 OPENCODE_VERSION = "1.18.29"
@@ -216,7 +216,7 @@ def _run_recovery(
     result_path: Path,
     work: Path,
     context: Path,
-    expected_items: dict[str, tuple[str, ...]],
+    expected_plan: tuple[PlannedShard, ...],
 ) -> tuple[tuple[str, ...], bool]:
     recovery = [
         *command[:-1],
@@ -229,7 +229,7 @@ def _run_recovery(
         resumed.stdout, encoding="utf-8"
     )
     (runtime / "root-recovery.stderr.log").write_text(resumed.stderr, encoding="utf-8")
-    final_errors = inspect_shards(work, context, expected_items=expected_items).errors
+    final_errors = inspect_shards(work, context, expected_plan=expected_plan).errors
     final_result_present = _has_result(result_path)
     _write_json(
         runtime / "root-recovery.json",
@@ -361,7 +361,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
             }
             for shard in shard_plan
         ]
-        expected_items = {shard.id: shard.items for shard in shard_plan}
+        expected_plan = shard_plan
         dockerfile = Path(__file__).parent / "container/Dockerfile"
         if runner is None:
             config = prepare_state(state, request.model)
@@ -385,7 +385,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
             runtime, runner, config, request.model, request.variant
         )
         validation_errors = inspect_shards(
-            work, context, expected_items=expected_items
+            work, context, expected_plan=expected_plan
         ).errors
         result_missing = not _has_result(results / "summary.md")
         if validation_errors or result_missing:
@@ -400,7 +400,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 results / "summary.md",
                 work,
                 context,
-                expected_items,
+                expected_plan,
             )
             if not result_present:
                 raise SummaryError("Summarizer result /results/summary.md is missing")

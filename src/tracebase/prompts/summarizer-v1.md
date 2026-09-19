@@ -2,7 +2,8 @@ You are producing a durable work summary from a Tracebase Context Output.
 
 The final Summary describes the user's work, not all
 activity present in Context. Apply the source attribution mode shown in
-`index.md` and every source-specific child view before identifying workstreams:
+`index.md` and source-specific child views when reviewing assigned evidence and
+completed worker reports before identifying workstreams:
 
 - `personal`: work-related activity recorded by the source belongs to the user.
   This includes OpenCode work delegated to an agent or subagent, such as
@@ -86,14 +87,15 @@ It is durable state, not an optional prompt. If the session is compacted, or you
 are uncertain about your progress, reread `/work/TASK.md` and
 `/work/NOTES.md` before continuing.
 
-Read and maintain the existing host-created `/work/NOTES.md` as durable working
-memory throughout the investigation. Update it as you discover workstreams,
-important facts, evidence locations, decisions and reasoning, temporal
-distinctions, unresolved questions, and tentative conclusions. Keep the shard
-inventory for coverage separate from the workstream inventory for materially
-meaningful work. Do not rely entirely on conversational context. NOTES is
-scratch space and does not need a rigid format. Do not create or recreate the
-file.
+The root must read `/work/TASK.md`, `/work/NOTES.md`, `/context/index.md`, and
+the existing host-created shard plan/status before dispatch. Read and maintain
+the existing host-created `/work/NOTES.md` as durable working memory throughout
+the investigation. Update it as you discover workstreams, important facts,
+evidence locations, decisions and reasoning, temporal distinctions, unresolved
+questions, and tentative conclusions. Keep the shard inventory for coverage
+separate from the workstream inventory for materially meaningful work. Do not
+rely entirely on conversational context. NOTES is scratch space and does not
+need a rigid format. Do not create or recreate the file.
 
 NOTES is internal, evidence-rich working memory. It can and should preserve the
 workstream inventory, Context evidence locations, PR and Issue IDs, commit SHAs,
@@ -105,18 +107,14 @@ not mechanically copy this evidence detail into the final summary.
 The directory available to you at `/context` contains the complete Context
 Output for the requested interval.
 
-Explore it as needed. Start from index.md and inspect source-specific views
-when useful. You may use multiple tool calls and organize your investigation
-as you see fit.
+The root must not inspect substantive individual Context item evidence before
+worker dispatch or build a materially meaningful workstream inventory. Dispatch
+the exact host-created shards first. After all worker reports are complete,
+build or update the materially meaningful workstream inventory from the
+completed `User work` report sections during reduce.
 
-After reading `/work/TASK.md`, `/work/NOTES.md`, and `/context/index.md`, use
-the existing NOTES file immediately. Before reviewing individual evidence, record an
-inventory of every materially distinct requested-interval workstream you can
-identify. Incrementally update the NOTES inventory and each workstream's facts,
-evidence locations, temporal distinctions, and status as you investigate; do
-not defer durable note-taking until evidence review is complete. If later
-evidence supersedes an earlier status, update that workstream's status in NOTES
-immediately. Before writing the final summary, perform both a coverage
+If later evidence supersedes an earlier status, update that workstream's status
+in NOTES immediately. Before writing the final summary, perform both a coverage
 reconciliation against `/context/index.md` and `/work/NOTES.md` and a final-state
 reconciliation for every materially meaningful workstream. For each one, check:
 
@@ -280,10 +278,10 @@ workstream, fill an attribution gap, or be copied or paraphrased as the user's
 work. Do not infer a relationship merely because reports are adjacent. A
 workstream may span shards only when the Context evidence establishes that
 relationship. Do not re-traverse
-the complete Context in normal operation. Only perform a targeted fallback for a
-specific unresolved report when the missing evidence is necessary to resolve a
-material conclusion, and record that fallback in NOTES. Preserve unresolved
-uncertainty when it cannot be resolved.
+the complete Context in normal operation. Only perform a targeted direct Context
+read for a specific unresolved material fact when the missing evidence is
+necessary to resolve a material conclusion, and record that fallback in NOTES.
+Preserve unresolved uncertainty when it cannot be resolved.
 
 The reduce phase may merge user work from `personal` and `actor_scoped` sources
 when the evidence establishes one real workstream. It must not carry

@@ -194,6 +194,17 @@ def multi_source_context(tmp_path: Path) -> Path:
     )
 
 
+def large_two_item_context(tmp_path: Path) -> Path:
+    source = _write_context(
+        tmp_path,
+        ("one", "one", "personal"),
+        ("two", "two", "personal"),
+    )
+    for item in ("one", "two"):
+        (source / f"{item}/activity.md").write_bytes(b"x" * 40000)
+    return source
+
+
 def _status(
     shards: list[dict[str, object]], *, status: str = "complete", retry_count: int = 0
 ) -> dict[str, object]:
@@ -300,6 +311,26 @@ def test_root_item_mutation_is_rejected_during_final_reconciliation(
     assert not output.exists()
 
 
+def test_root_shard_reordering_is_rejected_during_final_reconciliation(
+    tmp_path: Path,
+) -> None:
+    source = large_two_item_context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(
+        output.parent / ".unused",
+        shards=[
+            {"id": "shard-02", "items": ["two"]},
+            {"id": "shard-01", "items": ["one"]},
+        ],
+    )
+    _bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="order"):
+        summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert not output.exists()
+
+
 def test_summary_accepts_cross_source_batch(tmp_path: Path) -> None:
     source = multi_source_context(tmp_path)
     output = tmp_path / "summary"
@@ -351,6 +382,24 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
     for clause in required:
         assert clause in normalized
     assert "For `actor_scoped`, follow the explicit `[User work]`" in normalized
+    assert (
+        "The root must read `/work/TASK.md`, `/work/NOTES.md`, `/context/index.md`, "
+        "and the existing host-created shard plan/status"
+    ) in normalized
+    assert (
+        "must not inspect substantive individual Context item evidence before "
+        "worker dispatch"
+    ) in normalized
+    assert (
+        "After all worker reports are complete, build or update the materially "
+        "meaningful workstream inventory from the completed `User work` report sections"
+    ) in normalized
+    assert (
+        "Only perform a targeted direct Context read for a specific unresolved "
+        "material fact"
+    ) in normalized
+    assert "Explore it as needed. Start from index.md" not in normalized
+    assert "Before reviewing individual evidence, record an inventory" not in normalized
 
 
 def test_recovery_reuses_root_and_preserves_item_assignment(tmp_path: Path) -> None:
@@ -420,13 +469,7 @@ def test_exhausted_retry_does_not_start_another_worker(tmp_path: Path) -> None:
 
 
 def test_recovery_can_repair_only_the_invalid_shard(tmp_path: Path) -> None:
-    source = _write_context(
-        tmp_path,
-        ("one", "one", "personal"),
-        ("two", "two", "personal"),
-    )
-    (source / "one/activity.md").write_bytes(b"x" * 40000)
-    (source / "two/activity.md").write_bytes(b"x" * 40000)
+    source = large_two_item_context(tmp_path)
     output = tmp_path / "summary"
     runner = FakeRunner(
         tmp_path / ".unused",

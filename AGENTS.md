@@ -35,9 +35,8 @@ only what that consumer needs to use Tracebase correctly:
 
 Prefer the weakest sufficient contract. If a consumer can discover a value from
 its actual input, tell it to use that value instead of explaining how the value
-was generated. For example, derive Context item roots from `index.md`; do not
-teach the Summarizer how those roots are numbered, encoded, sorted, or tied to
-archive identity.
+was generated. Use the authoritative value already exposed to the consumer
+instead of teaching the consumer how that value was generated.
 
 Do not propagate implementation changes into every documentation or prompt
 layer. For each affected layer, ask whether its observable contract changed

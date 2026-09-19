@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,10 @@ if __package__ in {None, ""}:
         item_readable_sizes,
         load_context_inventory,
     )
-    from tracebase.summary_planner import SHARD_POLICY  # type: ignore[import-untyped]
+    from tracebase.summary_planner import (  # type: ignore[import-untyped]
+        SHARD_POLICY,
+        PlannedShard,
+    )
 else:
     from .context_inventory import (
         ContextInventory,
@@ -26,7 +28,7 @@ else:
         item_readable_sizes,
         load_context_inventory,
     )
-    from .summary_planner import SHARD_POLICY
+    from .summary_planner import SHARD_POLICY, PlannedShard
 
 _STATUS_BLOCK = re.compile(
     r"<!--\s*SHARD_STATUS_BEGIN\s*-->(.*?)<!--\s*SHARD_STATUS_END\s*-->",
@@ -127,7 +129,7 @@ def _validate_common(
     context_dir: Path | None,
     *,
     pre_dispatch: bool,
-    expected_items: Mapping[str, tuple[str, ...]] | None = None,
+    expected_plan: tuple[PlannedShard, ...] | None = None,
 ) -> _CommonValidation:
     notes_path = work_dir / "NOTES.md"
     try:
@@ -161,7 +163,13 @@ def _validate_common(
             errors.append("non-empty Context has no declared shards")
 
     seen_shard_ids: set[str] = set()
+    actual_shard_ids: list[str] = []
     memberships: dict[str, list[str]] = {item: [] for item in context_items}
+    expected_by_id = (
+        {shard.id: shard for shard in expected_plan}
+        if expected_plan is not None
+        else {}
+    )
     for shard in data["shards"]:
         if not isinstance(shard, dict):
             errors.append("each shard status must be an object")
@@ -175,9 +183,10 @@ def _validate_common(
             errors.append(f"shard {shard_id!r} is declared more than once")
             continue
         seen_shard_ids.add(shard_id)
+        actual_shard_ids.append(shard_id)
 
-        if expected_items is not None:
-            expected = expected_items.get(shard_id)
+        if expected_plan is not None:
+            expected = expected_by_id.get(shard_id)
             if expected is None:
                 errors.append(f"shard {shard_id!r} was not in the host-generated plan")
             else:
@@ -185,7 +194,7 @@ def _validate_common(
                 actual_items = (
                     tuple(declared_items) if isinstance(declared_items, list) else ()
                 )
-                if actual_items != expected:
+                if actual_items != expected.items:
                     errors.append(
                         f"shard {shard_id!r} changed its host-assigned item list"
                     )
@@ -290,8 +299,17 @@ def _validate_common(
                     f"Context item {item!r} is covered by multiple shards: "
                     + ", ".join(owners)
                 )
-    if expected_items is not None:
-        missing = set(expected_items) - seen_shard_ids
+    if expected_plan is not None:
+        expected_shard_ids = tuple(shard.id for shard in expected_plan)
+        if len(data["shards"]) != len(expected_plan):
+            errors.append(
+                "SHARD_STATUS.shards count differs from the host-generated plan"
+            )
+        if tuple(actual_shard_ids) != expected_shard_ids:
+            errors.append(
+                "SHARD_STATUS.shards order differs from the host-generated plan"
+            )
+        missing = set(expected_shard_ids) - seen_shard_ids
         errors.extend(
             f"host-generated shard {shard_id!r} is missing"
             for shard_id in sorted(missing)
@@ -310,7 +328,7 @@ def inspect_shards(
     work_dir: Path,
     context_dir: Path | None = None,
     *,
-    expected_items: Mapping[str, tuple[str, ...]] | None = None,
+    expected_plan: tuple[PlannedShard, ...] | None = None,
 ) -> ShardObservability:
     """Validate terminal shard state, coverage, and non-empty reports."""
     return ShardObservability(
@@ -318,7 +336,7 @@ def inspect_shards(
             work_dir,
             context_dir,
             pre_dispatch=False,
-            expected_items=expected_items,
+            expected_plan=expected_plan,
         ).errors
     )
 
