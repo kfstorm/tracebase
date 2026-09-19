@@ -200,6 +200,13 @@ non-work content into the final Summary.
 
 Maintain the existing host-created `SHARD_STATUS` block in `/work/NOTES.md`.
 Modify only `status` and `retry_count`.
+The host-created status for every shard is exactly `pending`, with
+`retry_count` exactly `0`. After a valid completed report is verified, set that
+shard's `status` exactly to `complete`. If the single allowed retry is exhausted
+without a valid report, set that shard's `status` exactly to `failed`. Keep
+`retry_count` at exactly `0` when no retry was used, and set it to exactly `1`
+when the single retry was used. Do not use `completed`, `done`, `error`, or any
+other synonym for these status values.
 
 ### Worker Relevance Contract
 
