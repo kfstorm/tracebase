@@ -156,26 +156,16 @@ shard membership.
 
 Tracebase has already measured the readable files, created `/work/shards/`,
 written `/work/NOTES.md`, and validated the complete pending shard inventory.
-The inventory is an exact disjoint partition and its item assignments are
-frozen before dispatch. Shard planning uses only the directory tree implied by
-the exact item roots. An intact subtree is packable only when its total readable
-bytes are at most 64 KiB and its item count is at most 8. Fitting sibling
-subtrees may be greedily packed together, including across sources. If a
-subtree must be split, recursively split only within that subtree and keep all
-shards produced from it isolated from content outside it. A single item larger
-than 64 KiB remains an oversized singleton. Sharing a shard does not establish
-a semantic, causal, project, repository, conversation, or workstream
-relationship; shard boundaries are execution-only.
-The host-created inventory is a complete disjoint partition: every Context item
-belongs to exactly one shard and no item belongs to two shards.
+The complete plan is frozen before dispatch. Shard membership is an
+execution-only partition and carries no semantic, causal, project, repository,
+conversation, or workstream meaning.
 
-The root model must not create, split, merge, rename, remove, or change the
-`items` of any shard. Do not calculate file sizes, inspect substantive item
-files for planning, infer semantic relationships, or repair planning errors. Do not run
-a pre-dispatch plan validator. Dispatch exactly the host-created shards and
-preserve each exact assigned item list in every worker task. Host-side
-reconciliation may detect assignment corruption, but the root must never repair
-it by changing membership.
+Preserve every host-assigned shard ID, exact `items` list, and report path. Do
+not re-plan, split, merge, rename, remove, or otherwise change shard
+membership. Dispatch exactly the host-created shards and preserve each exact
+assigned item list in every worker task. Host-side reconciliation may detect
+assignment corruption, but the root must never repair it by changing
+membership.
 
 For each shard, preserve the complete assigned Context evidence, apply
 attribution annotations where Context provides them, and make a separate

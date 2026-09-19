@@ -84,6 +84,7 @@ def _fits(unit: _PlanningUnit, policy: ShardPolicy) -> bool:
 def _pack(
     units: tuple[_PlanningUnit, ...], policy: ShardPolicy
 ) -> tuple[_PlanningUnit, ...]:
+    """Pack fitting units in deterministic inventory order."""
     packed: list[_PlanningUnit] = []
     current: list[str] = []
     current_bytes = 0
@@ -140,7 +141,11 @@ def _plan_node(
 def plan_shards(
     context_dir: Path, policy: ShardPolicy = SHARD_POLICY
 ) -> tuple[PlannedShard, ...]:
-    """Create a stable shard partition from the exact Context directory tree."""
+    """Create a deterministic tree partition with inventory-ordered units.
+
+    Intact siblings may be packed around isolated overflow units, so the
+    flattened shard sequence need not reproduce the global inventory order.
+    """
     try:
         inventory = load_context_inventory(context_dir)
         sizes = item_readable_sizes(context_dir, inventory)

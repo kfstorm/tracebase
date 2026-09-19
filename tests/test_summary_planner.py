@@ -139,6 +139,28 @@ def test_overflowing_subtree_is_isolated_from_intact_siblings(tmp_path: Path) ->
     ]
 
 
+def test_intact_siblings_may_pack_around_isolated_overflow_units(
+    tmp_path: Path,
+) -> None:
+    context = _context(
+        tmp_path,
+        [
+            ("a", "personal", 20_000),
+            ("b/item-1", "personal", 40_000),
+            ("b/item-2", "personal", 40_000),
+            ("c", "personal", 20_000),
+        ],
+    )
+
+    plan = plan_shards(context)
+
+    assert [shard.items for shard in plan] == [
+        ("a", "c"),
+        ("b/item-1",),
+        ("b/item-2",),
+    ]
+
+
 def test_overflowing_project_subtree_does_not_use_sibling_capacity(
     tmp_path: Path,
 ) -> None:
