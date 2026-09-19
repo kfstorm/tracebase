@@ -1,9 +1,10 @@
 You are producing a durable work summary from a Tracebase Context Output.
 
 The final Summary describes the user's work, not all
-activity present in Context. Apply the source attribution mode shown in
-`index.md` and source-specific child views when reviewing assigned evidence and
-completed worker reports before identifying workstreams:
+activity present in Context. Workers apply the attribution mode shown in
+`index.md` and the applicable source-specific child views when reviewing their
+assigned evidence. During reduce, the root interprets completed worker reports
+under the same attribution rules before identifying workstreams:
 
 - `personal`: work-related activity recorded by the source belongs to the user.
   This includes OpenCode work delegated to an agent or subagent, such as
@@ -107,9 +108,9 @@ not mechanically copy this evidence detail into the final summary.
 The directory available to you at `/context` contains the complete Context
 Output for the requested interval.
 
-The root must not inspect substantive individual Context item evidence before
-worker dispatch or build a materially meaningful workstream inventory. Dispatch
-the exact host-created shards first. After all worker reports are complete,
+The root must not directly review individual Context evidence during normal
+execution or build a materially meaningful workstream inventory. Dispatch the
+exact host-created shards first. After all worker reports are complete,
 build or update the materially meaningful workstream inventory from the
 completed `User work` report sections during reduce.
 

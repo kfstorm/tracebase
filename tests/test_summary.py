@@ -383,12 +383,19 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
         assert clause in normalized
     assert "For `actor_scoped`, follow the explicit `[User work]`" in normalized
     assert (
+        "Workers apply the attribution mode shown in `index.md` and the applicable "
+        "source-specific child views when reviewing their assigned evidence"
+    ) in normalized
+    assert (
+        "During reduce, the root interprets completed worker reports under the same "
+        "attribution rules before identifying workstreams"
+    ) in normalized
+    assert (
         "The root must read `/work/TASK.md`, `/work/NOTES.md`, `/context/index.md`, "
         "and the existing host-created shard plan/status"
     ) in normalized
     assert (
-        "must not inspect substantive individual Context item evidence before "
-        "worker dispatch"
+        "must not directly review individual Context evidence during normal execution"
     ) in normalized
     assert (
         "After all worker reports are complete, build or update the materially "
