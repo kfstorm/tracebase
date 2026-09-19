@@ -714,6 +714,23 @@ def test_cli_rejects_conflicting_inputs(capsys: pytest.CaptureFixture[str]) -> N
     assert "invalid command arguments" in capsys.readouterr().err
 
 
+def test_cli_rejects_empty_archive_value(capsys: pytest.CaptureFixture[str]) -> None:
+    result = cli.main(
+        [
+            "summary",
+            "--archive",
+            "",
+            "--model",
+            "model",
+            "--output",
+            "output",
+        ]
+    )
+
+    assert result == 1
+    assert "requires --from and --to" in capsys.readouterr().err
+
+
 def test_cli_context_mode_dispatches_summary(tmp_path: Path, monkeypatch) -> None:
     source = context(tmp_path)
     output = tmp_path / "output"
