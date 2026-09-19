@@ -598,7 +598,7 @@ def test_chatgpt_non_text_only_conversation_has_no_context_item_or_files(
         path.relative_to(output).as_posix()
         for path in output.rglob("*")
         if path.is_file()
-    } == {"index.md"}
+    } == {"index.md", "index.json"}
 
 
 def test_chatgpt_later_snapshot_supplies_earlier_messages(tmp_path: Path) -> None:

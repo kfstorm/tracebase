@@ -5,9 +5,28 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from tracebase.context_inventory import (  # type: ignore[import-untyped]
+        ContextInventory,
+        ContextInventoryError,
+        item_readable_sizes,
+        load_context_inventory,
+    )
+    from tracebase.summary_planner import SHARD_POLICY  # type: ignore[import-untyped]
+else:
+    from .context_inventory import (
+        ContextInventory,
+        ContextInventoryError,
+        item_readable_sizes,
+        load_context_inventory,
+    )
+    from .summary_planner import SHARD_POLICY
 
 _STATUS_BLOCK = re.compile(
     r"<!--\s*SHARD_STATUS_BEGIN\s*-->(.*?)<!--\s*SHARD_STATUS_END\s*-->",
@@ -18,8 +37,6 @@ _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _USER_WORK_SECTION = "## User work"
 _CONTEXT_ONLY_SECTION = "## Context-only evidence"
 _PLAN_ARGUMENT_COUNT = 3
-_MAX_SHARD_ITEMS = 8
-_MAX_SHARD_BYTES = 262144
 _SHARD_FIELDS = {"id", "items", "status", "retry_count", "report"}
 
 
@@ -45,16 +62,6 @@ def _status_data(notes: str) -> Any:
         raise ValueError("NOTES.md SHARD_STATUS block is not valid JSON") from error
 
 
-def _context_items(index_lines: tuple[str, ...]) -> frozenset[str]:
-    """Return exact item roots exposed by overview links in index.md."""
-    roots: set[str] = set()
-    for line in index_lines:
-        for target in re.findall(r"\]\(([^)]+)\)", line):
-            if target.endswith("/overview.md"):
-                roots.add(target.removesuffix("/overview.md").removeprefix("./"))
-    return frozenset(roots)
-
-
 def _normalized_headings(report: str) -> set[str]:
     headings: set[str] = set()
     fenced = False
@@ -73,34 +80,15 @@ def _normalized_headings(report: str) -> set[str]:
     return headings
 
 
-def _read_context(context_dir: Path) -> tuple[frozenset[str], bool, list[str]]:
+def _read_context(
+    context_dir: Path,
+) -> tuple[ContextInventory | None, bool, list[str]]:
     errors: list[str] = []
     try:
-        index_lines = tuple(
-            (context_dir / "index.md").read_text(encoding="utf-8").splitlines()
-        )
-    except OSError, UnicodeError:
-        return frozenset(), True, ["could not read Context index"]
-    return _context_items(index_lines), False, errors
-
-
-def _context_item_sizes(
-    context_dir: Path, item_roots: frozenset[str]
-) -> tuple[dict[str, int], list[str]]:
-    sizes: dict[str, int] = {}
-    errors: list[str] = []
-    for root in item_roots:
-        item_path = context_dir / root
-        if not item_path.is_dir():
-            sizes[root] = 0
-            continue
-        try:
-            sizes[root] = sum(
-                path.stat().st_size for path in item_path.rglob("*") if path.is_file()
-            )
-        except OSError:
-            errors.append(f"could not measure Context item {root!r}")
-    return sizes, errors
+        inventory = load_context_inventory(context_dir)
+    except ContextInventoryError as error:
+        return None, True, [str(error)]
+    return inventory, False, errors
 
 
 def _validate_items(
@@ -114,9 +102,9 @@ def _validate_items(
     errors: list[str] = []
     if not isinstance(value, list) or not value:
         return [f"shard {shard_id!r} items must be a non-empty list"]
-    if len(value) > _MAX_SHARD_ITEMS:
+    if len(value) > SHARD_POLICY.max_items:
         errors.append(
-            f"shard {shard_id!r} has more than {_MAX_SHARD_ITEMS} Context items"
+            f"shard {shard_id!r} has more than {SHARD_POLICY.max_items} Context items"
         )
     local: set[str] = set()
     for item in value:
@@ -135,7 +123,11 @@ def _validate_items(
 
 
 def _validate_common(
-    work_dir: Path, context_dir: Path | None, *, pre_dispatch: bool
+    work_dir: Path,
+    context_dir: Path | None,
+    *,
+    pre_dispatch: bool,
+    expected_items: Mapping[str, tuple[str, ...]] | None = None,
 ) -> _CommonValidation:
     notes_path = work_dir / "NOTES.md"
     try:
@@ -151,15 +143,20 @@ def _validate_common(
         return _CommonValidation(("SHARD_STATUS.shards must be a list",))
 
     errors: list[str] = []
+    context_inventory: ContextInventory | None = None
     context_items: frozenset[str] = frozenset()
     context_sizes: dict[str, int] = {}
     index_error = False
     if context_dir is not None:
-        context_items, index_error, context_errors = _read_context(context_dir)
+        context_inventory, index_error, context_errors = _read_context(context_dir)
         errors.extend(context_errors)
         if not index_error:
-            context_sizes, size_errors = _context_item_sizes(context_dir, context_items)
-            errors.extend(size_errors)
+            assert context_inventory is not None
+            context_items = frozenset(item.root for item in context_inventory.items)
+            try:
+                context_sizes = item_readable_sizes(context_dir, context_inventory)
+            except ContextInventoryError as error:
+                errors.append(str(error))
         if not index_error and not data["shards"] and context_items:
             errors.append("non-empty Context has no declared shards")
 
@@ -178,6 +175,20 @@ def _validate_common(
             errors.append(f"shard {shard_id!r} is declared more than once")
             continue
         seen_shard_ids.add(shard_id)
+
+        if expected_items is not None:
+            expected = expected_items.get(shard_id)
+            if expected is None:
+                errors.append(f"shard {shard_id!r} was not in the host-generated plan")
+            else:
+                declared_items = shard.get("items")
+                actual_items = (
+                    tuple(declared_items) if isinstance(declared_items, list) else ()
+                )
+                if actual_items != expected:
+                    errors.append(
+                        f"shard {shard_id!r} changed its host-assigned item list"
+                    )
 
         unknown_fields = sorted(set(shard) - _SHARD_FIELDS)
         if unknown_fields:
@@ -203,7 +214,9 @@ def _validate_common(
                 errors.append(f"shard {shard_id!r} retry_count is invalid")
             elif retry_count < 0 or retry_count > 1:
                 errors.append(f"shard {shard_id!r} was retried more than once")
-            if status != "complete":
+            if status == "failed":
+                errors.append(f"shard {shard_id!r} reported failure")
+            elif status != "complete":
                 errors.append(f"shard {shard_id!r} is not in a terminal state")
 
         if context_dir is not None and not index_error:
@@ -236,11 +249,12 @@ def _validate_common(
                 shard_bytes = sum(context_sizes[item] for item in declared_items)
                 oversized_item = (
                     len(declared_items) == 1
-                    and context_sizes[declared_items[0]] > _MAX_SHARD_BYTES
+                    and context_sizes[declared_items[0]] > SHARD_POLICY.max_bytes
                 )
-                if shard_bytes > _MAX_SHARD_BYTES and not oversized_item:
+                if shard_bytes > SHARD_POLICY.max_bytes and not oversized_item:
                     errors.append(
-                        f"shard {shard_id!r} exceeds {_MAX_SHARD_BYTES} readable bytes"
+                        f"shard {shard_id!r} exceeds "
+                        f"{SHARD_POLICY.max_bytes} readable bytes"
                     )
 
         expected_report = f"/work/shards/{shard_id}.md"
@@ -276,6 +290,12 @@ def _validate_common(
                     f"Context item {item!r} is covered by multiple shards: "
                     + ", ".join(owners)
                 )
+    if expected_items is not None:
+        missing = set(expected_items) - seen_shard_ids
+        errors.extend(
+            f"host-generated shard {shard_id!r} is missing"
+            for shard_id in sorted(missing)
+        )
     return _CommonValidation(tuple(errors))
 
 
@@ -287,11 +307,19 @@ def inspect_shard_plan(work_dir: Path, context_dir: Path) -> ShardObservability:
 
 
 def inspect_shards(
-    work_dir: Path, context_dir: Path | None = None
+    work_dir: Path,
+    context_dir: Path | None = None,
+    *,
+    expected_items: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ShardObservability:
     """Validate terminal shard state, coverage, and non-empty reports."""
     return ShardObservability(
-        _validate_common(work_dir, context_dir, pre_dispatch=False).errors
+        _validate_common(
+            work_dir,
+            context_dir,
+            pre_dispatch=False,
+            expected_items=expected_items,
+        ).errors
     )
 
 

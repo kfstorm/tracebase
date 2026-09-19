@@ -19,7 +19,6 @@ class ContainerMounts:
     work: Path
     results: Path
     opencode_data: Path
-    shard_validator: Path
     summary: Path | None = None
     task: Path | None = None
 
@@ -56,8 +55,6 @@ class ContainerRunner:
             f"{mounts.results}:/results:rw",
             "--volume",
             f"{mounts.opencode_data}:/home/eval/.local:rw",
-            "--volume",
-            f"{mounts.shard_validator}:/opt/tracebase/validate-summary-shards.py:ro",
         ]
         if mounts.summary is not None:
             command.extend(["--volume", f"{mounts.summary}:/summary.md:ro"])

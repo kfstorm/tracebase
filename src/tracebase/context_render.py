@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from datetime import datetime
@@ -50,7 +51,7 @@ def _render_index(
     staging: Path,
     result: ContextExtractionResult,
     items: list[tuple[ContextItem, RenderedContextItem]],
-) -> None:
+) -> list[tuple[ContextItem, RenderedContextItem]]:
     lines = [
         "# Context Output",
         "",
@@ -67,6 +68,7 @@ def _render_index(
         ]
         for adapter in CONTEXT_ADAPTERS
     }
+    ordered: list[tuple[ContextItem, RenderedContextItem]] = []
     for adapter_index, adapter in enumerate(CONTEXT_ADAPTERS):
         lines.extend([f"## {adapter.index_section}", ""])
         adapter_items = rendered_by_adapter[adapter]
@@ -85,6 +87,7 @@ def _render_index(
                 grouped.pop(None, []), key=lambda pair: pair[1].index.sort_key
             ):
                 _append_index_item(lines, item, rendered)
+                ordered.append((item, rendered))
             named_groups = [group for group in grouped if group is not None]
             for group in sorted(named_groups):
                 lines.extend([f"### `{group}`", ""])
@@ -92,11 +95,34 @@ def _render_index(
                     grouped[group], key=lambda pair: pair[1].index.sort_key
                 ):
                     _append_index_item(lines, item, rendered)
+                    ordered.append((item, rendered))
                 lines.append("")
         if adapter_index < len(CONTEXT_ADAPTERS) - 1:
             lines.append("")
     lines.append("")
     write_markdown(staging / "index.md", lines)
+    return ordered
+
+
+def _write_inventory(
+    staging: Path, items: list[tuple[ContextItem, RenderedContextItem]]
+) -> None:
+    """Write the authoritative orchestration metadata in human index order."""
+    inventory = {
+        "items": [
+            {
+                "root": item.path,
+                "attribution_mode": item.attribution_mode.value,
+                "group": rendered.index.group,
+                "files": list(rendered.files),
+            }
+            for item, rendered in items
+        ]
+    }
+    (staging / "index.json").write_text(
+        json.dumps(inventory, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _append_index_item(
@@ -142,7 +168,8 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
             for item in result.items:
                 item_rendered = _render_item(staging, item, result)
                 rendered.append((item, item_rendered))
-            _render_index(staging, result, rendered)
+            ordered = _render_index(staging, result, rendered)
+            _write_inventory(staging, ordered)
         except ContextError:
             raise
         except KeyError, TypeError, UnicodeError, ValueError, OSError:

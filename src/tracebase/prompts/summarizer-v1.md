@@ -145,46 +145,30 @@ Conversational Context has these visible activity semantics:
 - A conversation or session appears in Context only when it has at least one
   in-range retained text activity.
 
-After reading `index.md`, build a stable shard inventory before investigating
-individual evidence. The shard inventory covers every Context item listed in
-`index.md`; the separate workstream inventory contains only materially
-meaningful work. Use source-visible metadata in the index and item overviews
-only for initial grouping heuristics: GitHub items from the same visible
-repository may start together, OpenCode sessions with the same visible project
-directory may start together, and each ChatGPT conversation starts as an
-independent unit. These are planning conveniences, not semantic or immutable
-boundaries. Do not infer grouping from undocumented path structure. Do not read
-substantive activity, background, or diff evidence merely to choose shard sizes.
+### Host-created shard plan
 
-Source semantics determine useful initial grouping; generic size-based
-partitioning determines execution shards. Use these centralized execution
-thresholds for every source:
+Tracebase creates the complete shard plan deterministically before this root
+session starts. `/context/index.json` is the authoritative machine-readable
+inventory of exact item roots, attribution modes, natural grouping metadata,
+and expected files. `index.md` remains the human-readable Context index, but it
+must not be parsed to infer shard membership.
 
-- `MAX_SHARD_BYTES = 262144`: the sum of all readable files below assigned item
-  roots, including `overview.md`, `activity.md`, `background.md`, and `diff.patch`.
-- `MAX_SHARD_ITEMS = 8`: the maximum number of Context items in one shard.
-- `TINY_ITEM_BYTES = 16384`: items at or below this size may be packed across
-  initial groups and source types when the generic limits allow it.
+Tracebase has already measured the readable files, created `/work/shards/`,
+written `/work/NOTES.md`, and validated the complete pending shard inventory.
+The inventory is an exact disjoint partition and its item assignments are
+frozen before dispatch. Sharing a shard does not establish a semantic, causal,
+project, conversation, or workstream relationship. Splitting a natural group
+across shards does not establish semantic independence.
+The host-created inventory is a complete disjoint partition: every Context item
+belongs to exactly one shard and no item belongs to two shards.
 
-Keep a reasonably sized initial group together when it fits both limits. Split
-an oversized initial group into explicit item sets in stable `index.md` order.
-An individual item larger than `MAX_SHARD_BYTES` remains alone because a
-Context item is the minimum partition unit. Pack tiny groups and items with a
-deterministic greedy pass in stable index order; a single batch may cross source
-boundaries. Do not use titles, topics, timestamps, or guessed relationships to
-choose batches. Sharing a shard does not establish a semantic, project,
-conversation, causal, or workstream relationship between its Context items.
-Splitting a natural group across shards does not establish semantic
-independence. The reduce phase may merge evidence into one real workstream only
-when the evidence explicitly establishes that relationship.
-
-Parse each Context item root from `/context/index.md` as the directory
-containing its linked `overview.md`. Every shard must list its exact item roots
-in `items`; do not construct identifiers from source path-generation rules. The
-shard inventory must form a complete disjoint partition: every Context item
-listed in `index.md` belongs to exactly one shard, and no item belongs to two
-shards. `items` is the only membership field; a human-friendly shard ID such as
-`misc` has no special validator meaning.
+The root model must not create, split, merge, rename, remove, or change the
+`items` of any shard. Do not calculate file sizes, inspect substantive item
+files for planning, infer natural groups, or repair planning errors. Do not run
+a pre-dispatch plan validator. Dispatch exactly the host-created shards and
+preserve each exact assigned item list in every worker task. Host-side
+reconciliation may detect assignment corruption, but the root must never repair
+it by changing membership.
 
 For each shard, preserve the complete assigned Context evidence, apply
 attribution annotations where Context provides them, and make a separate
@@ -227,10 +211,11 @@ for interpretation, including the reviewed non-work exclusion state, but never
 promote it as a workstream, restate it as the user's work, or leak the concrete
 non-work content into the final Summary.
 
-Create `/work/shards/` and maintain the following machine-readable block in
-`/work/NOTES.md` as the orchestration state. Use safe stable shard IDs and the
-required report path shown below. Update the block after each worker
-returns, after a retry, and before final synthesis:
+Maintain the following machine-readable block in `/work/NOTES.md` as the
+orchestration state. Tracebase has written the complete pending block before
+the root starts. Use the existing safe stable shard IDs and required report
+paths. Update only `status` and `retry_count` after each worker returns, after a
+retry, and before final synthesis:
 
 <!-- SHARD_STATUS_BEGIN -->
 {"shards":[{"id":"example","items":["chatgpt/conversation/01","opencode/example/session/01"],"status":"pending","retry_count":0,"report":"/work/shards/example.md"}]}
@@ -238,10 +223,11 @@ returns, after a retry, and before final synthesis:
 
 The example is a schema, not a required shard. At completion every entry must
 be `complete` or `failed`, `retry_count` must be 0 or 1, and `report` must be
-`/work/shards/<id>.md`. `items` must be a non-empty list of exact Context item
-roots from `index.md`. Attribution modes are derived from the assigned Context
-items and must not be duplicated in this mutable plan. A failed or missing
-report must never be omitted from the status block or the final synthesis.
+`/work/shards/<id>.md`. `items` must remain the non-empty exact Context item
+roots supplied by Tracebase. Attribution modes are derived from the assigned
+Context items and must not be duplicated in this mutable plan. A failed or
+missing report must never be omitted from the status block or the final
+synthesis.
 
 ### Worker Relevance Contract
 
@@ -259,6 +245,18 @@ meaningful work", and do not ask a worker to read the root `TASK.md`.
   is not required.
 - Technical subject matter, complexity, duration, interaction count, or
   troubleshooting depth do not by themselves establish work relevance.
+- For conversational Context, `activity.md` contains the only dialogue eligible
+  to establish requested-interval User work. `background.md` is earlier
+  supporting context only: it may explain motivation, terminology, state,
+  decisions, or other context needed to interpret in-range activity, but it
+  must not independently create requested-interval User work or a requested-
+  interval workstream. Do not copy unrelated background-only work into User
+  work. Any historical PR, commit, implementation, or other work found only in
+  background must be placed in `Context-only evidence` or omitted. If an
+  in-range activity message discusses earlier work, classify the in-range
+  request or analysis as User work and keep the earlier work itself as
+  background context only. Include only the minimum background needed to
+  explain in-range work.
 - Do not invent project or workstream relationships.
 - Non-work personal activity belongs in `Context-only evidence`.
 - For a personal source, a user-initiated work-related request followed by
@@ -277,23 +275,6 @@ meaningful work", and do not ask a worker to read the root `TASK.md`.
 Put all attributed work-related evidence in `## User work`, including work that
 may later be omitted by the root for materiality. Put non-work and
 collaborator/context-only evidence in `## Context-only evidence`.
-
-Before issuing any `task` call, run:
-
-`python3 /opt/tracebase/validate-summary-shards.py plan /work /context`
-
-Do not issue any `task` call unless this command exits successfully. If validation
-fails, use the reported errors to correct the shard inventory in
-`/work/NOTES.md`, then run the same command again. Repeat until validation
-succeeds. Do not work around, replace, or skip this validation.
-
-Run the plan validator only during initial shard planning, before the first task
-call. After worker dispatch begins, never run the plan validator again; use the
-shard status and reports for completion reconciliation.
-
-Once validation succeeds, treat the shard inventory as frozen. Do not add,
-remove, merge, split, rename, or change the item assignment of any shard after
-worker dispatch begins.
 
 For each independent shard, issue one foreground `task` call with the shard ID
 and its exact `items` list in the task prompt. Dispatch all independent

@@ -958,7 +958,7 @@ def test_empty_output_has_only_useful_index_without_front_matter(
     archive.mkdir()
     output = tmp_path / "output"
     generate_context(archive, request(), output)
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
     index = (output / "index.md").read_text()
     assert "Requested interval" in index
     assert "No OpenCode root sessions are available.\n\n## ChatGPT" in index
@@ -1000,7 +1000,7 @@ def test_empty_removed_run_directory_is_tolerated(tmp_path: Path) -> None:
     output = tmp_path / "output"
     generate_context(archive, request(), output)
 
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
 
 
 def test_empty_published_run_without_snapshots_directory_is_tolerated(
@@ -1014,7 +1014,7 @@ def test_empty_published_run_without_snapshots_directory_is_tolerated(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
 
 
 def test_nonempty_unregistered_run_content_fails(tmp_path: Path) -> None:
@@ -1799,7 +1799,7 @@ def test_github_context_without_selected_items_does_not_require_profile(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
 
 
 def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
@@ -2450,7 +2450,7 @@ def test_opencode_non_text_selection_has_local_context_limitation(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
     assert not list(output.rglob("activity.md"))
     assert "## Gaps" not in (output / "index.md").read_text()
 
@@ -2996,7 +2996,7 @@ def test_opencode_in_range_tool_keeps_earlier_text_in_background(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert files(output) == {"index.md"}
+    assert files(output) == {"index.md", "index.json"}
 
 
 def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:
@@ -3424,9 +3424,14 @@ def test_personal_opencode_delegated_work_is_user_work_and_exposes_mode(
     generate_context(archive.root, request(), output)
 
     index = (output / "index.md").read_text()
+    inventory = json.loads((output / "index.json").read_text())
     overview = text(output, "overview.md")
     activity = text(output, "activity.md")
     assert "attribution mode: `personal`" in index
+    assert inventory["items"][0]["root"] == "opencode/workspace/example/session/01"
+    assert inventory["items"][0]["attribution_mode"] == "personal"
+    assert inventory["items"][0]["group"] == "/workspace/example"
+    assert inventory["items"][0]["files"] == ["overview.md", "activity.md"]
     assert "- Attribution mode: `personal`" in overview
     assert "Attribution mode: `personal`" in activity
     assert "delegated agent or subagent" in overview
