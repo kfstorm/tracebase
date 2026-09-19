@@ -1122,6 +1122,118 @@ def test_github_index_preserves_logical_key_order(tmp_path: Path) -> None:
     ]
 
 
+def test_github_pr_overview_uses_issue_labels_and_pull_request_state(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "issue.json": {
+                **github_base(),
+                "state": "closed",
+                "labels": [{"name": "zeta"}, {"name": "alpha"}],
+            },
+            "pull-request.json": {
+                "node_id": "PR_1",
+                "merged": True,
+                "merged_at": "2026-01-01T02:34:56Z",
+                "draft": False,
+            },
+        },
+    )
+
+    overview = text(output, "overview.md")
+
+    assert "- State: merged" in overview
+    assert "- Merged at: 2026-01-01 10:34" in overview
+    assert "- Labels: alpha, zeta" in overview
+    assert "- Merged:" not in overview
+
+
+def test_github_non_merged_closed_pr_remains_closed(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "issue.json": {**github_base(), "state": "closed"},
+            "pull-request.json": {
+                "node_id": "PR_1",
+                "merged": False,
+                "draft": True,
+            },
+        },
+    )
+
+    overview = text(output, "overview.md")
+
+    assert "- State: closed" in overview
+    assert "- Merged at:" not in overview
+    assert "- Draft: true" in overview
+
+
+def test_github_convert_to_draft_timeline_event_is_rendered(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "timeline.001.json": [
+                {
+                    "id": 1,
+                    "event": "convert_to_draft",
+                    "actor": {"login": "author"},
+                    "created_at": "2026-01-01T01:00:00Z",
+                }
+            ]
+        },
+    )
+
+    activity = text(output, "activity.md")
+
+    assert "Convert to draft by @author" in activity
+
+
+def test_github_activity_and_background_keep_existing_buckets(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    output = github_output(
+        archive,
+        tmp_path,
+        {
+            "comments.001.json": [
+                {
+                    "id": 1,
+                    "body": "earlier context",
+                    "user": {"login": "collaborator"},
+                    "created_at": "2025-12-31T15:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "body": "current activity",
+                    "user": {"login": "collaborator"},
+                    "created_at": "2026-01-01T01:00:00Z",
+                },
+            ]
+        },
+    )
+
+    activity = text(output, "activity.md")
+    background = text(output, "background.md")
+
+    assert "current activity" in activity
+    assert "earlier context" not in activity
+    assert "earlier context" in background
+    assert "current activity" not in background
+
+
 def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()

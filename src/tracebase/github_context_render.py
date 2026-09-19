@@ -207,7 +207,7 @@ def _timeline_event_label(
         "reopened",
         "merged",
         "ready_for_review",
-        "converted_to_draft",
+        "convert_to_draft",
         "head_ref_force_pushed",
         "head_ref_restored",
         "base_ref_changed",
@@ -745,14 +745,31 @@ def _overview(
         ),
         None,
     )
-    value = _representation_value(object_record) if object_record is not None else None
-    value = value if isinstance(value, dict) else {}
-    kind = (
-        "PR"
-        if any(record.get("kind") == "pull-request" for record in projection.records)
-        else "Issue"
+    issue_value = (
+        _representation_value(object_record) if object_record is not None else None
     )
-    title = value.get("title") or projection.title or "Untitled"
+    issue_value = issue_value if isinstance(issue_value, dict) else {}
+    is_pull_request = any(
+        record.get("kind") == "pull-request" for record in projection.records
+    )
+    pull_request_record = next(
+        (
+            record
+            for record in projection.records
+            if record.get("kind") == "pull-request-payload"
+        ),
+        None,
+    )
+    pull_request_value = (
+        _representation_value(pull_request_record)
+        if pull_request_record is not None
+        else None
+    )
+    pull_request_value = (
+        pull_request_value if isinstance(pull_request_value, dict) else {}
+    )
+    kind = "PR" if is_pull_request else "Issue"
+    title = issue_value.get("title") or projection.title or "Untitled"
     lines = [f"# {projection.repository} {kind} #{projection.number} — {title}", ""]
     lines.extend(
         [
@@ -767,17 +784,40 @@ def _overview(
             "",
         ]
     )
-    author = github_actor_login(value)
+    author = github_actor_login(issue_value)
     if author:
-        lines.append(f"- Author: {_actor_label(value, projection.tracked_login)}")
+        lines.append(f"- Author: {_actor_label(issue_value, projection.tracked_login)}")
     lines.append(f"- Type: {'Pull request' if kind == 'PR' else 'Issue'}")
-    for label, key in (("State", "state"), ("Merged", "merged"), ("Draft", "draft")):
-        if isinstance(value.get(key), (str, bool)):
-            rendered = (
-                str(value[key]).lower() if isinstance(value[key], bool) else value[key]
-            )
-            lines.append(f"- {label}: {rendered}")
-    body = value.get("body")
+    state = issue_value.get("state")
+    is_merged = is_pull_request and pull_request_value.get("merged") is True
+    if is_merged:
+        state = "merged"
+    if isinstance(state, str):
+        lines.append(f"- State: {state}")
+    if is_merged:
+        merged_at = format_timestamp(
+            pull_request_value.get("merged_at"), result.request.start.tzinfo
+        )
+        if merged_at is not None:
+            lines.append(f"- Merged at: {merged_at}")
+    labels = sorted(
+        {
+            label["name"]
+            for label in issue_value.get("labels", [])
+            if isinstance(label, dict)
+            and isinstance(label.get("name"), str)
+            and label["name"]
+        },
+        key=lambda label: (label.casefold(), label),
+    )
+    if labels:
+        lines.append(f"- Labels: {', '.join(labels)}")
+    draft = (
+        pull_request_value.get("draft") if is_pull_request else issue_value.get("draft")
+    )
+    if isinstance(draft, bool):
+        lines.append(f"- Draft: {str(draft).lower()}")
+    body = issue_value.get("body")
     if isinstance(body, str) and body:
         lines.extend(["", "## Description", "", body, ""])
     if _selected_observation_is_after_request_end(item, result):
