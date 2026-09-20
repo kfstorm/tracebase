@@ -42,7 +42,6 @@ _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _USER_WORK_SECTION = "## User work"
 _CONTEXT_ONLY_SECTION = "## Context-only evidence"
 _PLAN_ARGUMENT_COUNT = 3
-_REPORT_HEADING_COUNT = 2
 _STATUS_FIELDS = {"status", "retry_count"}
 
 
@@ -149,7 +148,7 @@ def _validate_report(work_dir: Path, shard_id: str) -> list[str]:
         _CONTEXT_ONLY_SECTION.casefold()[3:],
     }
     headings = _normalized_headings(report)
-    if len(headings) != _REPORT_HEADING_COUNT or set(headings) != required:
+    if not required.issubset(headings):
         return [
             f"shard {shard_id!r} report does not separate user work from "
             "context-only evidence"

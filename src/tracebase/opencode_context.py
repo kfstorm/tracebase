@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
-from .attribution import source_attribution_mode
+from .attribution import CONVERSATIONAL_ATTRIBUTION_POLICY
 from .context_adapter import (
     ContextOrdering,
     RenderedContextItem,
@@ -301,7 +301,7 @@ def _session_sort_key(item: ContextItem) -> tuple[datetime, str, str]:
 class OpenCodeContextAdapter:
     source_kind = "opencode"
     object_kinds = frozenset({"session"})
-    attribution_mode = source_attribution_mode("opencode")
+    attribution_policy = CONVERSATIONAL_ATTRIBUTION_POLICY
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime

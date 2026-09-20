@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from .archive import PublishedRun, PublishedSnapshot
-from .attribution import AttributionMode
+from .attribution import AttributionPolicy
 
 if TYPE_CHECKING:
     from .context import ContextExtractionResult, ContextItem
@@ -37,7 +37,7 @@ class ContextAdapter(Protocol):
 
     source_kind: str
     object_kinds: frozenset[str]
-    attribution_mode: AttributionMode
+    attribution_policy: AttributionPolicy
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime

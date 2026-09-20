@@ -16,12 +16,12 @@ from tracebase.summary_shard_validator import inspect_shard_plan
 
 def _context(
     tmp_path: Path,
-    items: list[tuple[str, str, int]],
+    items: list[tuple[str, int]],
 ) -> Path:
     context = tmp_path / "context"
     context.mkdir()
     inventory = []
-    for root, _mode, payload_size in items:
+    for root, payload_size in items:
         item_root = context.joinpath(*root.split("/"))
         item_root.mkdir(parents=True)
         (item_root / "overview.md").write_text(root, encoding="utf-8")
@@ -64,8 +64,8 @@ def test_inventory_preserves_order_without_extra_metadata(tmp_path: Path) -> Non
     context = _context(
         tmp_path,
         [
-            ("synthetic/source/item-a", "personal", 0),
-            ("future/source/item-b", "actor_scoped", 0),
+            ("synthetic/source/item-a", 0),
+            ("future/source/item-b", 0),
         ],
     )
 
@@ -90,7 +90,7 @@ def test_inventory_preserves_order_without_extra_metadata(tmp_path: Path) -> Non
 def test_inventory_rejects_duplicate_missing_or_malformed_items(
     tmp_path: Path, mutate
 ) -> None:
-    context = _context(tmp_path, [("one", "personal", 0)])
+    context = _context(tmp_path, [("one", 0)])
     inventory_path = context / "index.json"
     value = json.loads(inventory_path.read_text(encoding="utf-8"))
     mutate(value)
@@ -103,7 +103,7 @@ def test_inventory_rejects_duplicate_missing_or_malformed_items(
 def test_inventory_rejects_overlapping_item_roots(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
-        [("project", "personal", 0), ("project/item", "personal", 0)],
+        [("project", 0), ("project/item", 0)],
     )
 
     with pytest.raises(ContextInventoryError, match="overlaps"):
@@ -113,7 +113,7 @@ def test_inventory_rejects_overlapping_item_roots(tmp_path: Path) -> None:
 def test_inventory_missing_item_directory_is_not_measured_as_zero(
     tmp_path: Path,
 ) -> None:
-    context = _context(tmp_path, [("one", "personal", 0)])
+    context = _context(tmp_path, [("one", 0)])
     shutil.rmtree(context / "one")
 
     with pytest.raises(ContextInventoryError, match="directory"):
@@ -121,7 +121,7 @@ def test_inventory_missing_item_directory_is_not_measured_as_zero(
 
 
 def test_inventory_rejects_legacy_index_markdown(tmp_path: Path) -> None:
-    context = _context(tmp_path, [("one", "personal", 0)])
+    context = _context(tmp_path, [("one", 0)])
     (context / "index.md").write_text("legacy", encoding="utf-8")
 
     with pytest.raises(ContextInventoryError, match=r"index\.md"):
@@ -132,9 +132,9 @@ def test_intact_small_subtrees_pack_across_sources(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
         [
-            ("github/item", "actor_scoped", 20_000),
-            ("opencode/item", "personal", 25_000),
-            ("chatgpt/item", "personal", 15_000),
+            ("github/item", 20_000),
+            ("opencode/item", 25_000),
+            ("chatgpt/item", 15_000),
         ],
     )
 
@@ -150,9 +150,9 @@ def test_overflowing_subtree_is_isolated_from_intact_siblings(tmp_path: Path) ->
     context = _context(
         tmp_path,
         [
-            ("github/repo/item-a", "actor_scoped", 90_000),
-            ("opencode/item", "personal", 30_000),
-            ("chatgpt/item", "personal", 20_000),
+            ("github/repo/item-a", 90_000),
+            ("opencode/item", 30_000),
+            ("chatgpt/item", 20_000),
         ],
     )
 
@@ -170,10 +170,10 @@ def test_intact_siblings_may_pack_around_isolated_overflow_units(
     context = _context(
         tmp_path,
         [
-            ("a", "personal", 20_000),
-            ("b/item-1", "personal", 40_000),
-            ("b/item-2", "personal", 40_000),
-            ("c", "personal", 20_000),
+            ("a", 20_000),
+            ("b/item-1", 40_000),
+            ("b/item-2", 40_000),
+            ("c", 20_000),
         ],
     )
 
@@ -192,12 +192,12 @@ def test_packed_items_follow_interleaved_inventory_order(
     context = _context(
         tmp_path,
         [
-            ("a/item-1", "personal", 10_000),
-            ("b/item-1", "personal", 40_000),
-            ("c/item-1", "personal", 10_000),
-            ("a/item-2", "personal", 10_000),
-            ("b/item-2", "personal", 40_000),
-            ("c/item-2", "personal", 10_000),
+            ("a/item-1", 10_000),
+            ("b/item-1", 40_000),
+            ("c/item-1", 10_000),
+            ("a/item-2", 10_000),
+            ("b/item-2", 40_000),
+            ("c/item-2", 10_000),
         ],
     )
 
@@ -216,9 +216,9 @@ def test_overflowing_project_subtree_does_not_use_sibling_capacity(
     context = _context(
         tmp_path,
         [
-            ("github/project/item-a", "actor_scoped", 40_000),
-            ("github/project/item-b", "actor_scoped", 40_000),
-            ("other/item", "personal", 20_000),
+            ("github/project/item-a", 40_000),
+            ("github/project/item-b", 40_000),
+            ("other/item", 20_000),
         ],
     )
 
@@ -234,7 +234,7 @@ def test_overflowing_project_subtree_does_not_use_sibling_capacity(
 def test_item_count_triggers_recursive_splitting(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
-        [(f"project/item-{index}", "personal", 1) for index in range(9)],
+        [(f"project/item-{index}", 1) for index in range(9)],
     )
 
     plan = plan_shards(context)
@@ -246,7 +246,7 @@ def test_item_count_triggers_recursive_splitting(tmp_path: Path) -> None:
 
 
 def test_oversized_item_remains_alone(tmp_path: Path) -> None:
-    context = _context(tmp_path, [("one", "personal", 200)])
+    context = _context(tmp_path, [("one", 200)])
 
     plan = plan_shards(context, ShardPolicy(max_bytes=100, max_items=8))
 
@@ -259,7 +259,7 @@ def test_item_limit_is_enforced_without_splitting_a_valid_item(
 ) -> None:
     context = _context(
         tmp_path,
-        [(f"item-{index}", "personal", 1) for index in range(3)],
+        [(f"item-{index}", 1) for index in range(3)],
     )
 
     plan = plan_shards(context, ShardPolicy(max_bytes=100_000, max_items=2))
@@ -274,8 +274,8 @@ def test_stable_input_produces_stable_plan(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
         [
-            ("source-z/opaque-1", "personal", 9000),
-            ("source-a/opaque-2", "personal", 9000),
+            ("source-z/opaque-1", 9000),
+            ("source-a/opaque-2", 9000),
         ],
     )
 
@@ -291,7 +291,7 @@ def test_initial_plan_materializes_self_contained_worker_packages(
 ) -> None:
     context = _context(
         tmp_path,
-        [("one", "personal", 0), ("two", "personal", 0)],
+        [("one", 0), ("two", 0)],
     )
     work = tmp_path / "work"
     plan = plan_shards(context)

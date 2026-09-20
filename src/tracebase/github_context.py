@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
-from .attribution import source_attribution_mode
+from .attribution import ACTOR_SCOPED_ATTRIBUTION_POLICY
 from .context_adapter import (
     ContextOrdering,
     RenderedContextItem,
@@ -620,7 +620,7 @@ def _github_path(projection: GitHubProjection) -> str:
 class GitHubContextAdapter:
     source_kind = "github"
     object_kinds = frozenset({"issue", "pull-request"})
-    attribution_mode = source_attribution_mode("github")
+    attribution_policy = ACTOR_SCOPED_ATTRIBUTION_POLICY
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime

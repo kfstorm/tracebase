@@ -21,8 +21,7 @@ def render_chatgpt(
         "",
         "## Attribution",
         "",
-        "- Work-related conversational activity, including delegated cognitive "
-        "work, is user work; non-work activity is context-only.",
+        f"- {item.adapter.attribution_policy.context_guidance}",
         "- This is the provider-returned observed current conversation stream; "
         "historical branch versions are not reconstructed.",
         "",

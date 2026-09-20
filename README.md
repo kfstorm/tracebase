@@ -18,7 +18,7 @@ Tracebase preserves private work evidence in a replayable local archive, generat
 - **ChatGPT collection:** Archive ordinary personal conversations from an authenticated ChatGPT web session.
 - **Explicit coverage:** Record time ranges and source boundaries, retain successful empty runs, and reject overlapping published ranges for the same logical source.
 - **Offline context:** Generate a disposable, browsable directory from archived evidence without querying the sources again.
-- **Explicit attribution:** Context records whether each source is `personal` or `actor_scoped` for Summary generation.
+- **Explicit attribution:** Context explains how conversational work is attributed and marks applicable records as `[User work]` or `[Context only]`.
 - **Work summaries:** Run the production Summarizer against an archive or existing Context Output and publish a validated Markdown summary with provenance.
 
 Coverage records what the collector observed, not a guarantee of complete historical account activity. Tracebase preserves evidence; it does not generate long-term AI memory.

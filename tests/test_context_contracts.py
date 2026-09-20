@@ -18,9 +18,8 @@ from tracebase.archive import (
     encode_path_id,
 )
 from tracebase.attribution import (
-    AttributionError,
-    AttributionMode,
-    source_attribution_mode,
+    ACTOR_SCOPED_ATTRIBUTION_POLICY,
+    CONVERSATIONAL_ATTRIBUTION_POLICY,
 )
 from tracebase.context import (
     ContextError,
@@ -31,6 +30,7 @@ from tracebase.context import (
     select_observation,
 )
 from tracebase.context_adapter import ContextOrdering, RenderedContextItem
+from tracebase.context_adapters import adapter_for
 from tracebase.github_context import GitHubProjection, github_user_work_record_ids
 from tracebase.opencode_context import OpenCodeProjection
 
@@ -814,14 +814,14 @@ def test_context_projects_chatgpt_alongside_other_sources(
         "chatgpt",
     }
     assert {
-        item.snapshot.manifest["source_kind"]: item.attribution_mode
+        item.snapshot.manifest["source_kind"]: item.adapter.attribution_policy
         for item in result.items
     } == {
-        "github": AttributionMode.ACTOR_SCOPED,
-        "opencode": AttributionMode.PERSONAL,
-        "chatgpt": AttributionMode.PERSONAL,
+        "github": ACTOR_SCOPED_ATTRIBUTION_POLICY,
+        "opencode": CONVERSATIONAL_ATTRIBUTION_POLICY,
+        "chatgpt": CONVERSATIONAL_ATTRIBUTION_POLICY,
     }
-    assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
+    assert all(not hasattr(item, "attribution_mode") for item in result.items)
     assert "github/example/project/pull/1/overview.md" in files(output)
     assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
         output
@@ -927,7 +927,7 @@ def test_context_extraction_delegates_projection_to_an_adapter(
     class FourthSourceAdapter:
         source_kind = "fourth-source"
         object_kinds = frozenset({"record"})
-        attribution_mode = AttributionMode.PERSONAL
+        attribution_policy = CONVERSATIONAL_ATTRIBUTION_POLICY
 
         def project(self, snapshot: object, start: datetime, end: datetime) -> object:
             assert start < end
@@ -3485,15 +3485,18 @@ def test_context_generation_is_offline(
     generate_context(archive, request(), tmp_path / "output")
 
 
-def test_source_attribution_mapping_is_explicit_and_rejects_unknown_kinds() -> None:
-    assert source_attribution_mode("opencode") is AttributionMode.PERSONAL
-    assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
-    assert source_attribution_mode("github") is AttributionMode.ACTOR_SCOPED
-    with pytest.raises(AttributionError, match="no attribution semantics"):
-        source_attribution_mode("future-source")
+def test_context_adapters_declare_attribution_policies() -> None:
+    assert (
+        adapter_for("opencode").attribution_policy is CONVERSATIONAL_ATTRIBUTION_POLICY
+    )
+    assert (
+        adapter_for("chatgpt").attribution_policy is CONVERSATIONAL_ATTRIBUTION_POLICY
+    )
+    assert adapter_for("github").attribution_policy is ACTOR_SCOPED_ATTRIBUTION_POLICY
+    assert adapter_for("future-source") is None
 
 
-def test_personal_opencode_delegated_work_is_user_work_and_exposes_mode(
+def test_conversational_opencode_delegated_work_is_user_work(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -3537,14 +3540,15 @@ def test_personal_opencode_delegated_work_is_user_work_and_exposes_mode(
         "files",
     }
     assert inventory["items"][0]["files"] == ["overview.md", "activity.md"]
-    assert "Attribution mode" not in overview
-    assert "Attribution mode" not in activity
-    assert "delegated agent or subagent" in overview
+    assert CONVERSATIONAL_ATTRIBUTION_POLICY.context_guidance in overview
+    assert "CONVERSATIONAL_ATTRIBUTION_POLICY" not in overview
+    assert "CONVERSATIONAL_ATTRIBUTION_POLICY" not in activity
+    assert "delegated cognitive work" in overview
     assert "Delegated investigation and implementation" in activity
     assert "Tests and validation complete" in activity
 
 
-def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
+def test_tracked_account_collaboration_separates_user_work_from_collaborators(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -3624,11 +3628,13 @@ def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
     )
 
     activity = text(output, "activity.md")
-    assert "Only records explicitly marked [User work]" in text(output, "overview.md")
+    assert ACTOR_SCOPED_ATTRIBUTION_POLICY.context_guidance in text(
+        output, "overview.md"
+    )
     assert activity.count("## Commits") == 1
     assert "## User work" not in activity
     assert "## Context-only evidence" not in activity
-    assert "Attribution mode" not in activity
+    assert "ACTOR_SCOPED_ATTRIBUTION_POLICY" not in activity
     assert activity.index("tracked concern") < activity.index("other finding")
     assert activity.index("approved after review") < activity.index("separate finding")
     assert activity.index("Collaborator implementation") < activity.index(
@@ -3650,7 +3656,7 @@ def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
     assert ("timeline", "COLLAB_COMMIT") not in ids
 
 
-def test_actor_scoped_item_with_only_collaborator_activity_is_context_only(
+def test_tracked_item_with_only_collaborator_activity_is_context_only(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -3694,7 +3700,7 @@ def test_actor_scoped_item_with_only_collaborator_activity_is_context_only(
     assert "[Context only]" in activity
 
 
-def test_mixed_sources_keep_personal_work_and_tracked_actions_only(
+def test_mixed_sources_keep_conversational_work_and_tracked_actions_only(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -3741,8 +3747,6 @@ def test_mixed_sources_keep_personal_work_and_tracked_actions_only(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    inventory = json.loads((output / "index.json").read_text())
-    assert all("attribution_mode" not in item for item in inventory["items"])
     activity_files = {path.read_text() for path in output.rglob("activity.md")}
     assert any("Delegated design decision" in content for content in activity_files)
     github_activity = next(

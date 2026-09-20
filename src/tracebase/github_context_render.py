@@ -772,8 +772,7 @@ def _overview(
             "## Tracked account",
             "",
             f"- GitHub: @{projection.tracked_login or 'unknown'}",
-            "- Only records explicitly marked [User work] are attributable user "
-            "work; [Context only] remains context-only.",
+            f"- {item.adapter.attribution_policy.context_guidance}",
             "- Git commit identities are marked `(tracked account)` only when they "
             "match a locally synced identity profile.",
             "- Activity and Background may include collaborators' work on tracked "

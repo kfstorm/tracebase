@@ -48,9 +48,7 @@ def render_opencode(
             "",
             "## Attribution",
             "",
-            "- All materially meaningful OpenCode work is user work, including "
-            "delegated agent or subagent investigation, design, implementation, "
-            "debugging, validation, and decisions.",
+            f"- {item.adapter.attribution_policy.context_guidance}",
             "",
         ]
     )
