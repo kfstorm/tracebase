@@ -31,13 +31,41 @@ create requested-interval User work. If an in-range activity discusses earlier
 work, classify the in-range request or analysis as User work and keep the
 earlier work itself as background context only.
 
+Apply the following state semantics separately to each assigned evidence item,
+not to the shard as a whole. Identify conversational evidence from OpenCode or
+ChatGPT dialogue and provider item observations from the provider-specific
+Context structure. A mixed-source shard may contain conversational evidence and
+provider item observations. Shard membership is an execution partition only;
+do not require shard boundaries to align with source boundaries.
+
+Conversational evidence may establish work performed, investigation, analysis,
+design, planning, decisions, implementation work that the conversation reports
+as performed, and commands, tests, or validation that it explicitly reports as
+executed. It may also preserve a point-in-time observation about an external
+system. Conversational evidence must not by itself establish the final/current
+state of a mutable external entity, such as whether a pull request or issue is
+open, merged, draft, or awaiting review. Phrase such a status as observed or
+reported at that point in the conversation; do not promote it to a final/current
+state claim. Keep explicit execution and validation results when the evidence
+supports them.
+
+A GitHub/provider item observation may expose mutable provider fields such as
+state, merged status, draft status, labels, and related timestamps.
+Provider-observed state may participate in final-state reconciliation. Preserve the
+state represented by the selected observation, subject to the Context caveat
+that a later observation may not equal the exact state at the request end. This
+does not make the provider globally synchronized or authoritative beyond the
+selected observation.
+
 Treat a file-read or other tool result as partial evidence whenever it says the
 output was truncated, capped, or has a continuation offset. Continue reading
 until the unread portion cannot materially affect work relevance, importance,
 latest state, outcome, or uncertainty. If continuation is unavailable, record
-the unresolved uncertainty in the report. When state changes during the
-requested interval, normally report the latest supportable state; mention a
-reversal only when it matters to understanding the work.
+the unresolved uncertainty in the report. When a provider item has multiple
+state observations during the requested interval, normally report the latest
+supportable provider-observed state; mention a reversal only when it matters to
+understanding the work. A conversational status statement remains a
+contemporaneous observation even when it is the latest dialogue evidence.
 
 Assistant cognitive output does not by itself prove external side effects. A
 patch or command does not prove implementation, and a suggestion to run, test,

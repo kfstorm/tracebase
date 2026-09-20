@@ -50,6 +50,19 @@ assistant report of actual execution or results may be considered according to
 the strength of the evidence. Do not infer a stronger completion state than
 Context supports.
 
+Workers apply mutable-state semantics before reporting evidence. Reduce their
+reports as source-filtered evidence: conversational point-in-time observations
+of mutable external state cannot by themselves establish a final/current state,
+while GitHub/provider item observations may participate in final-state
+reconciliation. Preserve useful conversational work and explicitly reported
+execution or validation results even when a conversational status observation
+is not eligible as final-state evidence. Apply this distinction per assigned
+evidence item, not per shard, and do not infer it from shard boundaries. Do not
+reverse-engineer the distinction from compressed report wording when the worker
+has already applied it. Provider-observed state remains subject to the selected
+Context observation's caveat about later-observed changes and is not a globally
+synchronized state.
+
 Collaborator evidence may explain the user's own action or resulting state,
 but it is context-only. Do not summarize or enumerate collaborator
 implementation, commits, findings, investigation, fixes, decisions, or other
