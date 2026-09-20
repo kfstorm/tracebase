@@ -7,13 +7,17 @@ import pytest
 
 from tracebase import cli
 from tracebase.context import ContextRequest
-from tracebase.context_inventory import load_context_inventory
+from tracebase.context_inventory import (
+    load_context_inventory,
+    materialize_context_evidence,
+)
 from tracebase.summary import (
     OPENCODE_VERSION,
     SummaryError,
     SummaryRequest,
     fingerprint_context,
     summarize,
+    summarize_archive,
 )
 from tracebase.summary_planner import PlannedShard, plan_shards, shard_task_text
 from tracebase.summary_shards import inspect_shard_plan, inspect_shards
@@ -251,7 +255,17 @@ def _write_plan(
             items = tuple(
                 item for item in shard.get("items", []) if isinstance(item, str)
             )
-            task = shard_task_text(PlannedShard(shard_id, items, 0), inventory)
+            try:
+                task = shard_task_text(PlannedShard(shard_id, items, 0), inventory)
+            except ValueError as error:
+                assert "unknown Context item" in str(error)
+                evidence = "\n".join(f"- /context/{item}/overview.md" for item in items)
+                task = (
+                    "# Summary shard task\n\n"
+                    "## Assigned evidence\n\n"
+                    f"{evidence}\n\n"
+                    "## Worker contract\n"
+                )
             (tmp_path / "shards" / shard_id / "TASK.md").write_text(
                 task, encoding="utf-8"
             )
@@ -295,6 +309,85 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     }
     assert len(manifest["shard_plan"]) == 1
     assert len(manifest["shard_plan"][0]["task_sha256"]) == 64
+
+
+def test_model_context_view_contains_only_manifest_evidence(tmp_path: Path) -> None:
+    source = context(tmp_path)
+    (source / "unrelated-root.md").write_text("host-only", encoding="utf-8")
+    item = source / "repo"
+    (item / "nested").mkdir()
+    (item / "nested/evidence.md").write_text("evidence", encoding="utf-8")
+    inventory_path = source / "index.json"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["items"][0]["files"].append("nested/evidence.md")
+    inventory_path.write_text(json.dumps(inventory) + "\n", encoding="utf-8")
+
+    evidence = tmp_path / "context-evidence"
+    materialize_context_evidence(source, evidence)
+
+    assert sorted(
+        path.relative_to(evidence).as_posix()
+        for path in evidence.rglob("*")
+        if path.is_file()
+    ) == ["repo/nested/evidence.md", "repo/overview.md"]
+    assert not (evidence / "index.json").exists()
+    assert not (evidence / "unrelated-root.md").exists()
+    assert (evidence / "repo/nested/evidence.md").read_text() == "evidence"
+
+
+def test_archive_to_generated_context_summary_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    output = tmp_path / "summary"
+    generated = tmp_path / "generated-context"
+    runner = FakeRunner(tmp_path / ".unused")
+    _bind_runner_to_staging(runner, tmp_path)
+
+    def generate(_archive: Path, _request: ContextRequest, target: Path) -> None:
+        source = _write_context(tmp_path, ("repo", "generated"))
+        shutil.copytree(source, target)
+
+    monkeypatch.setattr("tracebase.summary.generate_context", generate)
+    monkeypatch.setattr(
+        "tracebase.summary.summarize",
+        lambda request: summarize(request, runner),
+    )
+
+    assert (
+        summarize_archive(
+            archive,
+            generated,
+            ContextRequest.parse(
+                "2026-01-01T01:00:00+01:00", "2026-01-01T03:00:00+01:00"
+            ),
+            "model",
+            None,
+            output,
+        )
+        == output
+    )
+
+
+def test_debug_layout_separates_host_and_model_context(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    debug = tmp_path / "debug"
+    runner = FakeRunner(tmp_path / ".unused")
+    _bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output, debug), runner)
+
+    assert (debug / "context-host/index.json").is_file()
+    assert (debug / "context-evidence/repo/overview.md").is_file()
+    assert not (debug / "context-evidence/index.json").exists()
+    assert not (debug / ".opencode-data").exists()
+    manifest = json.loads((debug / "manifest.json").read_text())
+    assert manifest["model_context"]["mount"] == "/context:ro"
+    assert manifest["model_context"]["path"] == "context-evidence"
 
 
 def test_summary_request_does_not_accept_interval_override(tmp_path: Path) -> None:
@@ -355,7 +448,6 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
         "self-contained `TASK.md`",
         "Do not re-plan, split, merge, rename, remove",
         "requested half-open interval to `/work/NOTES.md`",
-        "Do not read the Context manifest to obtain the interval",
         "enumerate the immediate shard directories",
         "Do not open or read any shard `TASK.md` content",
         "Read /work/shards/<id>/TASK.md and complete exactly that task.",
@@ -378,6 +470,7 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
     assert "attribution mode" not in normalized
     assert "actor-scoped" not in normalized
     assert "actor_scoped" not in normalized
+    assert "manifest" not in normalized
     assert "index.json" not in normalized
     assert "index.md" not in normalized
     assert "Read every host-created package" not in normalized

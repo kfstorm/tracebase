@@ -222,10 +222,13 @@ Summary Output contains materially meaningful user work rather than all activity
 in Context. Unrelated personal activity and collaborator-only activity are
 excluded. Summary Output, retained Context Output, and debug output may contain
 sensitive work evidence and should be handled like the Raw Archive. The selected
-model provider may receive Context Output, so make a separate derived-data scope
-and sanitization decision before using a third-party or AI service. Failed
-summary generation does not publish a successful Summary output. For all
-options, run `uv run tracebase summary --help`.
+model provider receives only the validated evidence files selected from Context
+Output; `index.json` and unrelated Context root files remain host-only. Debug
+output keeps the host Context and model-visible evidence in separate directories
+and does not publish OpenCode authentication state. Make a separate derived-data
+scope and sanitization decision before using a third-party or AI service. Failed
+summary generation does not publish a successful Summary output. For all options,
+run `uv run tracebase summary --help`.
 
 ## Development
 

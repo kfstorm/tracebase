@@ -186,7 +186,7 @@ def shard_task_text(
     evidence_paths = [
         f"/context/{item}/{file}"
         for item in shard.items
-        for file in files_by_root.get(item, ("overview.md",))
+        for file in _files_for_item(item, files_by_root, shard.id)
     ]
     evidence = "\n".join(f"- {path}" for path in evidence_paths)
     report = f"/work/shards/{shard.id}/REPORT.md"
@@ -201,6 +201,17 @@ def shard_task_text(
         "Write exactly one report to:\n\n"
         f"{report}\n"
     )
+
+
+def _files_for_item(
+    item: str, files_by_root: dict[str, tuple[str, ...]], shard_id: str
+) -> tuple[str, ...]:
+    try:
+        return files_by_root[item]
+    except KeyError as error:
+        raise ValueError(
+            f"shard {shard_id!r} contains unknown Context item {item!r}"
+        ) from error
 
 
 def write_initial_plan(

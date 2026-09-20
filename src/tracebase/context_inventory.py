@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -191,3 +192,26 @@ def item_readable_sizes(
                     ) from None
         sizes[item.root] = total
     return sizes
+
+
+def materialize_context_evidence(
+    context_dir: Path, evidence_dir: Path
+) -> ContextInventory:
+    """Copy only manifest-declared Context files into a model-visible view."""
+    inventory = load_context_inventory(context_dir)
+    if evidence_dir.exists() or evidence_dir.is_symlink():
+        raise ContextInventoryError("Context evidence directory already exists")
+    evidence_dir.mkdir(parents=True)
+    for item in inventory.items:
+        for file_path in item.files:
+            relative = PurePosixPath(item.root, file_path)
+            source = context_dir.joinpath(*relative.parts)
+            target = evidence_dir.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copyfile(source, target)
+            except OSError as error:
+                raise ContextInventoryError(
+                    f"could not materialize Context file {relative.as_posix()}"
+                ) from error
+    return inventory

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from tracebase.summary import IMAGE, OPENCODE_VERSION
-from tracebase.summary_container import ensure_image
+from tracebase.summary_container import ContainerMounts, ContainerRunner, ensure_image
 
 
 def record_docker_runs(
@@ -64,3 +64,34 @@ def test_dockerfile_requires_an_explicit_opencode_version() -> None:
     assert "https://astral.sh/uv/install.sh" in dockerfile
     assert "uv python install 3.14 --install-dir /opt/tracebase-python" in dockerfile
     assert "name python3.14 -print -quit" in dockerfile
+
+
+def test_container_mounts_only_model_visible_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host_context = tmp_path / "context-host"
+    model_context = tmp_path / "context-evidence"
+    runner = ContainerRunner(
+        "image",
+        ContainerMounts(
+            model_context,
+            tmp_path / "work",
+            tmp_path / "results",
+            tmp_path / "state",
+        ),
+    )
+
+    calls: list[list[str]] = []
+
+    def run(
+        arguments: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr("tracebase.summary_container.subprocess.run", run)
+    runner.run([], "{}", tmp_path / "stdout")
+    command = calls[0]
+
+    assert f"{model_context}:/context:ro" in command
+    assert f"{host_context}:/context:ro" not in command

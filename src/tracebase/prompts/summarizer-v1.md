@@ -71,8 +71,8 @@ host writes the requested half-open interval to `/work/NOTES.md` before the
 root starts; that value is the authoritative boundary for this run. Read and
 maintain `/work/NOTES.md` as durable working memory for workstreams, evidence
 locations, decisions, temporal distinctions, unresolved questions, and
-tentative conclusions. Do not read the Context manifest to obtain the
-interval. Do not mechanically copy NOTES detail into the final Summary.
+tentative conclusions. Do not mechanically copy NOTES detail into the final
+Summary.
 
 ## Sharded Investigation Protocol
 

@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .context import ContextRequest, generate_context
-from .context_inventory import ContextInventoryError, load_context_inventory
+from .context_inventory import (
+    ContextInventoryError,
+    load_context_inventory,
+    materialize_context_evidence,
+)
 from .summary_container import ContainerMounts, ContainerRunner, ensure_image
 from .summary_opencode import prepare_config, prepare_state
 from .summary_planner import PlannedShard, plan_shards, write_initial_plan
@@ -278,7 +282,13 @@ def _publish_debug(
 ) -> None:
     staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
     try:
-        for name in ("context", "work", "runtime", "results"):
+        for name in (
+            "context-host",
+            "context-evidence",
+            "work",
+            "runtime",
+            "results",
+        ):
             source = run / name
             if source.is_dir():
                 shutil.copytree(source, staging / name)
@@ -319,10 +329,20 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         "tracebase_version": _tracebase_version(),
     }
     try:
-        context = run / "context"
-        shutil.copytree(request.context, context)
-        provenance["context_input"] = fingerprint_context(context)
-        provenance["requested_interval"] = context_interval(context)
+        context_host = run / "context-host"
+        shutil.copytree(request.context, context_host)
+        provenance["context_input"] = fingerprint_context(context_host)
+        provenance["requested_interval"] = context_interval(context_host)
+        context_evidence = run / "context-evidence"
+        try:
+            materialize_context_evidence(context_host, context_evidence)
+        except (ContextInventoryError, OSError) as error:
+            raise SummaryError("Context evidence materialization failed") from error
+        provenance["model_context"] = {
+            "mount": "/context:ro",
+            "path": "context-evidence",
+            "fingerprint": fingerprint_context(context_evidence),
+        }
         work = run / "work"
         results = run / "results"
         runtime = run / "runtime"
@@ -335,13 +355,15 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         task.write_bytes(prompt.read_bytes())
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
         try:
-            shard_plan = plan_shards(context)
-            write_initial_plan(work, context, shard_plan)
+            shard_plan = plan_shards(context_host)
+            write_initial_plan(work, context_host, shard_plan)
         except ValueError as error:
             raise SummaryError(
                 f"Context inventory or shard planning failed: {error}"
             ) from None
-        plan_errors = inspect_shard_plan(work, context, expected_plan=shard_plan).errors
+        plan_errors = inspect_shard_plan(
+            work, context_host, expected_plan=shard_plan
+        ).errors
         if plan_errors:
             raise SummaryError(
                 "Tracebase generated an invalid shard plan: " + "; ".join(plan_errors)
@@ -365,7 +387,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
             runner = ContainerRunner(
                 IMAGE,
                 ContainerMounts(
-                    context,
+                    context_evidence,
                     work,
                     results,
                     state,
@@ -381,7 +403,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
             runtime, runner, config, request.model, request.variant
         )
         validation_errors = inspect_shards(
-            work, context, expected_plan=expected_plan
+            work, context_host, expected_plan=expected_plan
         ).errors
         result_missing = not _has_result(results / "summary.md")
         if validation_errors or result_missing:
@@ -395,7 +417,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 result_missing,
                 results / "summary.md",
                 work,
-                context,
+                context_host,
                 expected_plan,
             )
             if not result_present:

@@ -9,6 +9,7 @@ from tracebase.summary_planner import (
     PlannedShard,
     ShardPolicy,
     plan_shards,
+    shard_task_text,
     write_initial_plan,
 )
 from tracebase.summary_shard_validator import inspect_shard_plan
@@ -315,6 +316,43 @@ def test_initial_plan_materializes_self_contained_worker_packages(
     assert notes.count("- shard-") == len(plan)
     assert "- shard-01" in notes
     assert "SHARD_STATUS" not in notes
+
+
+def test_shard_task_assignments_match_every_manifest_file(tmp_path: Path) -> None:
+    context = _context(tmp_path, [("source/item", 1)])
+    inventory_path = context / "index.json"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["items"][0]["files"].append("nested/evidence.md")
+    item = context / "source/item/nested"
+    item.mkdir()
+    (item / "evidence.md").write_text("nested", encoding="utf-8")
+    inventory_path.write_text(json.dumps(inventory) + "\n", encoding="utf-8")
+
+    plan = PlannedShard("shard-01", ("source/item",), 0)
+
+    rendered = shard_task_text(plan, load_context_inventory(context))
+    assigned = (
+        rendered.split("## Assigned evidence\n\n", 1)[1]
+        .split("\n\n## Worker contract", 1)[0]
+        .splitlines()
+    )
+
+    assert assigned == [
+        "- /context/source/item/overview.md",
+        "- /context/source/item/activity.md",
+        "- /context/source/item/nested/evidence.md",
+    ]
+
+
+def test_shard_task_rejects_unknown_membership(tmp_path: Path) -> None:
+    context = _context(tmp_path, [("source/item", 0)])
+
+    with pytest.raises(ValueError, match="unknown Context item"):
+        write_initial_plan(
+            tmp_path / "work",
+            context,
+            (PlannedShard("shard-01", ("missing/item",), 0),),
+        )
 
 
 def test_validator_ignores_filesystem_order_for_large_plan(tmp_path: Path) -> None:

@@ -15,7 +15,7 @@ class ContainerError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ContainerMounts:
-    context: Path
+    context_evidence: Path
     work: Path
     results: Path
     opencode_data: Path
@@ -48,7 +48,7 @@ class ContainerRunner:
             "--workdir",
             "/work",
             "--volume",
-            f"{mounts.context}:/context:ro",
+            f"{mounts.context_evidence}:/context:ro",
             "--volume",
             f"{mounts.work}:/work:rw",
             "--volume",
