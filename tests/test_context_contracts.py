@@ -17,13 +17,6 @@ from tracebase.archive import (
     Snapshot,
     encode_path_id,
 )
-from tracebase.attribution import (
-    ACTOR_SCOPED_ATTRIBUTION_POLICY,
-    CHATGPT_EVIDENCE_POLICY,
-    CONVERSATIONAL_ATTRIBUTION_POLICY,
-    CONVERSATIONAL_EVIDENCE_POLICY,
-    PROVIDER_EVIDENCE_POLICY,
-)
 from tracebase.context import (
     ContextError,
     ContextRequest,
@@ -34,6 +27,13 @@ from tracebase.context import (
 )
 from tracebase.context_adapter import ContextOrdering, RenderedContextItem
 from tracebase.context_adapters import adapter_for
+from tracebase.context_semantics import (
+    ACTOR_SCOPED_ATTRIBUTION_POLICY,
+    CHATGPT_EVIDENCE_POLICY,
+    CONVERSATIONAL_ATTRIBUTION_POLICY,
+    CONVERSATIONAL_EVIDENCE_POLICY,
+    PROVIDER_EVIDENCE_POLICY,
+)
 from tracebase.github_context import GitHubProjection, github_user_work_record_ids
 from tracebase.opencode_context import OpenCodeProjection
 

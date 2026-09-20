@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from .archive import PublishedRun, PublishedSnapshot
-from .attribution import AttributionPolicy, EvidencePolicy
+from .context_semantics import AttributionPolicy, EvidencePolicy
 
 if TYPE_CHECKING:
     from .context import ContextExtractionResult, ContextItem

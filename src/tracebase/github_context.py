@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
-from .attribution import ACTOR_SCOPED_ATTRIBUTION_POLICY, PROVIDER_EVIDENCE_POLICY
 from .context_adapter import (
     ContextOrdering,
     RenderedContextItem,
     rendered_context_item,
     safe_path_component,
+)
+from .context_semantics import (
+    ACTOR_SCOPED_ATTRIBUTION_POLICY,
+    PROVIDER_EVIDENCE_POLICY,
 )
 from .github_identity import GitHubIdentity, require_github_identity
 
