@@ -12,6 +12,7 @@ from .archive import (
     PublishedRun,
     PublishedSnapshot,
     load_published_archive,
+    load_published_context_archive,
 )
 from .context_adapter import ContextAdapter
 from .context_adapters import CONTEXT_ADAPTERS, adapter_for
@@ -87,6 +88,15 @@ def load_archive(root: str | Path) -> tuple[PublishedRun, ...]:
     """Load the current Raw Archive while the caller keeps it immutable."""
     try:
         return load_published_archive(root)
+    except ArchiveError as error:
+        raise ContextError(str(error)) from None
+
+
+def _load_context_archive(
+    root: str | Path, request: ContextRequest
+) -> tuple[PublishedRun, ...]:
+    try:
+        return load_published_context_archive(root, request.start)
     except ArchiveError as error:
         raise ContextError(str(error)) from None
 
@@ -206,5 +216,10 @@ def generate_context(
     from .context_render import render_context  # noqa: PLC0415
 
     return render_context(
-        extract_context(request, load_archive(archive), str(Path(archive))), output
+        extract_context(
+            request,
+            _load_context_archive(archive, request),
+            str(Path(archive)),
+        ),
+        output,
     )

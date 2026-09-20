@@ -55,6 +55,10 @@ Summary content.
 An append-only, complete set of evidence from one Observation Window of one Source Item. A Snapshot does not represent a global system state.
 _Avoid_: Current state, sync point
 
+Every published Snapshot satisfies the archive invariant
+`observation_window.to <= run.completed_at` for its containing Collection Run.
+Archive publication and complete archive loading reject a violation.
+
 **Collection Run**:
 An all-or-nothing manual observation of a Collection Range that publishes its Snapshots only when every planned source operation succeeds. A successful empty Collection Run publishes its manifest; a failed Collection Run publishes no run in `runs/`.
 _Avoid_: Partial collection, background sync

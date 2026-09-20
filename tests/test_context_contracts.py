@@ -392,6 +392,23 @@ def files(output: Path) -> set[str]:
     }
 
 
+def rewrite_run_times(
+    archive: Archive, run_id: str, started_at: str, completed_at: str
+) -> None:
+    path = archive.root / "runs" / run_id / "run.json"
+    manifest = json.loads(path.read_text())
+    manifest["started_at"] = started_at
+    manifest["completed_at"] = completed_at
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def remove_session_evidence(archive: Archive, run_id: str) -> None:
+    run_root = archive.root / "runs" / run_id
+    manifest = json.loads((run_root / "run.json").read_text())
+    snapshot_path = run_root / manifest["snapshots"][0]["path"]
+    (snapshot_path / "session.json").unlink()
+
+
 def text(output: Path, suffix: str) -> str:
     path = next(output.rglob(suffix))
     return path.read_text()
@@ -710,6 +727,130 @@ def test_selection_uses_observation_window_not_collection_range(tmp_path: Path) 
 
     result = extract_context(request(), load_archive(archive.root))
     assert result.items[0].snapshot.run["run_id"] == "second"
+
+
+@pytest.mark.parametrize(
+    "completed_at",
+    ("2026-01-02T00:00:00+00:00", "2026-01-03T00:00:00+00:00"),
+)
+def test_context_prunes_runs_completed_before_or_at_request_start(
+    tmp_path: Path, completed_at: str
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session("old", messages=[message("old", "2026-01-01T01:00:00Z")]),
+        "old",
+        from_text="2026-01-01T00:00:00+00:00",
+        to_text="2026-01-02T00:00:00+00:00",
+    )
+    rewrite_run_times(
+        archive,
+        "old",
+        "2026-01-01T00:00:00+00:00",
+        completed_at,
+    )
+    remove_session_evidence(archive, "old")
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-03T00:00:00+00:00", "2026-01-04T00:00:00+00:00"),
+        output,
+    )
+
+    assert files(output) == {"index.json"}
+
+
+def test_context_pruning_does_not_use_collection_range(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session("old", messages=[message("old", "2026-01-01T01:00:00Z")]),
+        "old",
+        from_text="2026-01-10T00:00:00+00:00",
+        to_text="2026-01-11T00:00:00+00:00",
+        observation_window={
+            "from": "2026-01-01T00:00:00+00:00",
+            "to": "2026-01-02T00:00:00+00:00",
+        },
+    )
+    rewrite_run_times(
+        archive,
+        "old",
+        "2026-01-01T00:00:00+00:00",
+        "2026-01-02T00:00:00+00:00",
+    )
+    remove_session_evidence(archive, "old")
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-03T00:00:00+00:00", "2026-01-04T00:00:00+00:00"),
+        output,
+    )
+
+    assert files(output) == {"index.json"}
+
+
+def test_context_keeps_run_completed_after_request_start(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session("new", messages=[message("new", "2026-01-03T01:00:00Z")]),
+        "new",
+        observation_window={
+            "from": "2026-01-03T00:00:00+00:00",
+            "to": "2026-01-04T00:00:00+00:00",
+        },
+    )
+    rewrite_run_times(
+        archive,
+        "new",
+        "2026-01-03T00:00:00+00:00",
+        "2026-01-05T00:00:00+00:00",
+    )
+
+    context_request = ContextRequest.parse(
+        "2026-01-03T00:00:00+00:00", "2026-01-04T00:00:00+00:00"
+    )
+    output = tmp_path / "output"
+    generate_context(archive.root, context_request, output)
+    result = extract_context(context_request, load_archive(archive.root))
+
+    assert result.items[0].snapshot.run["run_id"] == "new"
+    assert "new" in text(output, "activity.md")
+
+
+def test_context_pruning_does_not_weaken_full_archive_validation(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_opencode(
+        archive,
+        session("old", messages=[message("old", "2026-01-01T01:00:00Z")]),
+        "old",
+    )
+    rewrite_run_times(
+        archive,
+        "old",
+        "2026-01-01T00:00:00+00:00",
+        "2026-01-02T00:00:00+00:00",
+    )
+    remove_session_evidence(archive, "old")
+
+    output = tmp_path / "output"
+    generate_context(
+        archive.root,
+        ContextRequest.parse("2026-01-03T00:00:00+00:00", "2026-01-04T00:00:00+00:00"),
+        output,
+    )
+    with pytest.raises(ContextError, match="missing"):
+        load_archive(archive.root)
 
 
 def test_selection_contract_is_shared_by_github_and_opencode(
