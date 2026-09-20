@@ -605,6 +605,11 @@ def test_summarizer_contract_allows_context_only_state_reconciliation() -> None:
         "must not override a matching ledger entry"
     ) in normalized
     assert (
+        "When state changes during the interval, normally describe the latest "
+        "supportable state; mention reversals only when they matter to understanding "
+        "the work."
+    ) not in normalized
+    assert (
         "A later eligible observed state supersedes an earlier reported state"
         not in normalized
     )
