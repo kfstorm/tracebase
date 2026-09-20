@@ -760,7 +760,7 @@ def test_context_prunes_runs_completed_before_or_at_request_start(
         output,
     )
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_context_pruning_does_not_use_collection_range(tmp_path: Path) -> None:
@@ -792,7 +792,7 @@ def test_context_pruning_does_not_use_collection_range(tmp_path: Path) -> None:
         output,
     )
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_context_keeps_run_completed_after_request_start(tmp_path: Path) -> None:
