@@ -289,8 +289,26 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     assert manifest["variant"] == "high"
     assert manifest["opencode_version"] == OPENCODE_VERSION
     assert manifest["context_input"] == fingerprint_context(source)
+    assert manifest["requested_interval"] == {
+        "from": "2026-01-01T01:00:00+01:00",
+        "to": "2026-01-01T03:00:00+01:00",
+    }
     assert len(manifest["shard_plan"]) == 1
     assert len(manifest["shard_plan"][0]["task_sha256"]) == 64
+
+
+def test_summary_request_does_not_accept_interval_override(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="requested_interval"):
+        SummaryRequest(
+            context(tmp_path),
+            "model",
+            None,
+            tmp_path / "summary",
+            requested_interval={
+                "from": "2026-01-01T00:00:00+00:00",
+                "to": "2026-01-02T00:00:00+00:00",
+            },
+        )
 
 
 def test_host_creates_pending_plan_before_root_starts(tmp_path: Path) -> None:

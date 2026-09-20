@@ -69,7 +69,6 @@ class SummaryRequest:
     model: str
     variant: str | None
     output: Path
-    requested_interval: dict[str, str] | None = None
     debug_output: Path | None = None
 
 
@@ -323,9 +322,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         context = run / "context"
         shutil.copytree(request.context, context)
         provenance["context_input"] = fingerprint_context(context)
-        provenance["requested_interval"] = (
-            request.requested_interval or context_interval(context)
-        )
+        provenance["requested_interval"] = context_interval(context)
         work = run / "work"
         results = run / "results"
         runtime = run / "runtime"
@@ -339,17 +336,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
         try:
             shard_plan = plan_shards(context)
-            requested_interval = provenance["requested_interval"]
-            assert isinstance(requested_interval, dict)
-            write_initial_plan(
-                work,
-                context,
-                shard_plan,
-                (
-                    requested_interval["from"],
-                    requested_interval["to"],
-                ),
-            )
+            write_initial_plan(work, context, shard_plan)
         except ValueError as error:
             raise SummaryError(
                 f"Context inventory or shard planning failed: {error}"
@@ -501,8 +488,7 @@ def summarize_archive(
                 model,
                 variant,
                 output,
-                {"from": context_request.from_text, "to": context_request.to_text},
-                debug_output,
+                debug_output=debug_output,
             )
         )
     finally:
