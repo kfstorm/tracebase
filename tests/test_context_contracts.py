@@ -1210,7 +1210,7 @@ def test_github_pr_overview_uses_issue_labels_and_pull_request_state(
     overview = text(output, "overview.md")
     lines = overview.splitlines()
     evidence_start = lines.index("## Evidence semantics")
-    observed_start = lines.index("## Observed item state")
+    observed_start = lines.index("## Observed item metadata")
     description_start = lines.index("## Description")
     evidence_section = lines[evidence_start:observed_start]
     observed_section = lines[observed_start:description_start]

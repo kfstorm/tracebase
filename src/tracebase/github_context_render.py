@@ -779,7 +779,7 @@ def _overview(
         ]
     )
     lines.extend(context_semantics_lines(item.adapter))
-    lines.extend(["## Observed item state", ""])
+    lines.extend(["## Observed item metadata", ""])
     author = github_actor_login(issue_value)
     if author:
         lines.append(f"- Author: {_actor_label(issue_value, projection.tracked_login)}")
