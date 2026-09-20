@@ -366,6 +366,7 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
         "activity.md` contains retained user/assistant text",
         "background.md` contains only bounded earlier dialogue",
         "specific unresolved material fact",
+        "Do not expose concrete non-work personal content in the final Summary",
     )
     for clause in required:
         assert clause in normalized
@@ -389,6 +390,10 @@ def test_worker_contract_preserves_evidence_interpretation_rules() -> None:
         "Collaborator evidence may explain the user's action or resulting state",
         "Do not decide Summary materiality, major work, or final workstream boundaries",
         "When `Authored:` is shown, distinguish earlier authorship",
+        "The assigned evidence was reviewed and classified as non-work for the "
+        "requested work summary",
+        "Do not restate or summarize its concrete private content",
+        "minimum neutral context needed for that explanation",
     ):
         assert clause in normalized
 

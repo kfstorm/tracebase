@@ -135,6 +135,7 @@ shard order recorded in NOTES to identify materially meaningful workstreams.
 may explain an explicitly attributed fact but cannot create a workstream, fill
 an attribution gap, or be restated as the user's work. Merge evidence across
 shards or sources only when Context establishes a real relationship. Do not
+expose concrete non-work personal content in the final Summary. Do not
 re-traverse all Context. A targeted direct read is allowed only for a specific
 unresolved material fact and must be recorded in NOTES.
 

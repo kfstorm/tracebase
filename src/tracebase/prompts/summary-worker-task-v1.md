@@ -72,14 +72,21 @@ Include collaborator, non-work, or other evidence used only to explain user
 work or state. Do not promote it as a workstream or describe it as the user's
 work.
 
-Preserve important motivation, decisions, final state, uncertainty, Context
-paths, and technical detail for root synthesis. Preserve grouping and order
-shown in Context. Keep review threads together and commits in their single
-commits section. Do not decide Summary materiality, major work, or final
-workstream boundaries. Do not infer that something was fixed merely because a
-PR merged, a review thread resolved, or a diff looks like a fix. When
-`Authored:` is shown, distinguish earlier authorship from later rebasing,
-cherry-picking, or recommitting.
+For an assigned item that is entirely non-work and is not needed to explain any
+User work or resulting state, record only: "The assigned evidence was reviewed
+and classified as non-work for the requested work summary." Do not restate or
+summarize its concrete private content. When non-work evidence is needed to
+explain attributed User work or resulting state, preserve only the minimum
+neutral context needed for that explanation.
+
+For all other assigned evidence, preserve important motivation, decisions,
+final state, uncertainty, Context paths, and technical detail for root
+synthesis. Preserve grouping and order shown in Context. Keep review threads
+together and commits in their single commits section. Do not decide Summary
+materiality, major work, or final workstream boundaries. Do not infer that
+something was fixed merely because a PR merged, a review thread resolved, or a
+diff looks like a fix. When `Authored:` is shown, distinguish earlier
+authorship from later rebasing, cherry-picking, or recommitting.
 
 You are not an orchestrator. Do not call `task`, start another session, or
 create child workers. Do not read or modify `/work/TASK.md`, `/work/NOTES.md`,
