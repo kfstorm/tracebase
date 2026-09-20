@@ -58,6 +58,7 @@ def _context(
 def test_policy_has_only_the_authoritative_limits() -> None:
     policy = ShardPolicy()
 
+    assert SUMMARY_SHARD_MAX_BYTES == 256 * 1024
     assert policy.max_bytes == SUMMARY_SHARD_MAX_BYTES
     assert SHARD_POLICY.max_bytes == SUMMARY_SHARD_MAX_BYTES
     assert policy.max_items == 8
