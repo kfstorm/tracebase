@@ -526,6 +526,10 @@ def test_summarizer_contract_allows_context_only_state_reconciliation() -> None:
         "It must not create a workstream, fill an attribution gap, or be restated "
         "or implied as the user's work"
     ) in normalized
+    assert (
+        "A later eligible observed state supersedes an earlier reported state; "
+        "retain the earlier state only as historical context or uncertainty"
+    ) in normalized
     lowered = normalized.casefold()
     for source_term in ("github", "opencode", "chatgpt"):
         assert source_term not in lowered

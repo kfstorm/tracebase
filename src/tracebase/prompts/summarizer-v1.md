@@ -111,6 +111,13 @@ expose concrete non-work personal content in the final Summary. Do not
 re-traverse all Context. A targeted direct read is allowed only for a specific
 unresolved material fact and must be recorded in NOTES.
 
+When preserved evidence contains conflicting observations of mutable external
+state, use each item's declared semantics and the latest supportable eligible
+observation. A later eligible observed state supersedes an earlier reported
+state; retain the earlier state only as historical context or uncertainty, not
+as the current or final state. Do not turn either state observation into User
+work or a separate workstream.
+
 Before writing `/results/summary.md`, reconcile every shard report and status,
 then perform coverage and final-state reconciliation. If no `User work` is
 materially meaningful, publish a concise result saying the requested interval
