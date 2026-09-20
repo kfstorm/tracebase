@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from .archive import PublishedRun, PublishedSnapshot
-from .attribution import AttributionPolicy
+from .context_semantics import AttributionPolicy, EvidencePolicy
 
 if TYPE_CHECKING:
     from .context import ContextExtractionResult, ContextItem
@@ -25,11 +25,23 @@ class ContextOrdering:
 
 
 @dataclass(frozen=True, slots=True)
+class MutableStateObservation:
+    """A host-reconcilable observation of mutable external state."""
+
+    entity_key: str
+    entity_label: str
+    observed_at: str
+    fields: tuple[tuple[str, str], ...]
+    observed_after_request_end: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RenderedContextItem:
-    """The source files and ordering values produced for one Context item."""
+    """The source files, ordering, and host-side observations for one item."""
 
     files: tuple[str, ...]
     ordering: ContextOrdering
+    mutable_state_observations: tuple[MutableStateObservation, ...] = ()
 
 
 class ContextAdapter(Protocol):
@@ -38,6 +50,7 @@ class ContextAdapter(Protocol):
     source_kind: str
     object_kinds: frozenset[str]
     attribution_policy: AttributionPolicy
+    evidence_policy: EvidencePolicy
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime
@@ -71,9 +84,28 @@ def rendered_context_item(
     item: ContextItem,
     result: ContextExtractionResult,
     files: Iterable[str],
+    mutable_state_observations: tuple[MutableStateObservation, ...] = (),
 ) -> RenderedContextItem:
     """Combine source-rendered files with the adapter's ordering metadata."""
-    return RenderedContextItem(tuple(files), adapter.ordering_metadata(item, result))
+    return RenderedContextItem(
+        tuple(files),
+        adapter.ordering_metadata(item, result),
+        mutable_state_observations,
+    )
+
+
+def context_semantics_lines(adapter: ContextAdapter) -> list[str]:
+    """Render source-declared semantics without exposing policy identifiers."""
+    return [
+        "## Attribution",
+        "",
+        f"- {adapter.attribution_policy.context_guidance}",
+        "",
+        "## Evidence semantics",
+        "",
+        f"- {adapter.evidence_policy.evidence_guidance}",
+        "",
+    ]
 
 
 def render_source_item(

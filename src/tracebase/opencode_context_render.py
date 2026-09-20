@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .context import ContextExtractionResult, ContextItem
+from .context_adapter import context_semantics_lines
 from .dialogue import render_dialogue_files, write_dialogue_markdown
 from .opencode_context import OpenCodeProjection
 
@@ -43,15 +44,8 @@ def render_opencode(
     ]
     if directory != project_directory:
         overview.append(f"Working directory: `{directory}`")
-    overview.extend(
-        [
-            "",
-            "## Attribution",
-            "",
-            f"- {item.adapter.attribution_policy.context_guidance}",
-            "",
-        ]
-    )
+    overview.extend([""])
+    overview.extend(context_semantics_lines(item.adapter))
     timezone = result.request.start.tzinfo
     assert timezone is not None
     files = render_dialogue_files(

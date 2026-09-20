@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
-from .attribution import ACTOR_SCOPED_ATTRIBUTION_POLICY
 from .context_adapter import (
     ContextOrdering,
     RenderedContextItem,
     rendered_context_item,
     safe_path_component,
+)
+from .context_semantics import (
+    ACTOR_SCOPED_ATTRIBUTION_POLICY,
+    PROVIDER_EVIDENCE_POLICY,
 )
 from .github_identity import GitHubIdentity, require_github_identity
 
@@ -125,6 +128,23 @@ def github_logins_match(login: Any, tracked_login: str | None) -> bool:
         and tracked_login is not None
         and login.casefold() == tracked_login.casefold()
     )
+
+
+def github_item_is_pull_request(projection: GitHubProjection) -> bool:
+    """Return whether a projected GitHub item is a pull request."""
+    return any(record.get("kind") == "pull-request" for record in projection.records)
+
+
+def github_item_url(projection: GitHubProjection) -> str:
+    """Return the canonical web URL for one projected GitHub item."""
+    kind = "pull" if github_item_is_pull_request(projection) else "issues"
+    return f"https://github.com/{projection.repository}/{kind}/{projection.number}"
+
+
+def github_item_label(projection: GitHubProjection) -> str:
+    """Return the stable human label for one projected GitHub item."""
+    kind = "PR" if github_item_is_pull_request(projection) else "Issue"
+    return f"{projection.repository} {kind} #{projection.number}"
 
 
 def github_inline_comment_canonical_id(value: dict[str, Any]) -> str | None:
@@ -356,7 +376,7 @@ def project_github(  # noqa: PLR0915
     relations: set[tuple[str, str, str]] = set()
     source_id = selected_snapshot.manifest["source_id"]
     object_kind = selected_snapshot.manifest["object_kind"]
-    repository = "unknown/unknown"
+    repository = ""
     number = 0
     title: str | None = None
     effective_options = selected_snapshot.run.get("collector", {}).get(
@@ -379,12 +399,18 @@ def project_github(  # noqa: PLR0915
     if not isinstance(issue, dict) or issue.get("node_id") != source_id:
         raise ArchiveError("GitHub Item evidence identity was invalid")
     repository_value = issue.get("repository_url")
-    if isinstance(repository_value, str) and repository_value:
-        repository = (
-            repository_value.removeprefix("https://api.github.com/repos/")
-            .removeprefix("https://github.com/")
-            .strip("/")
-        )
+    if not isinstance(repository_value, str) or not repository_value:
+        raise ArchiveError("GitHub repository identity was invalid")
+    for prefix in (
+        "https://api.github.com/repos/",
+        "https://github.com/",
+    ):
+        if repository_value.startswith(prefix):
+            repository = repository_value.removeprefix(prefix).strip("/")
+            break
+    owner, separator, name = repository.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        raise ArchiveError("GitHub repository identity was invalid")
     if isinstance(issue.get("number"), int):
         number = issue["number"]
     if isinstance(issue.get("title"), str):
@@ -621,6 +647,7 @@ class GitHubContextAdapter:
     source_kind = "github"
     object_kinds = frozenset({"issue", "pull-request"})
     attribution_policy = ACTOR_SCOPED_ATTRIBUTION_POLICY
+    evidence_policy = PROVIDER_EVIDENCE_POLICY
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime
@@ -700,14 +727,20 @@ class GitHubContextAdapter:
         from .context_render import write_markdown  # noqa: PLC0415
         from .github_context_render import render_github  # noqa: PLC0415
 
-        files = render_github(item, result)
-        for name, content in files.items():
+        rendered = render_github(item, result)
+        for name, content in rendered.files.items():
             path = output / name
             if isinstance(content, bytes):
                 path.write_bytes(content)
             else:
                 write_markdown(path, content)
-        return rendered_context_item(self, item, result, files)
+        return rendered_context_item(
+            self,
+            item,
+            result,
+            rendered.files,
+            (rendered.mutable_state_observation,),
+        )
 
     def ordering_metadata(
         self, item: ContextItem, _result: ContextExtractionResult

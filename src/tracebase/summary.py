@@ -18,6 +18,12 @@ from .context_inventory import (
     load_context_inventory,
     materialize_context_evidence,
 )
+from .mutable_state import (
+    MutableStateError,
+    load_mutable_state,
+    reconcile_mutable_state,
+    render_mutable_state,
+)
 from .summary_container import ContainerMounts, ContainerRunner, ensure_image
 from .summary_opencode import prepare_config, prepare_state
 from .summary_planner import PlannedShard, plan_shards, write_initial_plan
@@ -350,6 +356,20 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         work.mkdir()
         results.mkdir()
         runtime.mkdir()
+        try:
+            inventory = load_context_inventory(context_host)
+            mutable_state = load_mutable_state(context_host, inventory)
+            reconciled_state = reconcile_mutable_state(mutable_state)
+            (work / "MUTABLE_STATE.md").write_text(
+                render_mutable_state(reconciled_state), encoding="utf-8"
+            )
+        except (
+            ContextInventoryError,
+            MutableStateError,
+            OSError,
+            UnicodeError,
+        ) as error:
+            raise SummaryError("Mutable state metadata validation failed") from error
         prompt = Path(__file__).parent / "prompts/summarizer-v1.md"
         task = work / "TASK.md"
         task.write_bytes(prompt.read_bytes())
@@ -392,6 +412,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                     results,
                     state,
                     task=task,
+                    mutable_state=work / "MUTABLE_STATE.md",
                 ),
             )
         else:

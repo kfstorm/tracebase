@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .chatgpt_context import ChatGPTProjection
 from .context import ContextExtractionResult, ContextItem
+from .context_adapter import context_semantics_lines
 from .dialogue import render_dialogue_files, write_dialogue_markdown
 
 
@@ -16,16 +17,8 @@ def render_chatgpt(
     assert isinstance(projection, ChatGPTProjection)
     timezone = result.request.start.tzinfo
     assert timezone is not None
-    overview = [
-        f"# {projection.title}",
-        "",
-        "## Attribution",
-        "",
-        f"- {item.adapter.attribution_policy.context_guidance}",
-        "- This is the provider-returned observed current conversation stream; "
-        "historical branch versions are not reconstructed.",
-        "",
-    ]
+    overview = [f"# {projection.title}", ""]
+    overview.extend(context_semantics_lines(item.adapter))
     files = render_dialogue_files(
         projection.dialogue,
         timezone,

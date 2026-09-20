@@ -17,10 +17,6 @@ from tracebase.archive import (
     Snapshot,
     encode_path_id,
 )
-from tracebase.attribution import (
-    ACTOR_SCOPED_ATTRIBUTION_POLICY,
-    CONVERSATIONAL_ATTRIBUTION_POLICY,
-)
 from tracebase.context import (
     ContextError,
     ContextRequest,
@@ -31,6 +27,14 @@ from tracebase.context import (
 )
 from tracebase.context_adapter import ContextOrdering, RenderedContextItem
 from tracebase.context_adapters import adapter_for
+from tracebase.context_inventory import materialize_context_evidence
+from tracebase.context_semantics import (
+    ACTOR_SCOPED_ATTRIBUTION_POLICY,
+    CHATGPT_EVIDENCE_POLICY,
+    CONVERSATIONAL_ATTRIBUTION_POLICY,
+    CONVERSATIONAL_EVIDENCE_POLICY,
+    PROVIDER_EVIDENCE_POLICY,
+)
 from tracebase.github_context import GitHubProjection, github_user_work_record_ids
 from tracebase.opencode_context import OpenCodeProjection
 
@@ -534,6 +538,7 @@ def github_output(
     object_kind: str = "pull-request",
     effective_options: dict[str, object] | None = None,
     with_profile: bool = True,
+    observation_window: dict[str, str] | None = None,
 ) -> Path:
     payload = {"node_id": "PR_1", **(pull_request or {})}
     publish_github(
@@ -546,6 +551,7 @@ def github_output(
         },
         object_kind=object_kind,
         effective_options=effective_options,
+        observation_window=observation_window,
     )
     if with_profile:
         profile_root = (
@@ -754,7 +760,7 @@ def test_context_prunes_runs_completed_before_or_at_request_start(
         output,
     )
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_context_pruning_does_not_use_collection_range(tmp_path: Path) -> None:
@@ -786,7 +792,7 @@ def test_context_pruning_does_not_use_collection_range(tmp_path: Path) -> None:
         output,
     )
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_context_keeps_run_completed_after_request_start(tmp_path: Path) -> None:
@@ -962,12 +968,50 @@ def test_context_projects_chatgpt_alongside_other_sources(
         "opencode": CONVERSATIONAL_ATTRIBUTION_POLICY,
         "chatgpt": CONVERSATIONAL_ATTRIBUTION_POLICY,
     }
+    assert {
+        item.snapshot.manifest["source_kind"]: item.adapter.evidence_policy
+        for item in result.items
+    } == {
+        "github": PROVIDER_EVIDENCE_POLICY,
+        "opencode": CONVERSATIONAL_EVIDENCE_POLICY,
+        "chatgpt": CHATGPT_EVIDENCE_POLICY,
+    }
     assert all(not hasattr(item, "attribution_mode") for item in result.items)
+    assert all(not hasattr(item, "evidence_mode") for item in result.items)
+    assert all(not hasattr(item, "state_mode") for item in result.items)
     assert "github/example/project/pull/1/overview.md" in files(output)
     assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
         output
     )
     assert "chatgpt/conversation/01/overview.md" in files(output)
+    index = json.loads((output / "index.json").read_text())
+    mutable_state = json.loads((output / "mutable-state.json").read_text())
+    assert all("mutable-state.json" not in item["files"] for item in index["items"])
+    assert [item["root"] for item in mutable_state["items"]] == [
+        item["root"] for item in index["items"]
+    ]
+    by_root = {item["root"]: item["observations"] for item in mutable_state["items"]}
+    assert len(by_root["github/example/project/pull/1"]) == 1
+    assert by_root["opencode/home/tester/dev/example/project/session/01"] == []
+    assert by_root["chatgpt/conversation/01"] == []
+    evidence = tmp_path / "evidence"
+    materialize_context_evidence(output, evidence)
+    assert not (evidence / "index.json").exists()
+    assert not (evidence / "mutable-state.json").exists()
+    overviews = "\n".join(path.read_text() for path in output.rglob("overview.md"))
+    for policy in (
+        ACTOR_SCOPED_ATTRIBUTION_POLICY,
+        CONVERSATIONAL_ATTRIBUTION_POLICY,
+    ):
+        assert policy.context_guidance in overviews
+    for policy in (
+        PROVIDER_EVIDENCE_POLICY,
+        CONVERSATIONAL_EVIDENCE_POLICY,
+        CHATGPT_EVIDENCE_POLICY,
+    ):
+        assert policy.evidence_guidance in overviews
+    assert overviews.count("## Attribution") == 3
+    assert overviews.count("## Evidence semantics") == 3
 
 
 def test_chatgpt_context_numbers_conversations_by_activity_title_and_source_id(
@@ -1135,7 +1179,7 @@ def test_empty_output_has_only_useful_index_without_front_matter(
     archive.mkdir()
     output = tmp_path / "output"
     generate_context(archive, request(), output)
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
     index = json.loads((output / "index.json").read_text())
     assert index["requested_interval"]["from"] == request().from_text
     assert index["items"] == []
@@ -1175,7 +1219,7 @@ def test_empty_removed_run_directory_is_tolerated(tmp_path: Path) -> None:
     output = tmp_path / "output"
     generate_context(archive, request(), output)
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_empty_published_run_without_snapshots_directory_is_tolerated(
@@ -1189,7 +1233,7 @@ def test_empty_published_run_without_snapshots_directory_is_tolerated(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_nonempty_unregistered_run_content_fails(tmp_path: Path) -> None:
@@ -1313,14 +1357,56 @@ def test_github_pr_overview_uses_issue_labels_and_pull_request_state(
                 "draft": False,
             },
         },
+        observation_window={
+            "from": "2026-01-03T00:00:00+00:00",
+            "to": "2026-01-04T00:00:00+00:00",
+        },
     )
 
     overview = text(output, "overview.md")
+    lines = overview.splitlines()
+    evidence_start = lines.index("## Evidence semantics")
+    observed_start = lines.index("## Observed item metadata")
+    description_start = lines.index("## Description")
+    evidence_section = lines[evidence_start:observed_start]
+    observed_section = lines[observed_start:description_start]
 
     assert "- State: merged" in overview
-    assert "- Merged at: 2026-01-01 10:34" in overview
+    assert "- Merged at: 2026-01-01T10:34:56+08:00" in overview
     assert "- Labels: alpha, zeta" in overview
     assert "- Merged:" not in overview
+    assert evidence_start < observed_start < description_start
+    assert "- Author: @author" in observed_section
+    assert "- Type: Pull request" in observed_section
+    assert "- State: merged" in observed_section
+    assert "- Merged at: 2026-01-01T10:34:56+08:00" in observed_section
+    assert "- Labels: alpha, zeta" in observed_section
+    assert "- Draft: false" in observed_section
+    assert "Mutable fields may include later-observed changes" in "\n".join(
+        observed_section
+    )
+    assert "- Author: @author" not in evidence_section
+    assert "- Type: Pull request" not in evidence_section
+    assert "- State: merged" not in evidence_section
+    assert "- Merged at: 2026-01-01T10:34:56+08:00" not in evidence_section
+    assert "- Labels: alpha, zeta" not in evidence_section
+    assert "- Draft: false" not in evidence_section
+    assert "- URL: https://github.com/example/project/pull/1" in observed_section
+    metadata = json.loads((output / "mutable-state.json").read_text())
+    assert metadata["items"][0]["observations"] == [
+        {
+            "entity_key": "https://github.com/example/project/pull/1",
+            "entity_label": "example/project PR #1",
+            "observed_at": "2026-01-04T00:00:00+00:00",
+            "observed_after_request_end": True,
+            "fields": [
+                ["state", "merged"],
+                ["merged_at", "2026-01-01T10:34:56+08:00"],
+                ["draft", "false"],
+                ["labels", "alpha, zeta"],
+            ],
+        }
+    ]
 
 
 def test_github_non_merged_closed_pr_remains_closed(tmp_path: Path) -> None:
@@ -1334,6 +1420,7 @@ def test_github_non_merged_closed_pr_remains_closed(tmp_path: Path) -> None:
             "pull-request.json": {
                 "node_id": "PR_1",
                 "merged": False,
+                "merged_at": "2026-01-01T02:34:56Z",
                 "draft": True,
             },
         },
@@ -1344,6 +1431,24 @@ def test_github_non_merged_closed_pr_remains_closed(tmp_path: Path) -> None:
     assert "- State: closed" in overview
     assert "- Merged at:" not in overview
     assert "- Draft: true" in overview
+
+
+def test_github_missing_canonical_repository_identity_is_rejected(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    with pytest.raises(ContextError, match="repository identity"):
+        github_output(
+            archive,
+            tmp_path,
+            {
+                "issue.json": {
+                    **github_base(),
+                    "repository_url": "not-a-github-repository-url",
+                }
+            },
+        )
 
 
 def test_github_convert_to_draft_timeline_event_is_rendered(tmp_path: Path) -> None:
@@ -1421,6 +1526,11 @@ def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None
     generate_context(archive.root, request(), output)
     overview = text(output, "overview.md")
     assert "github/example/project/issue/7/overview.md" in files(output)
+    assert "- URL: https://github.com/example/project/issues/7" in overview
+    metadata = json.loads((output / "mutable-state.json").read_text())
+    assert metadata["items"][0]["observations"][0]["entity_key"] == (
+        "https://github.com/example/project/issues/7"
+    )
     assert "Author: @author" in overview
     assert "Actor" not in overview
 
@@ -2081,7 +2191,7 @@ def test_github_context_without_selected_items_does_not_require_profile(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
@@ -2730,7 +2840,7 @@ def test_opencode_non_text_selection_has_local_context_limitation(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
     assert not list(output.rglob("activity.md"))
     assert "## Gaps" not in (output / "index.json").read_text()
 
@@ -3242,7 +3352,7 @@ def test_opencode_in_range_tool_keeps_earlier_text_in_background(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:
@@ -3637,6 +3747,24 @@ def test_context_adapters_declare_attribution_policies() -> None:
     assert adapter_for("future-source") is None
 
 
+def test_context_adapters_declare_separate_evidence_policies() -> None:
+    assert adapter_for("opencode").evidence_policy is CONVERSATIONAL_EVIDENCE_POLICY
+    assert adapter_for("chatgpt").evidence_policy is CHATGPT_EVIDENCE_POLICY
+    github_adapter = adapter_for("github")
+    assert github_adapter is not None
+    assert github_adapter.evidence_policy is PROVIDER_EVIDENCE_POLICY
+    assert github_adapter.evidence_policy != github_adapter.attribution_policy
+    assert "any observation-window caveat stated in this item" in (
+        PROVIDER_EVIDENCE_POLICY.evidence_guidance
+    )
+    assert "Record-level attribution annotations remain separate" in (
+        PROVIDER_EVIDENCE_POLICY.evidence_guidance
+    )
+    assert (
+        "according to the annotations" not in PROVIDER_EVIDENCE_POLICY.evidence_guidance
+    )
+
+
 def test_conversational_opencode_delegated_work_is_user_work(
     tmp_path: Path,
 ) -> None:
@@ -3682,6 +3810,8 @@ def test_conversational_opencode_delegated_work_is_user_work(
     }
     assert inventory["items"][0]["files"] == ["overview.md", "activity.md"]
     assert CONVERSATIONAL_ATTRIBUTION_POLICY.context_guidance in overview
+    assert CONVERSATIONAL_EVIDENCE_POLICY.evidence_guidance in overview
+    assert "## Evidence semantics" in overview
     assert "CONVERSATIONAL_ATTRIBUTION_POLICY" not in overview
     assert "CONVERSATIONAL_ATTRIBUTION_POLICY" not in activity
     assert "delegated cognitive work" in overview
@@ -3772,6 +3902,8 @@ def test_tracked_account_collaboration_separates_user_work_from_collaborators(
     assert ACTOR_SCOPED_ATTRIBUTION_POLICY.context_guidance in text(
         output, "overview.md"
     )
+    assert PROVIDER_EVIDENCE_POLICY.evidence_guidance in text(output, "overview.md")
+    assert "## Evidence semantics" in text(output, "overview.md")
     assert activity.count("## Commits") == 1
     assert "## User work" not in activity
     assert "## Context-only evidence" not in activity

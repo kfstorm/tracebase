@@ -10,12 +10,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
-from .attribution import CONVERSATIONAL_ATTRIBUTION_POLICY
 from .context_adapter import (
     ContextOrdering,
     RenderedContextItem,
     number_context_items,
     render_source_item,
+)
+from .context_semantics import (
+    CHATGPT_EVIDENCE_POLICY,
+    CONVERSATIONAL_ATTRIBUTION_POLICY,
 )
 from .dialogue import (
     DialogueTranscript,
@@ -222,6 +225,7 @@ class ChatGPTContextAdapter:
     source_kind = "chatgpt"
     object_kinds = frozenset({"conversation"})
     attribution_policy = CONVERSATIONAL_ATTRIBUTION_POLICY
+    evidence_policy = CHATGPT_EVIDENCE_POLICY
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime

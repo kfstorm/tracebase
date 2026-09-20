@@ -12,6 +12,7 @@ from typing import Any
 from .context import ContextError, ContextExtractionResult, ContextItem
 from .context_adapter import RenderedContextItem
 from .context_adapters import CONTEXT_ADAPTERS
+from .mutable_state import observation_json
 
 
 def write_markdown(path: Path, lines: list[str]) -> None:
@@ -93,6 +94,29 @@ def _write_inventory(
     )
 
 
+def _write_mutable_state(
+    staging: Path,
+    items: list[tuple[ContextItem, RenderedContextItem]],
+) -> None:
+    """Write host-only observations in the same order as the inventory."""
+    metadata = {
+        "items": [
+            {
+                "root": item.path,
+                "observations": [
+                    observation_json(observation)
+                    for observation in rendered.mutable_state_observations
+                ],
+            }
+            for item, rendered in items
+        ]
+    }
+    (staging / "mutable-state.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _cleanup_staging(staging: Path) -> None:
     if not staging.exists():
         return
@@ -126,6 +150,7 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
                 rendered.append((item, item_rendered))
             ordered = _ordered_items(rendered)
             _write_inventory(staging, result, ordered)
+            _write_mutable_state(staging, ordered)
         except ContextError:
             raise
         except KeyError, TypeError, UnicodeError, ValueError, OSError:
