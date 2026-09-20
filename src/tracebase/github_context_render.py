@@ -2,22 +2,49 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, tzinfo
 from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
-from .context_adapter import context_semantics_lines
+from .context_adapter import (
+    MutableStateObservation,
+    context_semantics_lines,
+)
 from .context_render import format_timestamp, parse_timestamp
 from .github_context import (
     GitHubProjection,
     github_actor_login,
     github_inline_comment_canonical_id,
+    github_item_is_pull_request,
+    github_item_label,
+    github_item_url,
     github_logins_match,
     github_user_work_record_ids,
 )
 from .github_identity import GitHubIdentity
 
 GITHUB_COMMIT_LIMIT = 250
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubObservedMetadata:
+    """State values shared by GitHub Markdown and host metadata."""
+
+    url: str
+    entity_label: str
+    state: str | None
+    merged_at: str | None
+    draft: str | None
+    labels: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedGitHubItem:
+    """GitHub files plus its one selected mutable-state observation."""
+
+    files: dict[str, list[str] | bytes]
+    mutable_state_observation: MutableStateObservation
 
 
 def _representations(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -184,11 +211,121 @@ def _timeline_event_bucket(
 def _selected_observation_is_after_request_end(
     item: ContextItem, result: ContextExtractionResult
 ) -> bool:
+    _observed_at, observed_end = _selected_observation_window(item)
+    return observed_end > result.request.end
+
+
+def _selected_observation_window(item: ContextItem) -> tuple[str, datetime]:
     window = item.snapshot.manifest.get("observation_window")
-    observed_end = (
-        parse_timestamp(window.get("to")) if isinstance(window, dict) else None
+    observed_at = window.get("to") if isinstance(window, dict) else None
+    observed_end = parse_timestamp(observed_at)
+    if not isinstance(observed_at, str) or observed_end is None:
+        raise ValueError("GitHub observation window is invalid")
+    return observed_at, observed_end
+
+
+def _iso_timestamp(value: Any, timezone: tzinfo) -> str | None:
+    parsed = parse_timestamp(value)
+    return parsed.astimezone(timezone).isoformat(timespec="seconds") if parsed else None
+
+
+def github_observed_metadata(
+    item: ContextItem, result: ContextExtractionResult
+) -> GitHubObservedMetadata:
+    """Derive the selected GitHub mutable fields once for all renderers."""
+    projection = item.projection
+    assert isinstance(projection, GitHubProjection)
+    issue_value = _selected_issue_value(projection)
+    pull_request_value = _selected_pull_request_value(projection)
+    is_pull_request = github_item_is_pull_request(projection)
+    state = issue_value.get("state")
+    if is_pull_request and pull_request_value.get("merged") is True:
+        state = "merged"
+    state = state if isinstance(state, str) else None
+    timezone = result.request.start.tzinfo
+    if timezone is None:
+        raise ValueError("Context request timezone is invalid")
+    merged_at = (
+        _iso_timestamp(pull_request_value.get("merged_at"), timezone)
+        if is_pull_request and pull_request_value.get("merged") is True
+        else None
     )
-    return observed_end is not None and observed_end > result.request.end
+    labels = tuple(
+        sorted(
+            {
+                label["name"]
+                for label in issue_value.get("labels", [])
+                if isinstance(label, dict)
+                and isinstance(label.get("name"), str)
+                and label["name"]
+            },
+            key=lambda label: (label.casefold(), label),
+        )
+    )
+    draft_value = (
+        pull_request_value.get("draft") if is_pull_request else issue_value.get("draft")
+    )
+    draft = str(draft_value).lower() if isinstance(draft_value, bool) else None
+    return GitHubObservedMetadata(
+        github_item_url(projection),
+        github_item_label(projection),
+        state,
+        merged_at,
+        draft,
+        labels,
+    )
+
+
+def _mutable_state_observation(
+    item: ContextItem,
+    result: ContextExtractionResult,
+    metadata: GitHubObservedMetadata,
+) -> MutableStateObservation:
+    fields = tuple(
+        (name, value)
+        for name, value in (
+            ("state", metadata.state),
+            ("merged_at", metadata.merged_at),
+            ("draft", metadata.draft),
+            ("labels", ", ".join(metadata.labels) if metadata.labels else None),
+        )
+        if value is not None
+    )
+    if not fields:
+        raise ValueError("GitHub mutable-state observation has no fields")
+    return MutableStateObservation(
+        metadata.url,
+        metadata.entity_label,
+        _selected_observation_window(item)[0],
+        fields,
+        _selected_observation_is_after_request_end(item, result),
+    )
+
+
+def _selected_issue_value(projection: GitHubProjection) -> dict[str, Any]:
+    record = next(
+        (
+            record
+            for record in projection.records
+            if record.get("kind") in {"issue", "pull-request"}
+        ),
+        None,
+    )
+    value = _representation_value(record) if record is not None else None
+    return value if isinstance(value, dict) else {}
+
+
+def _selected_pull_request_value(projection: GitHubProjection) -> dict[str, Any]:
+    record = next(
+        (
+            record
+            for record in projection.records
+            if record.get("kind") == "pull-request-payload"
+        ),
+        None,
+    )
+    value = _representation_value(record) if record is not None else None
+    return value if isinstance(value, dict) else {}
 
 
 def _location(value: dict[str, Any]) -> str | None:
@@ -731,41 +868,12 @@ def _overview(
     item: ContextItem,
     result: ContextExtractionResult,
     user_work_ids: frozenset[tuple[str, str]],
+    metadata: GitHubObservedMetadata,
 ) -> list[str]:
     projection = item.projection
     assert isinstance(projection, GitHubProjection)
-    object_record = next(
-        (
-            record
-            for record in projection.records
-            if record.get("kind") in {"issue", "pull-request"}
-        ),
-        None,
-    )
-    issue_value = (
-        _representation_value(object_record) if object_record is not None else None
-    )
-    issue_value = issue_value if isinstance(issue_value, dict) else {}
-    is_pull_request = any(
-        record.get("kind") == "pull-request" for record in projection.records
-    )
-    pull_request_record = next(
-        (
-            record
-            for record in projection.records
-            if record.get("kind") == "pull-request-payload"
-        ),
-        None,
-    )
-    pull_request_value = (
-        _representation_value(pull_request_record)
-        if pull_request_record is not None
-        else None
-    )
-    pull_request_value = (
-        pull_request_value if isinstance(pull_request_value, dict) else {}
-    )
-    kind = "PR" if is_pull_request else "Issue"
+    issue_value = _selected_issue_value(projection)
+    kind = "PR" if github_item_is_pull_request(projection) else "Issue"
     title = issue_value.get("title") or projection.title or "Untitled"
     lines = [f"# {projection.repository} {kind} #{projection.number} — {title}", ""]
     lines.extend(
@@ -780,39 +888,19 @@ def _overview(
     )
     lines.extend(context_semantics_lines(item.adapter))
     lines.extend(["## Observed item metadata", ""])
+    lines.append(f"- URL: {metadata.url}")
     author = github_actor_login(issue_value)
     if author:
         lines.append(f"- Author: {_actor_label(issue_value, projection.tracked_login)}")
     lines.append(f"- Type: {'Pull request' if kind == 'PR' else 'Issue'}")
-    state = issue_value.get("state")
-    is_merged = is_pull_request and pull_request_value.get("merged") is True
-    if is_merged:
-        state = "merged"
-    if isinstance(state, str):
-        lines.append(f"- State: {state}")
-    if is_merged:
-        merged_at = format_timestamp(
-            pull_request_value.get("merged_at"), result.request.start.tzinfo
-        )
-        if merged_at is not None:
-            lines.append(f"- Merged at: {merged_at}")
-    labels = sorted(
-        {
-            label["name"]
-            for label in issue_value.get("labels", [])
-            if isinstance(label, dict)
-            and isinstance(label.get("name"), str)
-            and label["name"]
-        },
-        key=lambda label: (label.casefold(), label),
-    )
-    if labels:
-        lines.append(f"- Labels: {', '.join(labels)}")
-    draft = (
-        pull_request_value.get("draft") if is_pull_request else issue_value.get("draft")
-    )
-    if isinstance(draft, bool):
-        lines.append(f"- Draft: {str(draft).lower()}")
+    if metadata.state is not None:
+        lines.append(f"- State: {metadata.state}")
+    if metadata.merged_at is not None:
+        lines.append(f"- Merged at: {metadata.merged_at}")
+    if metadata.labels:
+        lines.append(f"- Labels: {', '.join(metadata.labels)}")
+    if metadata.draft is not None:
+        lines.append(f"- Draft: {metadata.draft}")
     if _selected_observation_is_after_request_end(item, result):
         lines.extend(
             [
@@ -860,14 +948,15 @@ def _diff_content(item: ContextItem, result: ContextExtractionResult) -> bytes |
 
 def render_github(
     item: ContextItem, result: ContextExtractionResult
-) -> dict[str, list[str] | bytes]:
+) -> RenderedGitHubItem:
     projection = item.projection
     assert isinstance(projection, GitHubProjection)
+    metadata = github_observed_metadata(item, result)
     user_work_ids = github_user_work_record_ids(
         projection, result.request.start, result.request.end
     )
     files: dict[str, list[str] | bytes] = {
-        "overview.md": _overview(item, result, user_work_ids)
+        "overview.md": _overview(item, result, user_work_ids, metadata)
     }
     activity = _activity(item, result, "activity", user_work_ids)
     background = _activity(item, result, "background", user_work_ids)
@@ -878,4 +967,7 @@ def render_github(
         files["background.md"] = background
     if diff is not None:
         files["diff.patch"] = diff
-    return files
+    return RenderedGitHubItem(
+        files,
+        _mutable_state_observation(item, result, metadata),
+    )

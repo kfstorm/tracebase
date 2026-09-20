@@ -25,11 +25,23 @@ class ContextOrdering:
 
 
 @dataclass(frozen=True, slots=True)
+class MutableStateObservation:
+    """A host-reconcilable observation of mutable external state."""
+
+    entity_key: str
+    entity_label: str
+    observed_at: str
+    fields: tuple[tuple[str, str], ...]
+    observed_after_request_end: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RenderedContextItem:
-    """The source files and ordering values produced for one Context item."""
+    """The source files, ordering, and host-side observations for one item."""
 
     files: tuple[str, ...]
     ordering: ContextOrdering
+    mutable_state_observations: tuple[MutableStateObservation, ...] = ()
 
 
 class ContextAdapter(Protocol):
@@ -72,9 +84,14 @@ def rendered_context_item(
     item: ContextItem,
     result: ContextExtractionResult,
     files: Iterable[str],
+    mutable_state_observations: tuple[MutableStateObservation, ...] = (),
 ) -> RenderedContextItem:
     """Combine source-rendered files with the adapter's ordering metadata."""
-    return RenderedContextItem(tuple(files), adapter.ordering_metadata(item, result))
+    return RenderedContextItem(
+        tuple(files),
+        adapter.ordering_metadata(item, result),
+        mutable_state_observations,
+    )
 
 
 def context_semantics_lines(adapter: ContextAdapter) -> list[str]:

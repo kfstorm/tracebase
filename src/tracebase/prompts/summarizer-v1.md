@@ -101,25 +101,24 @@ explicitly failed and its evidence must not be silently treated as reviewed.
 
 During reduce, read completed `User work` report sections in the host-provided
 shard order recorded in NOTES to identify materially meaningful workstreams.
-`Context-only evidence`
-may explain attributed User work or provide state evidence for final-state
-reconciliation when the worker preserved it according to the Context item's
-declared semantics. It must not create a workstream, fill an attribution gap,
-or be restated or implied as the user's work. Merge evidence across
+`Context-only evidence` may explain attributed User work or historical/contextual
+state. It must not create a workstream, fill an attribution gap, or be restated
+or implied as the user's work. Merge evidence across
 shards or sources only when Context establishes a real relationship. Do not
 expose concrete non-work personal content in the final Summary. Do not
 re-traverse all Context. A targeted direct read is allowed only for a specific
 unresolved material fact and must be recorded in NOTES.
 
-When preserved evidence contains conflicting observations of mutable external
-state, use each item's declared semantics and the latest supportable eligible
-observation. A later eligible observed state supersedes an earlier reported
-state; retain the earlier state only as historical context or uncertainty, not
-as the current or final state. Do not turn either state observation into User
-work or a separate workstream.
+Before final synthesis, read `/work/MUTABLE_STATE.md`.
+For final/current mutable external state, use matching host-reconciled entries
+from that file. Mutable-state mentions in worker reports are historical or
+contextual and must not override a matching ledger entry. Preserve ledger
+caveats. Do not infer a match between an entity mentioned in a report and a
+ledger entity unless the evidence preserves a stable identifier that supports
+the match. If no reliable match exists, do not guess a final/current state.
 
 Before writing `/results/summary.md`, reconcile every shard report and status,
-then perform coverage and final-state reconciliation. If no `User work` is
+then perform coverage using the host-reconciled mutable-state ledger. If no `User work` is
 materially meaningful, publish a concise result saying the requested interval
 contains no materially meaningful work; do not explain which personal
 activities were excluded.

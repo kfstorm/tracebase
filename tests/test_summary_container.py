@@ -66,20 +66,22 @@ def test_dockerfile_requires_an_explicit_opencode_version() -> None:
     assert "name python3.14 -print -quit" in dockerfile
 
 
-def test_container_mounts_only_model_visible_context(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    model_context = tmp_path / "context-evidence"
+def _container_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    mutable_state: Path | None = None,
+) -> list[str]:
     runner = ContainerRunner(
         "image",
         ContainerMounts(
-            model_context,
+            tmp_path / "context-evidence",
             tmp_path / "work",
             tmp_path / "results",
             tmp_path / "state",
+            mutable_state=mutable_state,
         ),
     )
-
     calls: list[list[str]] = []
 
     def run(
@@ -90,6 +92,22 @@ def test_container_mounts_only_model_visible_context(
 
     monkeypatch.setattr("tracebase.summary_container.subprocess.run", run)
     runner.run([], "{}", tmp_path / "stdout")
-    command = calls[0]
+    return calls[0]
+
+
+def test_container_mounts_only_model_visible_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    model_context = tmp_path / "context-evidence"
+    command = _container_command(monkeypatch, tmp_path)
 
     assert f"{model_context}:/context:ro" in command
+
+
+def test_container_mounts_host_mutable_state_read_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mutable_state = tmp_path / "MUTABLE_STATE.md"
+    command = _container_command(monkeypatch, tmp_path, mutable_state=mutable_state)
+
+    assert f"{mutable_state}:/work/MUTABLE_STATE.md:ro" in command

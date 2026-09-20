@@ -49,6 +49,8 @@ class FakeRunner:
         self.calls: list[list[str]] = []
         self.report_writes: list[str] = []
         self.root_saw_pending_plan = False
+        self.root_saw_mutable_state = False
+        self.root_mutable_state = ""
 
     def run(
         self,
@@ -65,6 +67,9 @@ class FakeRunner:
             raise AssertionError(f"unexpected runner call: {arguments}")
 
         work = self.output / "work"
+        self.root_saw_mutable_state = (work / "MUTABLE_STATE.md").is_file()
+        if self.root_saw_mutable_state:
+            self.root_mutable_state = (work / "MUTABLE_STATE.md").read_text()
         shard_dirs = sorted((work / "shards").iterdir())
         host_specs = []
         for shard_dir in shard_dirs:
@@ -169,6 +174,14 @@ def _write_context(
                 },
                 "items": inventory,
             },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (result / "mutable-state.json").write_text(
+        json.dumps(
+            {"items": [{"root": root, "observations": []} for root, _label in items]},
             indent=2,
         )
         + "\n",
@@ -382,6 +395,9 @@ def test_debug_layout_separates_host_and_model_context(
     summarize(SummaryRequest(source, "model", None, output, debug), runner)
 
     assert (debug / "context-host/index.json").is_file()
+    assert (debug / "context-host/mutable-state.json").is_file()
+    assert not (debug / "context-evidence/mutable-state.json").exists()
+    assert (debug / "work/MUTABLE_STATE.md").is_file()
     assert (debug / "context-evidence/repo/overview.md").is_file()
     assert not (debug / "context-evidence/index.json").exists()
     assert not (debug / ".opencode-data").exists()
@@ -413,6 +429,64 @@ def test_host_creates_pending_plan_before_root_starts(tmp_path: Path) -> None:
     summarize(SummaryRequest(source, "model", None, output), runner)
 
     assert runner.root_saw_pending_plan
+    assert runner.root_saw_mutable_state
+
+
+def test_host_reconciles_mutable_state_before_root_starts(tmp_path: Path) -> None:
+    source = context(tmp_path)
+    (source / "mutable-state.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "root": "repo",
+                        "observations": [
+                            {
+                                "entity_key": "https://example.com/entity/1",
+                                "entity_label": "synthetic entity",
+                                "observed_at": "2026-01-01T01:00:00+00:00",
+                                "observed_after_request_end": False,
+                                "fields": [["state", "open"]],
+                            },
+                            {
+                                "entity_key": "https://example.com/entity/1",
+                                "entity_label": "synthetic entity",
+                                "observed_at": "2026-01-01T02:00:00+00:00",
+                                "observed_after_request_end": True,
+                                "fields": [["state", "closed"]],
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "summary"
+    runner = FakeRunner(output.parent / ".unused")
+    _bind_runner_to_staging(runner, tmp_path)
+
+    summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert "- State: closed" in runner.root_mutable_state
+    assert "- State: open" not in runner.root_mutable_state
+    assert "- Caveat: selected mutable fields" in runner.root_mutable_state
+
+
+def test_invalid_mutable_state_stops_before_root_starts(tmp_path: Path) -> None:
+    source = context(tmp_path)
+    (source / "mutable-state.json").write_text(
+        json.dumps({"items": [], "unexpected": True}) + "\n", encoding="utf-8"
+    )
+    output = tmp_path / "summary"
+    runner = FakeRunner(output.parent / ".unused")
+    _bind_runner_to_staging(runner, tmp_path)
+
+    with pytest.raises(SummaryError, match="Mutable state metadata validation"):
+        summarize(SummaryRequest(source, "model", None, output), runner)
+
+    assert runner.calls == []
 
 
 def test_root_task_mutation_is_rejected_during_final_reconciliation(
@@ -518,18 +592,23 @@ def test_summarizer_contract_allows_context_only_state_reconciliation() -> None:
     normalized = " ".join(prompt.split())
 
     assert (
-        "`Context-only evidence` may explain attributed User work or provide state "
-        "evidence for final-state reconciliation when the worker preserved it "
-        "according to the Context item's declared semantics"
+        "`Context-only evidence` may explain attributed User work or "
+        "historical/contextual state"
     ) in normalized
     assert (
         "It must not create a workstream, fill an attribution gap, or be restated "
         "or implied as the user's work"
     ) in normalized
+    assert "Before final synthesis, read `/work/MUTABLE_STATE.md`" in normalized
     assert (
-        "A later eligible observed state supersedes an earlier reported state; "
-        "retain the earlier state only as historical context or uncertainty"
+        "Mutable-state mentions in worker reports are historical or contextual and "
+        "must not override a matching ledger entry"
     ) in normalized
+    assert (
+        "A later eligible observed state supersedes an earlier reported state"
+        not in normalized
+    )
+    assert "provide state evidence for final-state reconciliation" not in normalized
     lowered = normalized.casefold()
     for source_term in ("github", "opencode", "chatgpt"):
         assert source_term not in lowered
@@ -563,6 +642,14 @@ def test_worker_contract_preserves_evidence_interpretation_rules() -> None:
         "preserve important motivation, decisions, final state, uncertainty, Context "
         "paths, and technical detail for root synthesis"
     ) not in normalized
+    assert (
+        "Preserve stable external identifiers already present in assigned Context "
+        "when they materially identify reported work or state; do not invent missing "
+        "identifiers"
+    ) in normalized
+    assert "Do not read `/work/MUTABLE_STATE.md`" in normalized
+    assert normalized.count("## User work") == 1
+    assert normalized.count("## Context-only evidence") == 1
 
 
 def test_worker_contract_distinguishes_state_semantics_per_evidence_item(
@@ -580,9 +667,8 @@ def test_worker_contract_distinguishes_state_semantics_per_evidence_item(
         "Apply those semantics to each item independently, not to the shard as a whole",
         "Do not infer or override them from source names, paths, file layouts",
         "Use the item's declared evidence semantics for activity boundaries",
-        "Those semantics determine whether a point-in-time observation can support "
-        "a final or current claim",
-        "how any observation-window caveat applies",
+        "Describe observations faithfully, including any observation-window caveat",
+        "do not decide mutable-state reconciliation eligibility",
         "Limit conclusions to what the assigned evidence and its declared semantics "
         "support",
     ):

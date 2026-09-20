@@ -27,6 +27,7 @@ from tracebase.context import (
 )
 from tracebase.context_adapter import ContextOrdering, RenderedContextItem
 from tracebase.context_adapters import adapter_for
+from tracebase.context_inventory import materialize_context_evidence
 from tracebase.context_semantics import (
     ACTOR_SCOPED_ATTRIBUTION_POLICY,
     CHATGPT_EVIDENCE_POLICY,
@@ -842,6 +843,20 @@ def test_context_projects_chatgpt_alongside_other_sources(
         output
     )
     assert "chatgpt/conversation/01/overview.md" in files(output)
+    index = json.loads((output / "index.json").read_text())
+    mutable_state = json.loads((output / "mutable-state.json").read_text())
+    assert all("mutable-state.json" not in item["files"] for item in index["items"])
+    assert [item["root"] for item in mutable_state["items"]] == [
+        item["root"] for item in index["items"]
+    ]
+    by_root = {item["root"]: item["observations"] for item in mutable_state["items"]}
+    assert len(by_root["github/example/project/pull/1"]) == 1
+    assert by_root["opencode/home/tester/dev/example/project/session/01"] == []
+    assert by_root["chatgpt/conversation/01"] == []
+    evidence = tmp_path / "evidence"
+    materialize_context_evidence(output, evidence)
+    assert not (evidence / "index.json").exists()
+    assert not (evidence / "mutable-state.json").exists()
     overviews = "\n".join(path.read_text() for path in output.rglob("overview.md"))
     for policy in (
         ACTOR_SCOPED_ATTRIBUTION_POLICY,
@@ -1023,7 +1038,7 @@ def test_empty_output_has_only_useful_index_without_front_matter(
     archive.mkdir()
     output = tmp_path / "output"
     generate_context(archive, request(), output)
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
     index = json.loads((output / "index.json").read_text())
     assert index["requested_interval"]["from"] == request().from_text
     assert index["items"] == []
@@ -1063,7 +1078,7 @@ def test_empty_removed_run_directory_is_tolerated(tmp_path: Path) -> None:
     output = tmp_path / "output"
     generate_context(archive, request(), output)
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_empty_published_run_without_snapshots_directory_is_tolerated(
@@ -1077,7 +1092,7 @@ def test_empty_published_run_without_snapshots_directory_is_tolerated(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_nonempty_unregistered_run_content_fails(tmp_path: Path) -> None:
@@ -1216,14 +1231,14 @@ def test_github_pr_overview_uses_issue_labels_and_pull_request_state(
     observed_section = lines[observed_start:description_start]
 
     assert "- State: merged" in overview
-    assert "- Merged at: 2026-01-01 10:34" in overview
+    assert "- Merged at: 2026-01-01T10:34:56+08:00" in overview
     assert "- Labels: alpha, zeta" in overview
     assert "- Merged:" not in overview
     assert evidence_start < observed_start < description_start
     assert "- Author: @author" in observed_section
     assert "- Type: Pull request" in observed_section
     assert "- State: merged" in observed_section
-    assert "- Merged at: 2026-01-01 10:34" in observed_section
+    assert "- Merged at: 2026-01-01T10:34:56+08:00" in observed_section
     assert "- Labels: alpha, zeta" in observed_section
     assert "- Draft: false" in observed_section
     assert "Mutable fields may include later-observed changes" in "\n".join(
@@ -1232,9 +1247,25 @@ def test_github_pr_overview_uses_issue_labels_and_pull_request_state(
     assert "- Author: @author" not in evidence_section
     assert "- Type: Pull request" not in evidence_section
     assert "- State: merged" not in evidence_section
-    assert "- Merged at: 2026-01-01 10:34" not in evidence_section
+    assert "- Merged at: 2026-01-01T10:34:56+08:00" not in evidence_section
     assert "- Labels: alpha, zeta" not in evidence_section
     assert "- Draft: false" not in evidence_section
+    assert "- URL: https://github.com/example/project/pull/1" in observed_section
+    metadata = json.loads((output / "mutable-state.json").read_text())
+    assert metadata["items"][0]["observations"] == [
+        {
+            "entity_key": "https://github.com/example/project/pull/1",
+            "entity_label": "example/project PR #1",
+            "observed_at": "2026-01-04T00:00:00+00:00",
+            "observed_after_request_end": True,
+            "fields": [
+                ["state", "merged"],
+                ["merged_at", "2026-01-01T10:34:56+08:00"],
+                ["draft", "false"],
+                ["labels", "alpha, zeta"],
+            ],
+        }
+    ]
 
 
 def test_github_non_merged_closed_pr_remains_closed(tmp_path: Path) -> None:
@@ -1248,6 +1279,7 @@ def test_github_non_merged_closed_pr_remains_closed(tmp_path: Path) -> None:
             "pull-request.json": {
                 "node_id": "PR_1",
                 "merged": False,
+                "merged_at": "2026-01-01T02:34:56Z",
                 "draft": True,
             },
         },
@@ -1258,6 +1290,24 @@ def test_github_non_merged_closed_pr_remains_closed(tmp_path: Path) -> None:
     assert "- State: closed" in overview
     assert "- Merged at:" not in overview
     assert "- Draft: true" in overview
+
+
+def test_github_missing_canonical_repository_identity_is_rejected(
+    tmp_path: Path,
+) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    with pytest.raises(ContextError, match="repository identity"):
+        github_output(
+            archive,
+            tmp_path,
+            {
+                "issue.json": {
+                    **github_base(),
+                    "repository_url": "not-a-github-repository-url",
+                }
+            },
+        )
 
 
 def test_github_convert_to_draft_timeline_event_is_rendered(tmp_path: Path) -> None:
@@ -1335,6 +1385,11 @@ def test_issue_uses_issue_path_and_domain_author_wording(tmp_path: Path) -> None
     generate_context(archive.root, request(), output)
     overview = text(output, "overview.md")
     assert "github/example/project/issue/7/overview.md" in files(output)
+    assert "- URL: https://github.com/example/project/issues/7" in overview
+    metadata = json.loads((output / "mutable-state.json").read_text())
+    assert metadata["items"][0]["observations"][0]["entity_key"] == (
+        "https://github.com/example/project/issues/7"
+    )
     assert "Author: @author" in overview
     assert "Actor" not in overview
 
@@ -1995,7 +2050,7 @@ def test_github_context_without_selected_items_does_not_require_profile(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
@@ -2644,7 +2699,7 @@ def test_opencode_non_text_selection_has_local_context_limitation(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
     assert not list(output.rglob("activity.md"))
     assert "## Gaps" not in (output / "index.json").read_text()
 
@@ -3156,7 +3211,7 @@ def test_opencode_in_range_tool_keeps_earlier_text_in_background(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert files(output) == {"index.json"}
+    assert files(output) == {"index.json", "mutable-state.json"}
 
 
 def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:

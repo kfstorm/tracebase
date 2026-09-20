@@ -21,6 +21,7 @@ class ContainerMounts:
     opencode_data: Path
     summary: Path | None = None
     task: Path | None = None
+    mutable_state: Path | None = None
 
 
 class ContainerRunner:
@@ -56,6 +57,10 @@ class ContainerRunner:
             "--volume",
             f"{mounts.opencode_data}:/home/eval/.local:rw",
         ]
+        if mounts.mutable_state is not None:
+            command.extend(
+                ["--volume", f"{mounts.mutable_state}:/work/MUTABLE_STATE.md:ro"]
+            )
         if mounts.summary is not None:
             command.extend(["--volume", f"{mounts.summary}:/summary.md:ro"])
         if mounts.task is not None:
