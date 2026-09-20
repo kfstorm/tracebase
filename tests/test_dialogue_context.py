@@ -120,17 +120,12 @@ def opencode_snapshot(messages: list[dict[str, object]]) -> PublishedSnapshot:
 
 
 def write_activity(path: Path, transcript: DialogueTranscript) -> None:
-    write_dialogue_markdown(
-        path, render_dialogue(transcript, "activity", UTC, "personal")
-    )
+    write_dialogue_markdown(path, render_dialogue(transcript, "activity", UTC))
 
 
 def assert_activity_markdown(path: Path, expected_text: str) -> None:
     assert path.read_text() == (
-        "# Activity\n\n"
-        "Attribution mode: `personal`\n\n"
-        "**User · 2026-01-01 01:00**\n\n"
-        f"{expected_text}\n"
+        f"# Activity\n\n**User · 2026-01-01 01:00**\n\n{expected_text}\n"
     )
 
 
@@ -163,7 +158,7 @@ def test_shared_dialogue_has_half_open_buckets_and_bounded_background() -> None:
     assert "at-end" not in {turn.text for turn in transcript.activity}
     assert "at-end" not in {turn.text for turn in transcript.background}
     assert "**User · 2026-01-01 00:00**" in "\n".join(
-        render_dialogue(transcript, "activity", UTC, "personal")
+        render_dialogue(transcript, "activity", UTC)
     )
 
 
@@ -568,7 +563,7 @@ def test_chatgpt_multiple_conversations_are_deterministic_and_mixed_source_safe(
         item.snapshot.manifest["source_id"]
         for item in extract_context(request, load_archive(archive.root)).items
     } == {"conversation-a", "conversation-b"}
-    assert "## ChatGPT" in (one / "index.md").read_text()
+    assert (one / "index.json").is_file()
     assert sorted(
         path.relative_to(one).as_posix() for path in one.rglob("*.md")
     ) == sorted(path.relative_to(two).as_posix() for path in two.rglob("*.md"))
@@ -598,7 +593,7 @@ def test_chatgpt_non_text_only_conversation_has_no_context_item_or_files(
         path.relative_to(output).as_posix()
         for path in output.rglob("*")
         if path.is_file()
-    } == {"index.md", "index.json"}
+    } == {"index.json"}
 
 
 def test_chatgpt_later_snapshot_supplies_earlier_messages(tmp_path: Path) -> None:

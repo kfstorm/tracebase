@@ -48,10 +48,7 @@ def render_opencode(
             "",
             "## Attribution",
             "",
-            f"- Attribution mode: `{item.attribution_mode.value}`",
-            "- All materially meaningful OpenCode work is user work, including "
-            "delegated agent or subagent investigation, design, implementation, "
-            "debugging, validation, and decisions.",
+            f"- {item.adapter.attribution_policy.context_guidance}",
             "",
         ]
     )
@@ -60,7 +57,6 @@ def render_opencode(
     files = render_dialogue_files(
         projection.dialogue,
         timezone,
-        item.attribution_mode.value,
         overview,
     )
     for name, lines in files.items():

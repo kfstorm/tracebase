@@ -43,25 +43,9 @@ def _render_item(
     return item.adapter.render(item, result, item_root)
 
 
-def _link_list(paths: list[str]) -> str:
-    return ", ".join(f"[{PurePosixPath(path).name}]({path})" for path in paths)
-
-
-def _render_index(
-    staging: Path,
-    result: ContextExtractionResult,
+def _ordered_items(
     items: list[tuple[ContextItem, RenderedContextItem]],
 ) -> list[tuple[ContextItem, RenderedContextItem]]:
-    lines = [
-        "# Context Output",
-        "",
-        "Requested interval: "
-        f"`{result.request.from_text} <= t < {result.request.to_text}`",
-        "Times are displayed in the requested interval offset.",
-        "Attribution mode is declared for every source item; Summary projects "
-        "user work before synthesizing workstreams.",
-        "",
-    ]
     rendered_by_adapter = {
         adapter: [
             (item, rendered) for item, rendered in items if item.adapter is adapter
@@ -69,70 +53,43 @@ def _render_index(
         for adapter in CONTEXT_ADAPTERS
     }
     ordered: list[tuple[ContextItem, RenderedContextItem]] = []
-    for adapter_index, adapter in enumerate(CONTEXT_ADAPTERS):
-        lines.extend([f"## {adapter.index_section}", ""])
+    for adapter in CONTEXT_ADAPTERS:
         adapter_items = rendered_by_adapter[adapter]
-        source_items = tuple(item for item, _rendered in adapter_items)
-        if not adapter_items:
-            lines.append(adapter.empty_index_message)
-        else:
-            lines.extend(adapter.index_header(source_items))
-            grouped: dict[
-                str | None, list[tuple[ContextItem, RenderedContextItem]]
-            ] = {}
-            for item, rendered in adapter_items:
-                group = rendered.index.group
-                grouped.setdefault(group, []).append((item, rendered))
-            for item, rendered in sorted(
-                grouped.pop(None, []), key=lambda pair: pair[1].index.sort_key
-            ):
-                _append_index_item(lines, item, rendered)
-                ordered.append((item, rendered))
-            named_groups = [group for group in grouped if group is not None]
-            for group in sorted(named_groups):
-                lines.extend([f"### `{group}`", ""])
-                for item, rendered in sorted(
-                    grouped[group], key=lambda pair: pair[1].index.sort_key
-                ):
-                    _append_index_item(lines, item, rendered)
-                    ordered.append((item, rendered))
-                lines.append("")
-        if adapter_index < len(CONTEXT_ADAPTERS) - 1:
-            lines.append("")
-    lines.append("")
-    write_markdown(staging / "index.md", lines)
+        grouped: dict[str | None, list[tuple[ContextItem, RenderedContextItem]]] = {}
+        for item, rendered in adapter_items:
+            grouped.setdefault(rendered.ordering.group, []).append((item, rendered))
+        ordered.extend(
+            sorted(grouped.pop(None, []), key=lambda pair: pair[1].ordering.sort_key)
+        )
+        for group in sorted(grouped, key=lambda value: value or ""):
+            ordered.extend(
+                sorted(grouped[group], key=lambda pair: pair[1].ordering.sort_key)
+            )
     return ordered
 
 
 def _write_inventory(
-    staging: Path, items: list[tuple[ContextItem, RenderedContextItem]]
+    staging: Path,
+    result: ContextExtractionResult,
+    items: list[tuple[ContextItem, RenderedContextItem]],
 ) -> None:
-    """Write the authoritative orchestration metadata in human index order."""
+    """Write the authoritative host-side Context manifest."""
     inventory = {
+        "requested_interval": {
+            "from": result.request.from_text,
+            "to": result.request.to_text,
+        },
         "items": [
             {
                 "root": item.path,
-                "attribution_mode": item.attribution_mode.value,
                 "files": list(rendered.files),
             }
             for item, rendered in items
-        ]
+        ],
     }
     (staging / "index.json").write_text(
         json.dumps(inventory, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
-    )
-
-
-def _append_index_item(
-    lines: list[str], item: ContextItem, rendered: RenderedContextItem
-) -> None:
-    """Add a source-neutral index item from adapter-provided metadata."""
-    files = rendered.files
-    links = [f"{item.path}/{name}" for name in files]
-    lines.append(
-        f"- **{rendered.index.label}** [attribution mode: "
-        f"`{item.attribution_mode.value}`] ({_link_list(links)})"
     )
 
 
@@ -167,8 +124,8 @@ def render_context(result: ContextExtractionResult, output: str | Path) -> Path:
             for item in result.items:
                 item_rendered = _render_item(staging, item, result)
                 rendered.append((item, item_rendered))
-            ordered = _render_index(staging, result, rendered)
-            _write_inventory(staging, ordered)
+            ordered = _ordered_items(rendered)
+            _write_inventory(staging, result, ordered)
         except ContextError:
             raise
         except KeyError, TypeError, UnicodeError, ValueError, OSError:

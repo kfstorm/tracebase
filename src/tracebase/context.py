@@ -13,7 +13,6 @@ from .archive import (
     PublishedSnapshot,
     load_published_archive,
 )
-from .attribution import AttributionMode
 from .context_adapter import ContextAdapter
 from .context_adapters import CONTEXT_ADAPTERS, adapter_for
 
@@ -71,7 +70,6 @@ class ContextItem:
     adapter: ContextAdapter
     projection: object
     path: str
-    attribution_mode: AttributionMode
 
     @property
     def source_kind(self) -> str:
@@ -180,7 +178,6 @@ def extract_context(
                 adapter=adapter,
                 projection=projection,
                 path="",
-                attribution_mode=adapter.attribution_mode,
             )
         )
     for adapter in CONTEXT_ADAPTERS:

@@ -18,7 +18,7 @@ Tracebase preserves private work evidence in a replayable local archive, generat
 - **ChatGPT collection:** Archive ordinary personal conversations from an authenticated ChatGPT web session.
 - **Explicit coverage:** Record time ranges and source boundaries, retain successful empty runs, and reject overlapping published ranges for the same logical source.
 - **Offline context:** Generate a disposable, browsable directory from archived evidence without querying the sources again.
-- **Explicit attribution:** Context records whether each source is `personal` or `actor_scoped` for Summary generation.
+- **Explicit attribution:** Context explains how conversational work is attributed and marks applicable records as `[User work]` or `[Context only]`.
 - **Work summaries:** Run the production Summarizer against an archive or existing Context Output and publish a validated Markdown summary with provenance.
 
 Coverage records what the collector observed, not a guarantee of complete historical account activity. Tracebase preserves evidence; it does not generate long-term AI memory.
@@ -163,11 +163,11 @@ uv run tracebase context \
   --output "$HOME/.tracebase/context-2026-09-01"
 ```
 
-Start with `index.md` in the output directory. Each source item declares its
-attribution mode: OpenCode and ChatGPT use `personal` attribution, so
-work-related conversational activity is attributed to the user; GitHub is
-`actor_scoped`, so only explicitly marked tracked-account actions and
-authorship are eligible for the user's Summary.
+Use `index.json` as the machine-readable manifest for the requested interval
+and item file inventory, then read the listed item files. Work-related
+OpenCode and ChatGPT conversational activity is attributed to the user;
+GitHub Context marks attributable records as `[User work]` and collaborator or
+other context as `[Context only]`.
 Collaborator evidence remains context-only. Context Output is disposable and
 does **not** redact sensitive data: treat it with the same confidentiality as
 the Raw Archive. Third-party or AI-service use requires a separate scope and
@@ -222,10 +222,13 @@ Summary Output contains materially meaningful user work rather than all activity
 in Context. Unrelated personal activity and collaborator-only activity are
 excluded. Summary Output, retained Context Output, and debug output may contain
 sensitive work evidence and should be handled like the Raw Archive. The selected
-model provider may receive Context Output, so make a separate derived-data scope
-and sanitization decision before using a third-party or AI service. Failed
-summary generation does not publish a successful Summary output. For all
-options, run `uv run tracebase summary --help`.
+model provider receives only the validated evidence files selected from Context
+Output; `index.json` and unrelated Context root files remain host-only. Debug
+output keeps the host Context and model-visible evidence in separate directories
+and does not publish OpenCode authentication state. Make a separate derived-data
+scope and sanitization decision before using a third-party or AI service. Failed
+summary generation does not publish a successful Summary output. For all options,
+run `uv run tracebase summary --help`.
 
 ## Development
 

@@ -36,15 +36,14 @@ _Avoid_: Completeness, audit log
 A stable source-specific scope used to distinguish Collection Ranges and detect overlap to prevent duplicate collection. For GitHub it is the authenticated actor's stable node ID; for OpenCode it is a user-chosen `--instance-id` that is unique across machines and stable on the same machine; for ChatGPT it is the authenticated account's stable provider identity used as the scope ID. A machine name is valid as an OpenCode instance ID if it meets both conditions.
 _Avoid_: Project association
 
-**Attribution Mode**:
-The Context and Summary-layer rule for projecting source evidence into the
-user's work. `personal` means materially meaningful work recorded by the source
-belongs to the user, including delegated agent or subagent work. `actor_scoped`
-means only explicitly tracked-account actions or authorship belong to the user;
-other participant activity remains context-only evidence. The current mapping
-is OpenCode -> `personal`, ChatGPT -> `personal`, and GitHub -> `actor_scoped`.
-Every supported source kind must be explicitly mapped; unknown source kinds do
-not inherit a default.
+**Source Attribution Policy**:
+The source-declared rule for projecting evidence into the user's work. A
+conversational Context identifies work-related activity, including delegated
+cognitive or agent work, as user work and non-work activity as context-only.
+When Context records carry `[User work]` or `[Context only]` annotations, the
+annotation on each atomic record is authoritative; other participant activity
+remains context-only. Attribution is applied before workstream identification,
+ranking, or synthesis, and unsupported sources do not inherit a policy.
 
 **User-work Projection**:
 The attribution-filtered evidence that may become a Summary workstream. It is
@@ -87,11 +86,11 @@ regenerations, or edits. ChatGPT `create_time` is the placement timestamp;
 and attachment binaries remain unsupported.
 
 Context Markdown preserves source-native evidence type, temporal grouping,
-relationship, and order. Under `actor_scoped`, attribution is an orthogonal
-record-level annotation such as `[User work]` or `[Context only]`; it does not
-create parallel attribution sections or reorder a thread, timeline, or commit
-section. Shard reports may project those records into separate user-work and
-context-only sections, but Context itself does not.
+relationship, and order. Where attribution annotations are present, they are
+orthogonal record-level annotations such as `[User work]` or `[Context only]`;
+they do not create parallel attribution sections or reorder a thread, timeline,
+or commit section. Shard reports may project those records into separate
+user-work and context-only sections, but Context itself does not.
 
 Identity enrichment does not render email addresses from the GitHub identity profile. Source-native content rendered into Context Output may itself contain email addresses; Context Output v1 does not perform sensitive-data redaction and should be treated with the same confidentiality as the Raw Archive.
 

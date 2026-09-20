@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -14,6 +13,11 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .context import ContextRequest, generate_context
+from .context_inventory import (
+    ContextInventoryError,
+    load_context_inventory,
+    materialize_context_evidence,
+)
 from .summary_container import ContainerMounts, ContainerRunner, ensure_image
 from .summary_opencode import prepare_config, prepare_state
 from .summary_planner import PlannedShard, plan_shards, write_initial_plan
@@ -23,32 +27,31 @@ OPENCODE_VERSION = "1.18.29"
 IMAGE = f"tracebase-opencode:{OPENCODE_VERSION}"
 SHARD_RECOVERY_PROMPT = """Shard protocol validation failed.
 
-Reread /work/TASK.md and /work/NOTES.md. Fix only the shard-protocol
-errors listed below, preserving existing valid investigation and evidence.
+Reread /work/TASK.md and /work/NOTES.md. Fix only the shard-protocol errors
+listed below, preserving existing valid investigation and evidence.
 
 <VALIDATOR_ERRORS>
 
 Classify each error before acting:
 
-- If it concerns root-owned orchestration state such as the shard status
-  block in /work/NOTES.md, repair it yourself.
+- If it concerns root-owned orchestration state such as a shard STATUS.json,
+  repair it yourself.
 - If an individual shard report is missing or substantively incomplete,
-  recover only that shard. Prefer continuing the existing worker/session
-  when the task mechanism supports it; otherwise retry that exact shard
-  once with the same assigned items.
+  dispatch or continue only that shard's worker. The worker is the sole
+  creator and modifier of REPORT.md; the root must never repair it directly.
+  Retry that exact shard once with the same task and assignment.
 - Do not re-investigate valid shards.
 - Do not change shard item assignments merely to satisfy validation.
 - Do not omit or merge a failed shard.
-- Do not rewrite valid report content except where required to restore
-  the protocol.
+- Do not rewrite or delete any report content. The worker must restore its own
+  report when the protocol requires it.
 - Do not change /results/summary.md except when the repaired shard evidence
   materially requires final synthesis to change.
 - A shard whose retry_count is already 1 has exhausted its worker retry;
   do not start another worker for it, and preserve its failed status.
 
-After repairs, reconcile the complete shard inventory and status block,
-then ensure the required result exists at /results/summary.md."""
-_INTERVAL = re.compile(r"^Requested interval: `(.+?) <= t < (.+?)`$", re.MULTILINE)
+After repairs, reconcile the complete shard inventory and statuses, then ensure
+the required result exists at /results/summary.md."""
 
 
 class SummaryError(RuntimeError):
@@ -70,7 +73,6 @@ class SummaryRequest:
     model: str
     variant: str | None
     output: Path
-    requested_interval: dict[str, str] | None = None
     debug_output: Path | None = None
 
 
@@ -131,19 +133,16 @@ def fingerprint_context(context: Path) -> dict[str, Any]:
 
 
 def context_interval(context: Path) -> dict[str, str]:
-    """Read and validate the authoritative interval from Context index.md."""
+    """Read and validate the authoritative interval from Context index.json."""
     try:
-        index = (context / "index.md").read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
+        inventory = load_context_inventory(context)
+    except (ContextInventoryError, OSError, UnicodeError) as error:
         raise SummaryError(
             "could not read requested interval from Context Output"
         ) from error
-    match = _INTERVAL.search(index)
-    if match is None:
-        raise SummaryError("Context Output does not declare a requested interval")
     try:
-        request = ContextRequest.parse(match.group(1), match.group(2))
-    except ValueError as error:
+        request = ContextRequest.parse(*inventory.requested_interval)
+    except (ContextInventoryError, ValueError) as error:
         raise SummaryError("Context Output requested interval is invalid") from error
     return {"from": request.from_text, "to": request.to_text}
 
@@ -283,7 +282,13 @@ def _publish_debug(
 ) -> None:
     staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
     try:
-        for name in ("context", "work", "runtime", "results"):
+        for name in (
+            "context-host",
+            "context-evidence",
+            "work",
+            "runtime",
+            "results",
+        ):
             source = run / name
             if source.is_dir():
                 shutil.copytree(source, staging / name)
@@ -324,12 +329,20 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         "tracebase_version": _tracebase_version(),
     }
     try:
-        context = run / "context"
-        shutil.copytree(request.context, context)
-        provenance["context_input"] = fingerprint_context(context)
-        provenance["requested_interval"] = (
-            request.requested_interval or context_interval(context)
-        )
+        context_host = run / "context-host"
+        shutil.copytree(request.context, context_host)
+        provenance["context_input"] = fingerprint_context(context_host)
+        provenance["requested_interval"] = context_interval(context_host)
+        context_evidence = run / "context-evidence"
+        try:
+            materialize_context_evidence(context_host, context_evidence)
+        except (ContextInventoryError, OSError) as error:
+            raise SummaryError("Context evidence materialization failed") from error
+        provenance["model_context"] = {
+            "mount": "/context:ro",
+            "path": "context-evidence",
+            "fingerprint": fingerprint_context(context_evidence),
+        }
         work = run / "work"
         results = run / "results"
         runtime = run / "runtime"
@@ -342,13 +355,15 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         task.write_bytes(prompt.read_bytes())
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
         try:
-            shard_plan = plan_shards(context)
-            write_initial_plan(work, shard_plan)
+            shard_plan = plan_shards(context_host)
+            write_initial_plan(work, context_host, shard_plan)
         except ValueError as error:
             raise SummaryError(
                 f"Context inventory or shard planning failed: {error}"
             ) from None
-        plan_errors = inspect_shard_plan(work, context).errors
+        plan_errors = inspect_shard_plan(
+            work, context_host, expected_plan=shard_plan
+        ).errors
         if plan_errors:
             raise SummaryError(
                 "Tracebase generated an invalid shard plan: " + "; ".join(plan_errors)
@@ -358,6 +373,9 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 "id": shard.id,
                 "items": list(shard.items),
                 "readable_bytes": shard.readable_bytes,
+                "task_sha256": hashlib.sha256(
+                    (work / "shards" / shard.id / "TASK.md").read_bytes()
+                ).hexdigest(),
             }
             for shard in shard_plan
         ]
@@ -369,7 +387,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
             runner = ContainerRunner(
                 IMAGE,
                 ContainerMounts(
-                    context,
+                    context_evidence,
                     work,
                     results,
                     state,
@@ -385,7 +403,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
             runtime, runner, config, request.model, request.variant
         )
         validation_errors = inspect_shards(
-            work, context, expected_plan=expected_plan
+            work, context_host, expected_plan=expected_plan
         ).errors
         result_missing = not _has_result(results / "summary.md")
         if validation_errors or result_missing:
@@ -399,7 +417,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 result_missing,
                 results / "summary.md",
                 work,
-                context,
+                context_host,
                 expected_plan,
             )
             if not result_present:
@@ -492,8 +510,7 @@ def summarize_archive(
                 model,
                 variant,
                 output,
-                {"from": context_request.from_text, "to": context_request.to_text},
-                debug_output,
+                debug_output=debug_output,
             )
         )
     finally:

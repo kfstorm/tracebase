@@ -18,9 +18,8 @@ from tracebase.archive import (
     encode_path_id,
 )
 from tracebase.attribution import (
-    AttributionError,
-    AttributionMode,
-    source_attribution_mode,
+    ACTOR_SCOPED_ATTRIBUTION_POLICY,
+    CONVERSATIONAL_ATTRIBUTION_POLICY,
 )
 from tracebase.context import (
     ContextError,
@@ -30,7 +29,8 @@ from tracebase.context import (
     load_archive,
     select_observation,
 )
-from tracebase.context_adapter import ContextIndexEntry, RenderedContextItem
+from tracebase.context_adapter import ContextOrdering, RenderedContextItem
+from tracebase.context_adapters import adapter_for
 from tracebase.github_context import GitHubProjection, github_user_work_record_ids
 from tracebase.opencode_context import OpenCodeProjection
 
@@ -196,6 +196,47 @@ def publish_opencode(
     if project is not None:
         current.write_evidence(snapshot, "project.json", json.dumps(project).encode())
     current.publish({"selected_session_count": 1})
+
+
+def publish_opencode_pair(
+    archive: Archive,
+    *,
+    project: dict[str, object],
+    first_id: str,
+    first_directory: str,
+    first_run: str,
+    second_id: str,
+    second_directory: str,
+    second_run: str,
+) -> None:
+    publish_opencode(
+        archive,
+        session(
+            first_id,
+            directory=first_directory,
+            messages=[message(f"{first_id}-message", "2026-01-01T01:00:00Z")],
+        ),
+        first_run,
+        project=project,
+    )
+    publish_opencode(
+        archive,
+        session(
+            second_id,
+            directory=second_directory,
+            messages=[message(f"{second_id}-message", "2026-01-01T02:00:00Z")],
+        ),
+        second_run,
+        project=project,
+        from_text="2026-01-02T00:00:00+08:00",
+        to_text="2026-01-03T00:00:00+08:00",
+    )
+
+
+def context_overviews(output: Path) -> str:
+    inventory = json.loads((output / "index.json").read_text())
+    assert len(inventory["items"]) == 2
+    return "\n".join(path.read_text() for path in output.rglob("overview.md"))
 
 
 def publish_github(
@@ -773,14 +814,14 @@ def test_context_projects_chatgpt_alongside_other_sources(
         "chatgpt",
     }
     assert {
-        item.snapshot.manifest["source_kind"]: item.attribution_mode
+        item.snapshot.manifest["source_kind"]: item.adapter.attribution_policy
         for item in result.items
     } == {
-        "github": AttributionMode.ACTOR_SCOPED,
-        "opencode": AttributionMode.PERSONAL,
-        "chatgpt": AttributionMode.PERSONAL,
+        "github": ACTOR_SCOPED_ATTRIBUTION_POLICY,
+        "opencode": CONVERSATIONAL_ATTRIBUTION_POLICY,
+        "chatgpt": CONVERSATIONAL_ATTRIBUTION_POLICY,
     }
-    assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
+    assert all(not hasattr(item, "attribution_mode") for item in result.items)
     assert "github/example/project/pull/1/overview.md" in files(output)
     assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
         output
@@ -886,9 +927,7 @@ def test_context_extraction_delegates_projection_to_an_adapter(
     class FourthSourceAdapter:
         source_kind = "fourth-source"
         object_kinds = frozenset({"record"})
-        attribution_mode = AttributionMode.PERSONAL
-        index_section = "Fourth source"
-        empty_index_message = "No fourth-source records are available."
+        attribution_policy = CONVERSATIONAL_ATTRIBUTION_POLICY
 
         def project(self, snapshot: object, start: datetime, end: datetime) -> object:
             assert start < end
@@ -913,11 +952,8 @@ def test_context_extraction_delegates_projection_to_an_adapter(
         ) -> RenderedContextItem:
             raise AssertionError("rendering is outside this extraction seam")
 
-        def index_header(self, items: tuple[object, ...]) -> tuple[str, ...]:
-            return ()
-
-        def index_metadata(self, item: object, result: object) -> ContextIndexEntry:
-            raise AssertionError("indexing is outside this extraction seam")
+        def ordering_metadata(self, item: object, result: object) -> ContextOrdering:
+            raise AssertionError("ordering is outside this extraction seam")
 
     adapter = FourthSourceAdapter()
     snapshot = PublishedSnapshot(
@@ -958,12 +994,10 @@ def test_empty_output_has_only_useful_index_without_front_matter(
     archive.mkdir()
     output = tmp_path / "output"
     generate_context(archive, request(), output)
-    assert files(output) == {"index.md", "index.json"}
-    index = (output / "index.md").read_text()
-    assert "Requested interval" in index
-    assert "No OpenCode root sessions are available.\n\n## ChatGPT" in index
-    assert "source_scope_id" not in index
-    assert "coverage" not in index.lower()
+    assert files(output) == {"index.json"}
+    index = json.loads((output / "index.json").read_text())
+    assert index["requested_interval"]["from"] == request().from_text
+    assert index["items"] == []
 
 
 def test_archive_evidence_is_read_only_when_accessed(
@@ -1000,7 +1034,7 @@ def test_empty_removed_run_directory_is_tolerated(tmp_path: Path) -> None:
     output = tmp_path / "output"
     generate_context(archive, request(), output)
 
-    assert files(output) == {"index.md", "index.json"}
+    assert files(output) == {"index.json"}
 
 
 def test_empty_published_run_without_snapshots_directory_is_tolerated(
@@ -1014,7 +1048,7 @@ def test_empty_published_run_without_snapshots_directory_is_tolerated(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md", "index.json"}
+    assert files(output) == {"index.json"}
 
 
 def test_nonempty_unregistered_run_content_fails(tmp_path: Path) -> None:
@@ -1070,8 +1104,8 @@ def test_github_uses_natural_path_and_heading(tmp_path: Path) -> None:
     assert "PR_1" not in overview
     assert "## Tracked account" in overview
     assert "locally synced identity profile" in overview
-    assert "Tracked GitHub account:" not in (output / "index.md").read_text()
-    assert "github/example/project" in (output / "index.md").read_text()
+    inventory = json.loads((output / "index.json").read_text())
+    assert inventory["items"][0]["root"] == "github/example/project/pull/1"
 
 
 def test_github_index_preserves_logical_key_order(tmp_path: Path) -> None:
@@ -1105,14 +1139,9 @@ def test_github_index_preserves_logical_key_order(tmp_path: Path) -> None:
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    github_lines = [
-        line
-        for line in (output / "index.md").read_text().splitlines()
-        if line.startswith("- **example/project")
-    ]
-
     assert [
-        line.split("](", 1)[1].split("/overview.md", 1)[0] for line in github_lines
+        item["root"]
+        for item in json.loads((output / "index.json").read_text())["items"]
     ] == [
         "github/example/project/issue/11",
         "github/example/project/issue/12",
@@ -1911,7 +1940,7 @@ def test_github_context_without_selected_items_does_not_require_profile(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md", "index.json"}
+    assert files(output) == {"index.json"}
 
 
 def test_commit_time_falls_back_to_author_time_and_unknown_time_is_omitted(
@@ -2157,10 +2186,10 @@ def test_github_tracked_actor_is_annotated_without_hard_coding(
     )
     tracked_output = tmp_path / "tracked-output"
     generate_context(tracked_archive.root, request(), tracked_output)
-    index = (tracked_output / "index.md").read_text()
+    inventory = json.loads((tracked_output / "index.json").read_text())
     activity = text(tracked_output, "activity.md")
     overview = text(tracked_output, "overview.md")
-    assert "Tracked GitHub account: @tracked-user" in index
+    assert inventory["items"][0]["root"].startswith("github/")
     assert "Author: @tracked-user (tracked account)" in overview
     assert "@tracked-user (tracked account)" in activity
     assert "@other" in activity
@@ -2168,7 +2197,7 @@ def test_github_tracked_actor_is_annotated_without_hard_coding(
     assert "reviews.001" not in activity
     assert "Review by @tracked-user (tracked account)" in activity
     assert "Closed by @tracked-user (tracked account)" in activity
-    assert "PR_1" not in index
+    assert "PR_1" not in overview
 
 
 def test_github_timestamps_are_local_minute_precision_and_equal_update_once(
@@ -2216,9 +2245,8 @@ def test_opencode_root_session_uses_title_directory_and_compact_activity(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
     assert any(path.name == "activity.md" for path in output.rglob("activity.md"))
-    index = (output / "index.md").read_text()
-    assert "/home/tester/dev/example/project" in index
-    assert "#52 refactor" in index
+    inventory = json.loads((output / "index.json").read_text())
+    assert inventory["items"][0]["root"].startswith("opencode/")
     assert "# #52 refactor\n" in text(output, "overview.md")
     activity = text(output, "activity.md")
     assert "Message" not in activity
@@ -2249,8 +2277,7 @@ def test_opencode_index_has_no_public_gap_section_or_obsolete_gap_kinds(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    index = (output / "index.md").read_text()
-
+    index = (output / "index.json").read_text()
     assert "## Gaps" not in index
     for kind in (
         "malformed-session-parent",
@@ -2386,7 +2413,7 @@ def test_opencode_mixed_synthetic_text_keeps_real_text_and_selection(
     assert "real user request" in activity
     assert "synthetic tool description" not in activity
     assert "compaction part description" not in activity
-    assert "Trace work" in (tmp_path / "output" / "index.md").read_text()
+    assert "Trace work" in text(tmp_path / "output", "overview.md")
 
 
 def test_opencode_ignored_text_is_removed_from_mixed_message(
@@ -2562,9 +2589,9 @@ def test_opencode_non_text_selection_has_local_context_limitation(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    assert files(output) == {"index.md", "index.json"}
+    assert files(output) == {"index.json"}
     assert not list(output.rglob("activity.md"))
-    assert "## Gaps" not in (output / "index.md").read_text()
+    assert "## Gaps" not in (output / "index.json").read_text()
 
 
 def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
@@ -2603,7 +2630,7 @@ def test_opencode_unknown_completion_is_temporal_state_not_public_gap(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert "## Gaps" not in (output / "index.md").read_text()
+    assert "## Gaps" not in (output / "index.json").read_text()
 
 
 def test_opencode_does_not_merge_a_later_observation(
@@ -2717,39 +2744,23 @@ def test_opencode_groups_by_project_worktree_and_shows_distinct_workdirs(
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     project = {"id": "hidden", "worktree": "/repo"}
-    publish_opencode(
+    publish_opencode_pair(
         archive,
-        session(
-            "one",
-            directory="/repo/.worktrees/one",
-            messages=[message("one-message", "2026-01-01T01:00:00Z")],
-        ),
-        "one-run",
         project=project,
-    )
-    publish_opencode(
-        archive,
-        session(
-            "two",
-            directory="/repo/.worktrees/two",
-            messages=[message("two-message", "2026-01-01T02:00:00Z")],
-        ),
-        "two-run",
-        project=project,
-        from_text="2026-01-02T00:00:00+08:00",
-        to_text="2026-01-03T00:00:00+08:00",
+        first_id="one",
+        first_directory="/repo/.worktrees/one",
+        first_run="one-run",
+        second_id="two",
+        second_directory="/repo/.worktrees/two",
+        second_run="two-run",
     )
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    index = (output / "index.md").read_text()
-    assert index.count("### `/repo`") == 1
-    overviews = "\n".join(path.read_text() for path in output.rglob("overview.md"))
+    overviews = context_overviews(output)
     assert "/repo/.worktrees/one" in overviews
     assert "/repo/.worktrees/two" in overviews
-    assert "Project ID" not in index
-    assert "hidden" not in index
 
 
 def test_opencode_global_project_falls_back_to_each_session_directory(
@@ -2758,37 +2769,20 @@ def test_opencode_global_project_falls_back_to_each_session_directory(
     archive = Archive(tmp_path / "archive")
     archive.root.mkdir()
     global_project = {"id": "global", "worktree": "/"}
-    publish_opencode(
+    publish_opencode_pair(
         archive,
-        session(
-            "global-one",
-            directory="/projects/one",
-            messages=[message("one-message", "2026-01-01T01:00:00Z")],
-        ),
-        "global-one-run",
         project=global_project,
-    )
-    publish_opencode(
-        archive,
-        session(
-            "global-two",
-            directory="/projects/two",
-            messages=[message("two-message", "2026-01-01T02:00:00Z")],
-        ),
-        "global-two-run",
-        project=global_project,
-        from_text="2026-01-02T00:00:00+08:00",
-        to_text="2026-01-03T00:00:00+08:00",
+        first_id="global-one",
+        first_directory="/projects/one",
+        first_run="global-one-run",
+        second_id="global-two",
+        second_directory="/projects/two",
+        second_run="global-two-run",
     )
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    index = (output / "index.md").read_text()
-
-    assert "### `/projects/one`" in index
-    assert "### `/projects/two`" in index
-    assert "### `/`" not in index
-    overviews = "\n".join(path.read_text() for path in output.rglob("overview.md"))
+    overviews = context_overviews(output)
     assert "Project directory: `/projects/one`" in overviews
     assert "Project directory: `/projects/two`" in overviews
 
@@ -2810,9 +2804,7 @@ def test_opencode_without_project_json_falls_back_to_session_directory(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    index = (output / "index.md").read_text()
     overview = text(output, "overview.md")
-    assert "### `/legacy/project`" in index
     assert "Project directory: `/legacy/project`" in overview
     assert "Working directory:" not in overview
 
@@ -2834,7 +2826,8 @@ def test_opencode_context_output_is_root_session_only(tmp_path: Path) -> None:
     )
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert "child" not in (output / "index.md").read_text()
+    inventory = json.loads((output / "index.json").read_text())
+    assert all("child" not in item["root"] for item in inventory["items"])
     assert len(list(output.rglob("overview.md"))) == 1
 
 
@@ -3108,7 +3101,7 @@ def test_opencode_in_range_tool_keeps_earlier_text_in_background(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    assert files(output) == {"index.md", "index.json"}
+    assert files(output) == {"index.json"}
 
 
 def test_opencode_file_and_shell_tools_are_not_rendered(tmp_path: Path) -> None:
@@ -3492,15 +3485,18 @@ def test_context_generation_is_offline(
     generate_context(archive, request(), tmp_path / "output")
 
 
-def test_source_attribution_mapping_is_explicit_and_rejects_unknown_kinds() -> None:
-    assert source_attribution_mode("opencode") is AttributionMode.PERSONAL
-    assert source_attribution_mode("chatgpt") is AttributionMode.PERSONAL
-    assert source_attribution_mode("github") is AttributionMode.ACTOR_SCOPED
-    with pytest.raises(AttributionError, match="no attribution semantics"):
-        source_attribution_mode("future-source")
+def test_context_adapters_declare_attribution_policies() -> None:
+    assert (
+        adapter_for("opencode").attribution_policy is CONVERSATIONAL_ATTRIBUTION_POLICY
+    )
+    assert (
+        adapter_for("chatgpt").attribution_policy is CONVERSATIONAL_ATTRIBUTION_POLICY
+    )
+    assert adapter_for("github").attribution_policy is ACTOR_SCOPED_ATTRIBUTION_POLICY
+    assert adapter_for("future-source") is None
 
 
-def test_personal_opencode_delegated_work_is_user_work_and_exposes_mode(
+def test_conversational_opencode_delegated_work_is_user_work(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -3535,27 +3531,24 @@ def test_personal_opencode_delegated_work_is_user_work_and_exposes_mode(
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
 
-    index = (output / "index.md").read_text()
     inventory = json.loads((output / "index.json").read_text())
     overview = text(output, "overview.md")
     activity = text(output, "activity.md")
-    assert "attribution mode: `personal`" in index
     assert inventory["items"][0]["root"] == "opencode/workspace/example/session/01"
-    assert inventory["items"][0]["attribution_mode"] == "personal"
     assert set(inventory["items"][0]) == {
         "root",
-        "attribution_mode",
         "files",
     }
     assert inventory["items"][0]["files"] == ["overview.md", "activity.md"]
-    assert "- Attribution mode: `personal`" in overview
-    assert "Attribution mode: `personal`" in activity
-    assert "delegated agent or subagent" in overview
+    assert CONVERSATIONAL_ATTRIBUTION_POLICY.context_guidance in overview
+    assert "CONVERSATIONAL_ATTRIBUTION_POLICY" not in overview
+    assert "CONVERSATIONAL_ATTRIBUTION_POLICY" not in activity
+    assert "delegated cognitive work" in overview
     assert "Delegated investigation and implementation" in activity
     assert "Tests and validation complete" in activity
 
 
-def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
+def test_tracked_account_collaboration_separates_user_work_from_collaborators(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -3635,11 +3628,13 @@ def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
     )
 
     activity = text(output, "activity.md")
-    assert "Attribution mode: `actor_scoped`" in text(output, "overview.md")
+    assert ACTOR_SCOPED_ATTRIBUTION_POLICY.context_guidance in text(
+        output, "overview.md"
+    )
     assert activity.count("## Commits") == 1
     assert "## User work" not in activity
     assert "## Context-only evidence" not in activity
-    assert "Attribution mode: `actor_scoped`" in activity
+    assert "ACTOR_SCOPED_ATTRIBUTION_POLICY" not in activity
     assert activity.index("tracked concern") < activity.index("other finding")
     assert activity.index("approved after review") < activity.index("separate finding")
     assert activity.index("Collaborator implementation") < activity.index(
@@ -3661,7 +3656,7 @@ def test_actor_scoped_collaboration_separates_tracked_work_from_collaborators(
     assert ("timeline", "COLLAB_COMMIT") not in ids
 
 
-def test_actor_scoped_item_with_only_collaborator_activity_is_context_only(
+def test_tracked_item_with_only_collaborator_activity_is_context_only(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -3703,10 +3698,9 @@ def test_actor_scoped_item_with_only_collaborator_activity_is_context_only(
     assert "## Context-only evidence" not in activity
     assert "Important collaborator implementation" in activity
     assert "[Context only]" in activity
-    assert "attribution mode: `actor_scoped`" in (output / "index.md").read_text()
 
 
-def test_mixed_sources_keep_personal_work_and_tracked_actions_only(
+def test_mixed_sources_keep_conversational_work_and_tracked_actions_only(
     tmp_path: Path,
 ) -> None:
     archive = Archive(tmp_path / "archive")
@@ -3753,9 +3747,6 @@ def test_mixed_sources_keep_personal_work_and_tracked_actions_only(
 
     output = tmp_path / "output"
     generate_context(archive.root, request(), output)
-    index = (output / "index.md").read_text()
-    assert index.count("attribution mode: `personal`") == 1
-    assert index.count("attribution mode: `actor_scoped`") == 1
     activity_files = {path.read_text() for path in output.rglob("activity.md")}
     assert any("Delegated design decision" in content for content in activity_files)
     github_activity = next(

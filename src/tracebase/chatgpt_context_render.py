@@ -21,7 +21,7 @@ def render_chatgpt(
         "",
         "## Attribution",
         "",
-        f"- Attribution mode: `{item.attribution_mode.value}`",
+        f"- {item.adapter.attribution_policy.context_guidance}",
         "- This is the provider-returned observed current conversation stream; "
         "historical branch versions are not reconstructed.",
         "",
@@ -29,7 +29,6 @@ def render_chatgpt(
     files = render_dialogue_files(
         projection.dialogue,
         timezone,
-        item.attribution_mode.value,
         overview,
     )
     for name, lines in files.items():

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .attribution import AttributionMode
-
-_INVENTORY_FIELDS = {"root", "attribution_mode", "files"}
+_INVENTORY_FIELDS = {"root", "files"}
+_INVENTORY_TOP_LEVEL_FIELDS = {"requested_interval", "items"}
 
 
 class ContextInventoryError(ValueError):
@@ -21,7 +21,6 @@ class ContextInventoryItem:
     """The generic orchestration metadata for one Context item."""
 
     root: str
-    attribution_mode: AttributionMode
     files: tuple[str, ...]
 
 
@@ -29,6 +28,7 @@ class ContextInventoryItem:
 class ContextInventory:
     """The authoritative, stable-order Context item inventory."""
 
+    requested_interval: tuple[str, str]
     items: tuple[ContextInventoryItem, ...]
 
 
@@ -54,14 +54,37 @@ def _load_json(path: Path) -> Any:
         raise ContextInventoryError("Context inventory is not valid JSON") from None
 
 
-def load_context_inventory(context_dir: Path) -> ContextInventory:
-    """Load and validate inventory metadata and its referenced Context tree."""
+def _reject_legacy_index(context_dir: Path) -> None:
+    if (context_dir / "index.md").exists() or (context_dir / "index.md").is_symlink():
+        raise ContextInventoryError("Context Output must not contain index.md")
+
+
+def _validate_context_dir(context_dir: Path) -> None:
     if context_dir.is_symlink() or not context_dir.is_dir():
         raise ContextInventoryError("Context Output must be a regular directory")
+    _reject_legacy_index(context_dir)
+
+
+def load_context_inventory(context_dir: Path) -> ContextInventory:
+    """Load and validate inventory metadata and its referenced Context tree."""
+    _validate_context_dir(context_dir)
 
     raw = _load_json(context_dir / "index.json")
-    if not isinstance(raw, dict) or set(raw) != {"items"}:
-        raise ContextInventoryError("Context inventory must contain only an items list")
+    if not isinstance(raw, dict) or set(raw) != _INVENTORY_TOP_LEVEL_FIELDS:
+        raise ContextInventoryError(
+            "Context inventory must contain requested_interval and items"
+        )
+    raw_interval = raw["requested_interval"]
+    if not isinstance(raw_interval, dict) or set(raw_interval) != {"from", "to"}:
+        raise ContextInventoryError(
+            "Context inventory requested_interval must contain from and to"
+        )
+    from_text = raw_interval["from"]
+    to_text = raw_interval["to"]
+    if not isinstance(from_text, str) or not isinstance(to_text, str):
+        raise ContextInventoryError(
+            "Context inventory requested_interval values must be strings"
+        )
     raw_items = raw["items"]
     if not isinstance(raw_items, list):
         raise ContextInventoryError("Context inventory items must be a list")
@@ -85,18 +108,6 @@ def load_context_inventory(context_dir: Path) -> ContextInventory:
                 f"Context inventory root {root!r} overlaps another item root"
             )
         roots.add(root)
-
-        mode = raw_item.get("attribution_mode")
-        if not isinstance(mode, str):
-            raise ContextInventoryError(
-                f"Context inventory attribution mode for {root!r} is invalid"
-            )
-        try:
-            attribution_mode = AttributionMode(mode)
-        except ValueError:
-            raise ContextInventoryError(
-                f"Context inventory attribution mode for {root!r} is invalid"
-            ) from None
 
         raw_files = raw_item.get("files")
         if not isinstance(raw_files, list) or not raw_files:
@@ -132,9 +143,31 @@ def load_context_inventory(context_dir: Path) -> ContextInventory:
                 raise ContextInventoryError(
                     f"Context item {root!r} is missing expected file {file_path!r}"
                 )
-        items.append(ContextInventoryItem(root, attribution_mode, tuple(files)))
+        actual_files = {
+            path.relative_to(item_path).as_posix()
+            for path in item_path.rglob("*")
+            if path.is_file()
+        }
+        if actual_files != set(files):
+            if any(
+                isinstance(other, dict)
+                and isinstance(other.get("root"), str)
+                and other["root"] != root
+                and (
+                    other["root"].startswith(root + "/")
+                    or root.startswith(other["root"] + "/")
+                )
+                for other in raw_items
+            ):
+                raise ContextInventoryError(
+                    f"Context inventory root {root!r} overlaps another item root"
+                )
+            raise ContextInventoryError(
+                f"Context item {root!r} file inventory does not match manifest"
+            )
+        items.append(ContextInventoryItem(root, tuple(files)))
 
-    return ContextInventory(tuple(items))
+    return ContextInventory((from_text, to_text), tuple(items))
 
 
 def item_readable_sizes(
@@ -159,3 +192,23 @@ def item_readable_sizes(
                     ) from None
         sizes[item.root] = total
     return sizes
+
+
+def materialize_context_evidence(context_dir: Path, evidence_dir: Path) -> None:
+    """Copy only manifest-declared Context files into a model-visible view."""
+    inventory = load_context_inventory(context_dir)
+    if evidence_dir.exists() or evidence_dir.is_symlink():
+        raise ContextInventoryError("Context evidence directory already exists")
+    evidence_dir.mkdir(parents=True)
+    for item in inventory.items:
+        for file_path in item.files:
+            relative = PurePosixPath(item.root, file_path)
+            source = context_dir.joinpath(*relative.parts)
+            target = evidence_dir.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copyfile(source, target)
+            except OSError as error:
+                raise ContextInventoryError(
+                    f"could not materialize Context file {relative.as_posix()}"
+                ) from error
