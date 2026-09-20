@@ -402,7 +402,13 @@ def _validate_published_run(run_root: Path) -> dict[str, Any]:
         raise ArchiveError("run collector is invalid")
     if not isinstance(run["collector"].get("effective_options"), dict):
         raise ArchiveError("run collector is invalid")
-    started, completed = _published_run_timestamps(run)
+    try:
+        CollectionRange.parse(
+            run["collection_range"]["from"], run["collection_range"]["to"]
+        )
+        started, completed = _parse_published_run_timestamps(run)
+    except ArchiveError, KeyError, TypeError:
+        raise ArchiveError("run timestamps or collection range are invalid") from None
     if started > completed:
         raise ArchiveError("run timestamps are invalid")
     if not isinstance(run.get("snapshots"), list):
@@ -410,15 +416,12 @@ def _validate_published_run(run_root: Path) -> dict[str, Any]:
     return run
 
 
-def _published_run_timestamps(run: dict[str, Any]) -> tuple[datetime, datetime]:
+def _parse_published_run_timestamps(run: dict[str, Any]) -> tuple[datetime, datetime]:
     try:
-        CollectionRange.parse(
-            run["collection_range"]["from"], run["collection_range"]["to"]
-        )
         started = _parse_published_timestamp(run["started_at"])
         completed = _parse_published_timestamp(run["completed_at"])
     except ArchiveError, KeyError, TypeError:
-        raise ArchiveError("run timestamps or collection range are invalid") from None
+        raise ArchiveError("run timestamps are invalid") from None
     return started, completed
 
 
@@ -524,7 +527,7 @@ def _load_published_run_snapshots(
             raise ArchiveError("snapshot directories do not match its manifest")
         if any(not path.is_dir() or path.is_symlink() for path in kind_root.iterdir()):
             raise ArchiveError("snapshot directory is not regular")
-    _started_at, completed_at = _published_run_timestamps(run)
+    _started_at, completed_at = _parse_published_run_timestamps(run)
     snapshots = tuple(
         _load_published_snapshot(run_root, run, entry, completed_at)
         for entry in entries
@@ -554,7 +557,9 @@ def load_published_context_archive(
         if not published_run.manifest["snapshots"]:
             loaded.append(published_run)
             continue
-        _started_at, completed_at = _published_run_timestamps(published_run.manifest)
+        _started_at, completed_at = _parse_published_run_timestamps(
+            published_run.manifest
+        )
         if completed_at <= before:
             loaded.append(published_run)
             continue
