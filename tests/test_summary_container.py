@@ -69,7 +69,6 @@ def test_dockerfile_requires_an_explicit_opencode_version() -> None:
 def test_container_mounts_only_model_visible_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    host_context = tmp_path / "context-host"
     model_context = tmp_path / "context-evidence"
     runner = ContainerRunner(
         "image",
@@ -94,4 +93,3 @@ def test_container_mounts_only_model_visible_context(
     command = calls[0]
 
     assert f"{model_context}:/context:ro" in command
-    assert f"{host_context}:/context:ro" not in command

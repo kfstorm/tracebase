@@ -194,9 +194,7 @@ def item_readable_sizes(
     return sizes
 
 
-def materialize_context_evidence(
-    context_dir: Path, evidence_dir: Path
-) -> ContextInventory:
+def materialize_context_evidence(context_dir: Path, evidence_dir: Path) -> None:
     """Copy only manifest-declared Context files into a model-visible view."""
     inventory = load_context_inventory(context_dir)
     if evidence_dir.exists() or evidence_dir.is_symlink():
@@ -214,4 +212,3 @@ def materialize_context_evidence(
                 raise ContextInventoryError(
                     f"could not materialize Context file {relative.as_posix()}"
                 ) from error
-    return inventory
