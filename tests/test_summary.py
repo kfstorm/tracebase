@@ -512,6 +512,15 @@ def test_worker_contract_preserves_evidence_interpretation_rules() -> None:
         "Do not use the Internet, external services, the Raw Archive",
     ):
         assert clause in normalized
+    assert (
+        "preserve important motivation, decisions, state evidence according to the "
+        "semantics above, uncertainty, Context paths, and technical detail for root "
+        "synthesis"
+    ) in normalized
+    assert (
+        "preserve important motivation, decisions, final state, uncertainty, Context "
+        "paths, and technical detail for root synthesis"
+    ) not in normalized
 
 
 def test_worker_contract_distinguishes_state_semantics_per_evidence_item(

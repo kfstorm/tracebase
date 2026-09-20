@@ -109,8 +109,9 @@ explain attributed User work or resulting state, preserve only the minimum
 neutral context needed for that explanation.
 
 For all other assigned evidence, preserve important motivation, decisions,
-final state, uncertainty, Context paths, and technical detail for root
-synthesis. Preserve grouping and order shown in Context. Keep review threads
+state evidence according to the semantics above, uncertainty, Context paths, and
+technical detail for root synthesis. Preserve grouping and order shown in
+Context. Keep review threads
 together and commits in their single commits section. Do not decide Summary
 materiality, major work, or final workstream boundaries. Do not infer that
 something was fixed merely because a PR merged, a review thread resolved, or a
