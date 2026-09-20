@@ -907,6 +907,46 @@ def test_publish_rejects_missing_declared_evidence_and_keeps_staging() -> None:
         assert not (Path(directory) / "runs").exists()
 
 
+def test_publish_rejects_snapshot_observed_after_run_completion() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        run = build_run(archive)
+        snapshot = run.write_snapshot(
+            Snapshot(
+                source_kind="opencode",
+                object_kind="session",
+                source_id="session-1",
+                observation_window={
+                    "from": "2099-01-01T00:00:00+00:00",
+                    "to": "2099-01-01T01:00:00+00:00",
+                },
+                evidence_files=({"path": "session.json"},),
+            )
+        )
+        run.write_evidence(snapshot, "session.json", b"session")
+
+        with pytest.raises(ArchiveError, match="exceeds run completion"):
+            run.publish({})
+
+        assert run.staging.exists()
+        assert not (Path(directory) / "runs").exists()
+
+
+def test_published_reader_rejects_snapshot_observed_after_run_completion() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        archive = Archive(directory)
+        run = build_run(archive)
+        write_session_snapshot(run)
+        published = run.publish({})
+        run_manifest_path = published / "run.json"
+        run_manifest = json.loads(run_manifest_path.read_text())
+        run_manifest["started_at"] = "2026-01-01T00:00:00+00:00"
+        run_manifest["completed_at"] = "2026-01-01T00:30:00+00:00"
+        run_manifest_path.write_text(json.dumps(run_manifest))
+        with pytest.raises(ArchiveError, match="exceeds run completion"):
+            load_published_archive(directory)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
