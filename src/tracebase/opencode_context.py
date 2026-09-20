@@ -10,7 +10,10 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
-from .attribution import CONVERSATIONAL_ATTRIBUTION_POLICY
+from .attribution import (
+    CONVERSATIONAL_ATTRIBUTION_POLICY,
+    CONVERSATIONAL_EVIDENCE_POLICY,
+)
 from .context_adapter import (
     ContextOrdering,
     RenderedContextItem,
@@ -302,6 +305,7 @@ class OpenCodeContextAdapter:
     source_kind = "opencode"
     object_kinds = frozenset({"session"})
     attribution_policy = CONVERSATIONAL_ATTRIBUTION_POLICY
+    evidence_policy = CONVERSATIONAL_EVIDENCE_POLICY
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime

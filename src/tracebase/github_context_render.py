@@ -6,6 +6,7 @@ from datetime import datetime, tzinfo
 from typing import Any
 
 from .context import ContextExtractionResult, ContextItem
+from .context_adapter import context_semantics_lines
 from .context_render import format_timestamp, parse_timestamp
 from .github_context import (
     GitHubProjection,
@@ -772,14 +773,12 @@ def _overview(
             "## Tracked account",
             "",
             f"- GitHub: @{projection.tracked_login or 'unknown'}",
-            f"- {item.adapter.attribution_policy.context_guidance}",
             "- Git commit identities are marked `(tracked account)` only when they "
             "match a locally synced identity profile.",
-            "- Activity and Background may include collaborators' work on tracked "
-            "Items; only explicitly marked actors are the tracked account.",
             "",
         ]
     )
+    lines.extend(context_semantics_lines(item.adapter))
     author = github_actor_login(issue_value)
     if author:
         lines.append(f"- Author: {_actor_label(issue_value, projection.tracked_login)}")

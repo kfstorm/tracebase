@@ -19,7 +19,10 @@ from tracebase.archive import (
 )
 from tracebase.attribution import (
     ACTOR_SCOPED_ATTRIBUTION_POLICY,
+    CHATGPT_EVIDENCE_POLICY,
     CONVERSATIONAL_ATTRIBUTION_POLICY,
+    CONVERSATIONAL_EVIDENCE_POLICY,
+    PROVIDER_EVIDENCE_POLICY,
 )
 from tracebase.context import (
     ContextError,
@@ -821,12 +824,36 @@ def test_context_projects_chatgpt_alongside_other_sources(
         "opencode": CONVERSATIONAL_ATTRIBUTION_POLICY,
         "chatgpt": CONVERSATIONAL_ATTRIBUTION_POLICY,
     }
+    assert {
+        item.snapshot.manifest["source_kind"]: item.adapter.evidence_policy
+        for item in result.items
+    } == {
+        "github": PROVIDER_EVIDENCE_POLICY,
+        "opencode": CONVERSATIONAL_EVIDENCE_POLICY,
+        "chatgpt": CHATGPT_EVIDENCE_POLICY,
+    }
     assert all(not hasattr(item, "attribution_mode") for item in result.items)
+    assert all(not hasattr(item, "evidence_mode") for item in result.items)
+    assert all(not hasattr(item, "state_mode") for item in result.items)
     assert "github/example/project/pull/1/overview.md" in files(output)
     assert "opencode/home/tester/dev/example/project/session/01/overview.md" in files(
         output
     )
     assert "chatgpt/conversation/01/overview.md" in files(output)
+    overviews = "\n".join(path.read_text() for path in output.rglob("overview.md"))
+    for policy in (
+        ACTOR_SCOPED_ATTRIBUTION_POLICY,
+        CONVERSATIONAL_ATTRIBUTION_POLICY,
+    ):
+        assert policy.context_guidance in overviews
+    for policy in (
+        PROVIDER_EVIDENCE_POLICY,
+        CONVERSATIONAL_EVIDENCE_POLICY,
+        CHATGPT_EVIDENCE_POLICY,
+    ):
+        assert policy.evidence_guidance in overviews
+    assert overviews.count("## Attribution") == 3
+    assert overviews.count("## Evidence semantics") == 3
 
 
 def test_chatgpt_context_numbers_conversations_by_activity_title_and_source_id(
@@ -3496,6 +3523,15 @@ def test_context_adapters_declare_attribution_policies() -> None:
     assert adapter_for("future-source") is None
 
 
+def test_context_adapters_declare_separate_evidence_policies() -> None:
+    assert adapter_for("opencode").evidence_policy is CONVERSATIONAL_EVIDENCE_POLICY
+    assert adapter_for("chatgpt").evidence_policy is CHATGPT_EVIDENCE_POLICY
+    github_adapter = adapter_for("github")
+    assert github_adapter is not None
+    assert github_adapter.evidence_policy is PROVIDER_EVIDENCE_POLICY
+    assert github_adapter.evidence_policy != github_adapter.attribution_policy
+
+
 def test_conversational_opencode_delegated_work_is_user_work(
     tmp_path: Path,
 ) -> None:
@@ -3541,6 +3577,8 @@ def test_conversational_opencode_delegated_work_is_user_work(
     }
     assert inventory["items"][0]["files"] == ["overview.md", "activity.md"]
     assert CONVERSATIONAL_ATTRIBUTION_POLICY.context_guidance in overview
+    assert CONVERSATIONAL_EVIDENCE_POLICY.evidence_guidance in overview
+    assert "## Evidence semantics" in overview
     assert "CONVERSATIONAL_ATTRIBUTION_POLICY" not in overview
     assert "CONVERSATIONAL_ATTRIBUTION_POLICY" not in activity
     assert "delegated cognitive work" in overview
@@ -3631,6 +3669,8 @@ def test_tracked_account_collaboration_separates_user_work_from_collaborators(
     assert ACTOR_SCOPED_ATTRIBUTION_POLICY.context_guidance in text(
         output, "overview.md"
     )
+    assert PROVIDER_EVIDENCE_POLICY.evidence_guidance in text(output, "overview.md")
+    assert "## Evidence semantics" in text(output, "overview.md")
     assert activity.count("## Commits") == 1
     assert "## User work" not in activity
     assert "## Context-only evidence" not in activity

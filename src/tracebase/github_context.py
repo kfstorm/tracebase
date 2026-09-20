@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
-from .attribution import ACTOR_SCOPED_ATTRIBUTION_POLICY
+from .attribution import ACTOR_SCOPED_ATTRIBUTION_POLICY, PROVIDER_EVIDENCE_POLICY
 from .context_adapter import (
     ContextOrdering,
     RenderedContextItem,
@@ -621,6 +621,7 @@ class GitHubContextAdapter:
     source_kind = "github"
     object_kinds = frozenset({"issue", "pull-request"})
     attribution_policy = ACTOR_SCOPED_ATTRIBUTION_POLICY
+    evidence_policy = PROVIDER_EVIDENCE_POLICY
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime

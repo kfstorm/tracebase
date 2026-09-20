@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from .archive import PublishedRun, PublishedSnapshot
-from .attribution import AttributionPolicy
+from .attribution import AttributionPolicy, EvidencePolicy
 
 if TYPE_CHECKING:
     from .context import ContextExtractionResult, ContextItem
@@ -38,6 +38,7 @@ class ContextAdapter(Protocol):
     source_kind: str
     object_kinds: frozenset[str]
     attribution_policy: AttributionPolicy
+    evidence_policy: EvidencePolicy
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime
@@ -74,6 +75,20 @@ def rendered_context_item(
 ) -> RenderedContextItem:
     """Combine source-rendered files with the adapter's ordering metadata."""
     return RenderedContextItem(tuple(files), adapter.ordering_metadata(item, result))
+
+
+def context_semantics_lines(adapter: ContextAdapter) -> list[str]:
+    """Render source-declared semantics without exposing policy identifiers."""
+    return [
+        "## Attribution",
+        "",
+        f"- {adapter.attribution_policy.context_guidance}",
+        "",
+        "## Evidence semantics",
+        "",
+        f"- {adapter.evidence_policy.evidence_guidance}",
+        "",
+    ]
 
 
 def render_source_item(
