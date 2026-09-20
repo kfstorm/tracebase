@@ -518,8 +518,8 @@ def test_worker_contract_preserves_evidence_interpretation_rules() -> None:
     normalized = " ".join(prompt.split())
 
     for clause in (
-        "Consider execution, validation, or deployment only when the assigned "
-        "evidence supports it",
+        "Limit conclusions to what the assigned evidence and its declared semantics "
+        "support",
         "Do not decide Summary materiality, major work, or final workstream boundaries",
         "The assigned evidence was reviewed and classified as non-work for the "
         "requested work summary",
@@ -559,8 +559,8 @@ def test_worker_contract_distinguishes_state_semantics_per_evidence_item(
         "Those semantics determine whether a point-in-time observation can support "
         "a final or current claim",
         "how any observation-window caveat applies",
-        "An assistant report, patch, or command does not by itself prove an "
-        "external side effect",
+        "Limit conclusions to what the assigned evidence and its declared semantics "
+        "support",
     ):
         assert clause in normalized
     lowered = normalized.casefold()

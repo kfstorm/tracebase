@@ -55,7 +55,7 @@ ACTOR_SCOPED_ATTRIBUTION_POLICY = AttributionPolicy(
 PROVIDER_EVIDENCE_POLICY = EvidencePolicy(
     "This item contains selected provider observations of mutable external state. "
     "Those observations may participate in final-state reconciliation, subject to "
-    "the observation-window caveat stated in this item, but they are not a globally "
-    "synchronized or authoritative view beyond the selected observation. Preserve "
-    "record-level evidence and its reported state according to the annotations."
+    "any observation-window caveat stated in this item, but they are not a globally "
+    "synchronized or authoritative view beyond the selected observation. Record-level "
+    "attribution annotations remain separate from these state semantics."
 )

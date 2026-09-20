@@ -3530,6 +3530,15 @@ def test_context_adapters_declare_separate_evidence_policies() -> None:
     assert github_adapter is not None
     assert github_adapter.evidence_policy is PROVIDER_EVIDENCE_POLICY
     assert github_adapter.evidence_policy != github_adapter.attribution_policy
+    assert "any observation-window caveat stated in this item" in (
+        PROVIDER_EVIDENCE_POLICY.evidence_guidance
+    )
+    assert "Record-level attribution annotations remain separate" in (
+        PROVIDER_EVIDENCE_POLICY.evidence_guidance
+    )
+    assert (
+        "according to the annotations" not in PROVIDER_EVIDENCE_POLICY.evidence_guidance
+    )
 
 
 def test_conversational_opencode_delegated_work_is_user_work(
