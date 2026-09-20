@@ -336,6 +336,10 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
         "complete shard plan and every shard package",
         "self-contained `TASK.md`",
         "Do not re-plan, split, merge, rename, remove",
+        "requested half-open interval to `/work/NOTES.md`",
+        "Do not read the Context manifest to obtain the interval",
+        "enumerate the immediate shard directories",
+        "Do not open or read any shard `TASK.md` content",
         "Read /work/shards/<id>/TASK.md and complete exactly that task.",
         "Read and update only `status` and `retry_count`",
         "Initial state is exactly",
@@ -350,8 +354,25 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
     assert "[User work]" in normalized
     assert "[Context only]" in normalized
     assert "attribution mode" not in normalized
+    assert "index.json" not in normalized
     assert "index.md" not in normalized
+    assert "Read every host-created package" not in normalized
     assert "SHARD_STATUS" not in normalized
+
+
+def test_worker_contract_preserves_evidence_interpretation_rules() -> None:
+    prompt = (
+        Path(__file__).parents[1] / "src/tracebase/prompts/summary-worker-task-v1.md"
+    ).read_text(encoding="utf-8")
+    normalized = " ".join(prompt.split())
+
+    for clause in (
+        "An explicit assistant report of actual execution or results may be considered",
+        "Collaborator evidence may explain the user's action or resulting state",
+        "Do not decide Summary materiality, major work, or final workstream boundaries",
+        "When `Authored:` is shown, distinguish earlier authorship",
+    ):
+        assert clause in normalized
 
 
 def test_recovery_reuses_root_and_preserves_item_assignment(tmp_path: Path) -> None:
@@ -470,6 +491,19 @@ def test_report_accepts_any_atx_heading_level(tmp_path: Path, level: str) -> Non
     )
 
     assert inspect_shards(tmp_path).errors == ()
+
+
+def test_report_rejects_extra_heading(tmp_path: Path) -> None:
+    _write_status(tmp_path, [{"id": "one", "items": ["synthetic/new/item"]}])
+    (tmp_path / "shards/one/REPORT.md").write_text(
+        "## User work\n\nevidence\n\n## Context-only evidence\n\nnone\n\n"
+        "### Extra\n\nnot allowed\n",
+        encoding="utf-8",
+    )
+
+    assert any(
+        "does not separate" in error for error in inspect_shards(tmp_path).errors
+    )
 
 
 def test_plan_accepts_exact_cross_source_partition(tmp_path: Path) -> None:

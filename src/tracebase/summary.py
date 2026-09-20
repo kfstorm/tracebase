@@ -339,7 +339,17 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
         try:
             shard_plan = plan_shards(context)
-            write_initial_plan(work, context, shard_plan)
+            requested_interval = provenance["requested_interval"]
+            assert isinstance(requested_interval, dict)
+            write_initial_plan(
+                work,
+                context,
+                shard_plan,
+                (
+                    requested_interval["from"],
+                    requested_interval["to"],
+                ),
+            )
         except ValueError as error:
             raise SummaryError(
                 f"Context inventory or shard planning failed: {error}"

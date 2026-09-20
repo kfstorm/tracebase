@@ -42,6 +42,7 @@ _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _USER_WORK_SECTION = "## User work"
 _CONTEXT_ONLY_SECTION = "## Context-only evidence"
 _PLAN_ARGUMENT_COUNT = 3
+_REPORT_HEADING_COUNT = 2
 _STATUS_FIELDS = {"status", "retry_count"}
 
 
@@ -52,8 +53,8 @@ class ShardObservability:
     errors: tuple[str, ...]
 
 
-def _normalized_headings(report: str) -> set[str]:
-    headings: set[str] = set()
+def _normalized_headings(report: str) -> tuple[str, ...]:
+    headings: list[str] = []
     fenced = False
     for line in report.splitlines():
         stripped = line.strip()
@@ -66,8 +67,8 @@ def _normalized_headings(report: str) -> set[str]:
         if match is None:
             continue
         heading = re.sub(r"\s+#+\s*$", "", match.group(1)).strip()
-        headings.add(re.sub(r"\s+", " ", heading).casefold())
-    return headings
+        headings.append(re.sub(r"\s+", " ", heading).casefold())
+    return tuple(headings)
 
 
 def _read_context(
@@ -147,7 +148,8 @@ def _validate_report(work_dir: Path, shard_id: str) -> list[str]:
         _USER_WORK_SECTION.casefold()[3:],
         _CONTEXT_ONLY_SECTION.casefold()[3:],
     }
-    if not required.issubset(_normalized_headings(report)):
+    headings = _normalized_headings(report)
+    if len(headings) != _REPORT_HEADING_COUNT or set(headings) != required:
         return [
             f"shard {shard_id!r} report does not separate user work from "
             "context-only evidence"
@@ -300,8 +302,8 @@ def _validate_common(
                 )
     if expected_plan is not None:
         expected_ids = tuple(shard.id for shard in expected_plan)
-        if tuple(actual_ids) != expected_ids:
-            errors.append("shard package order differs from the host-generated plan")
+        if set(actual_ids) != set(expected_ids):
+            errors.append("shard package IDs differ from the host-generated plan")
     return tuple(errors)
 
 

@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from tracebase.context_inventory import ContextInventoryError, load_context_inventory
-from tracebase.summary_planner import ShardPolicy, plan_shards, write_initial_plan
+from tracebase.summary_planner import (
+    PlannedShard,
+    ShardPolicy,
+    plan_shards,
+    write_initial_plan,
+)
+from tracebase.summary_shard_validator import inspect_shard_plan
 
 
 def _context(
@@ -304,4 +310,18 @@ def test_initial_plan_materializes_self_contained_worker_packages(
     assert "- /context/two/overview.md" in task
     assert "Do not read or modify `/work/TASK.md`" in task
     assert "Write exactly one report to:" in task
-    assert "SHARD_STATUS" not in (work / "NOTES.md").read_text()
+    notes = (work / "NOTES.md").read_text()
+    assert "Requested interval: [2026-01-01T00:00:00+00:00, " in notes
+    assert notes.count("- shard-") == len(plan)
+    assert "- shard-01" in notes
+    assert "SHARD_STATUS" not in notes
+
+
+def test_validator_ignores_filesystem_order_for_large_plan(tmp_path: Path) -> None:
+    context = _context(tmp_path, [])
+    work = tmp_path / "work"
+    plan = tuple(PlannedShard(f"shard-{index:02d}", (), 0) for index in range(1, 101))
+
+    write_initial_plan(work, context, plan)
+
+    assert inspect_shard_plan(work, context, expected_plan=plan).errors == ()

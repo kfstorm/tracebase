@@ -204,7 +204,10 @@ def shard_task_text(
 
 
 def write_initial_plan(
-    work_dir: Path, context_dir: Path, plan: tuple[PlannedShard, ...]
+    work_dir: Path,
+    context_dir: Path,
+    plan: tuple[PlannedShard, ...],
+    requested_interval: tuple[str, str] | None = None,
 ) -> None:
     """Materialize immutable shard packages before the root session starts."""
     try:
@@ -222,10 +225,17 @@ def write_initial_plan(
         (shard_dir / "STATUS.json").write_text(
             '{"status":"pending","retry_count":0}\n', encoding="utf-8"
         )
+    interval = (
+        inventory.requested_interval
+        if requested_interval is None
+        else requested_interval
+    )
     notes = (
         "# Summary shard plan\n\n"
         "Tracebase generated and validated this execution partition before the "
         "root model started. Shard membership is an execution partition only; "
         "it does not establish a semantic or workstream relationship.\n"
+        f"\nRequested interval: [{interval[0]}, {interval[1]})\n"
+        "\nShard order:\n" + "".join(f"- {shard.id}\n" for shard in plan)
     )
     work_dir.joinpath("NOTES.md").write_text(notes, encoding="utf-8")
