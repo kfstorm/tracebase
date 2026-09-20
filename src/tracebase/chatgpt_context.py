@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
 from .attribution import source_attribution_mode
 from .context_adapter import (
-    ContextIndexEntry,
+    ContextOrdering,
     RenderedContextItem,
     number_context_items,
     render_source_item,
@@ -222,8 +222,6 @@ class ChatGPTContextAdapter:
     source_kind = "chatgpt"
     object_kinds = frozenset({"conversation"})
     attribution_mode = source_attribution_mode("chatgpt")
-    index_section = "ChatGPT"
-    empty_index_message = "No ChatGPT conversations are available."
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime
@@ -257,19 +255,15 @@ class ChatGPTContextAdapter:
 
         return render_source_item(self, item, result, output, render_chatgpt)
 
-    def index_header(self, _items: tuple[ContextItem, ...]) -> tuple[str, ...]:
-        return ()
-
-    def index_metadata(
+    def ordering_metadata(
         self, item: ContextItem, _result: ContextExtractionResult
-    ) -> ContextIndexEntry:
+    ) -> ContextOrdering:
         projection = item.projection
         if not isinstance(projection, ChatGPTProjection):
             raise ArchiveError("ChatGPT context projection was invalid")
-        return ContextIndexEntry(
+        return ContextOrdering(
             None,
             (projection.title, item.snapshot.manifest["source_id"]),
-            projection.title,
         )
 
 

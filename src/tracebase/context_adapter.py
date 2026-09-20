@@ -17,20 +17,19 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class ContextIndexEntry:
-    """Source-provided values needed by the shared Context index layout."""
+class ContextOrdering:
+    """Source-provided values needed for deterministic item ordering."""
 
     group: str | None
     sort_key: tuple[str, ...]
-    label: str
 
 
 @dataclass(frozen=True, slots=True)
 class RenderedContextItem:
-    """The source files and index values produced for one Context item."""
+    """The source files and ordering values produced for one Context item."""
 
     files: tuple[str, ...]
-    index: ContextIndexEntry
+    ordering: ContextOrdering
 
 
 class ContextAdapter(Protocol):
@@ -39,8 +38,6 @@ class ContextAdapter(Protocol):
     source_kind: str
     object_kinds: frozenset[str]
     attribution_mode: AttributionMode
-    index_section: str
-    empty_index_message: str
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime
@@ -61,15 +58,12 @@ class ContextAdapter(Protocol):
     def render(
         self, item: ContextItem, result: ContextExtractionResult, output: Path
     ) -> RenderedContextItem:
-        """Render one source item and return its shared-index metadata."""
+        """Render one source item and return its ordering metadata."""
 
-    def index_header(self, items: tuple[ContextItem, ...]) -> tuple[str, ...]:
-        """Return optional source-specific lines before the item entries."""
-
-    def index_metadata(
+    def ordering_metadata(
         self, item: ContextItem, result: ContextExtractionResult
-    ) -> ContextIndexEntry:
-        """Return source-specific label and grouping values for the index."""
+    ) -> ContextOrdering:
+        """Return source-specific values for deterministic item ordering."""
 
 
 def rendered_context_item(
@@ -78,8 +72,8 @@ def rendered_context_item(
     result: ContextExtractionResult,
     files: Iterable[str],
 ) -> RenderedContextItem:
-    """Combine source-rendered files with the adapter's index metadata."""
-    return RenderedContextItem(tuple(files), adapter.index_metadata(item, result))
+    """Combine source-rendered files with the adapter's ordering metadata."""
+    return RenderedContextItem(tuple(files), adapter.ordering_metadata(item, result))
 
 
 def render_source_item(

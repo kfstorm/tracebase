@@ -700,8 +700,6 @@ def _activity(
     lines = [
         f"# {'Activity' if bucket == 'activity' else 'Background'}",
         "",
-        f"Attribution mode: `{item.attribution_mode.value}`",
-        "",
     ]
     timezone = result.request.start.tzinfo
     assert timezone is not None
@@ -722,8 +720,6 @@ def _activity(
     )
     if lines == [
         f"# {'Activity' if bucket == 'activity' else 'Background'}",
-        "",
-        f"Attribution mode: `{item.attribution_mode.value}`",
         "",
     ]:
         return []
@@ -776,7 +772,8 @@ def _overview(
             "## Tracked account",
             "",
             f"- GitHub: @{projection.tracked_login or 'unknown'}",
-            f"- Attribution mode: `{item.attribution_mode.value}`",
+            "- Only records explicitly marked [User work] are attributable user "
+            "work; [Context only] remains context-only.",
             "- Git commit identities are marked `(tracked account)` only when they "
             "match a locally synced identity profile.",
             "- Activity and Background may include collaborators' work on tracked "

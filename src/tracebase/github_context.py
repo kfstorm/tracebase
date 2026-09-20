@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
 from .attribution import source_attribution_mode
 from .context_adapter import (
-    ContextIndexEntry,
+    ContextOrdering,
     RenderedContextItem,
     rendered_context_item,
     safe_path_component,
@@ -621,8 +621,6 @@ class GitHubContextAdapter:
     source_kind = "github"
     object_kinds = frozenset({"issue", "pull-request"})
     attribution_mode = source_attribution_mode("github")
-    index_section = "GitHub"
-    empty_index_message = "No GitHub items are available."
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime
@@ -711,43 +709,19 @@ class GitHubContextAdapter:
                 write_markdown(path, content)
         return rendered_context_item(self, item, result, files)
 
-    def index_header(self, items: tuple[ContextItem, ...]) -> tuple[str, ...]:
-        logins = sorted(
-            {
-                item.projection.tracked_login
-                for item in items
-                if isinstance(item.projection, GitHubProjection)
-                and item.projection.tracked_login is not None
-            }
-        )
-        return tuple(
-            line
-            for login in logins
-            for line in (f"Tracked GitHub account: @{login}", "")
-        )
-
-    def index_metadata(
+    def ordering_metadata(
         self, item: ContextItem, _result: ContextExtractionResult
-    ) -> ContextIndexEntry:
+    ) -> ContextOrdering:
         projection = item.projection
         if not isinstance(projection, GitHubProjection):
             raise ArchiveError("GitHub context projection was invalid")
-        kind = (
-            "PR"
-            if any(
-                record.get("kind") == "pull-request" for record in projection.records
-            )
-            else "Issue"
-        )
-        return ContextIndexEntry(
+        return ContextOrdering(
             projection.repository,
             (
                 item.snapshot.run["source"]["scope_id"],
                 item.snapshot.manifest["object_kind"],
                 item.snapshot.manifest["source_id"],
             ),
-            f"{projection.repository} {kind} #{projection.number}: "
-            f"{projection.title or 'Untitled'}",
         )
 
 

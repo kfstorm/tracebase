@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .context import ContextRequest, generate_context
+from .context_inventory import ContextInventoryError, load_context_inventory
 from .summary_container import ContainerMounts, ContainerRunner, ensure_image
 from .summary_opencode import prepare_config, prepare_state
 from .summary_planner import PlannedShard, plan_shards, write_initial_plan
@@ -23,32 +23,31 @@ OPENCODE_VERSION = "1.18.29"
 IMAGE = f"tracebase-opencode:{OPENCODE_VERSION}"
 SHARD_RECOVERY_PROMPT = """Shard protocol validation failed.
 
-Reread /work/TASK.md and /work/NOTES.md. Fix only the shard-protocol
-errors listed below, preserving existing valid investigation and evidence.
+Reread /work/TASK.md and /work/NOTES.md. Fix only the shard-protocol errors
+listed below, preserving existing valid investigation and evidence.
 
 <VALIDATOR_ERRORS>
 
 Classify each error before acting:
 
-- If it concerns root-owned orchestration state such as the shard status
-  block in /work/NOTES.md, repair it yourself.
+- If it concerns root-owned orchestration state such as a shard STATUS.json,
+  repair it yourself.
 - If an individual shard report is missing or substantively incomplete,
-  recover only that shard. Prefer continuing the existing worker/session
-  when the task mechanism supports it; otherwise retry that exact shard
-  once with the same assigned items.
+  dispatch or continue only that shard's worker. The worker is the sole
+  creator and modifier of REPORT.md; the root must never repair it directly.
+  Retry that exact shard once with the same task and assignment.
 - Do not re-investigate valid shards.
 - Do not change shard item assignments merely to satisfy validation.
 - Do not omit or merge a failed shard.
-- Do not rewrite valid report content except where required to restore
-  the protocol.
+- Do not rewrite or delete any report content. The worker must restore its own
+  report when the protocol requires it.
 - Do not change /results/summary.md except when the repaired shard evidence
   materially requires final synthesis to change.
 - A shard whose retry_count is already 1 has exhausted its worker retry;
   do not start another worker for it, and preserve its failed status.
 
-After repairs, reconcile the complete shard inventory and status block,
-then ensure the required result exists at /results/summary.md."""
-_INTERVAL = re.compile(r"^Requested interval: `(.+?) <= t < (.+?)`$", re.MULTILINE)
+After repairs, reconcile the complete shard inventory and statuses, then ensure
+the required result exists at /results/summary.md."""
 
 
 class SummaryError(RuntimeError):
@@ -131,19 +130,16 @@ def fingerprint_context(context: Path) -> dict[str, Any]:
 
 
 def context_interval(context: Path) -> dict[str, str]:
-    """Read and validate the authoritative interval from Context index.md."""
+    """Read and validate the authoritative interval from Context index.json."""
     try:
-        index = (context / "index.md").read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
+        inventory = load_context_inventory(context)
+    except (ContextInventoryError, OSError, UnicodeError) as error:
         raise SummaryError(
             "could not read requested interval from Context Output"
         ) from error
-    match = _INTERVAL.search(index)
-    if match is None:
-        raise SummaryError("Context Output does not declare a requested interval")
     try:
-        request = ContextRequest.parse(match.group(1), match.group(2))
-    except ValueError as error:
+        request = ContextRequest.parse(*inventory.requested_interval)
+    except (ContextInventoryError, ValueError) as error:
         raise SummaryError("Context Output requested interval is invalid") from error
     return {"from": request.from_text, "to": request.to_text}
 
@@ -343,12 +339,12 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
         try:
             shard_plan = plan_shards(context)
-            write_initial_plan(work, shard_plan)
+            write_initial_plan(work, context, shard_plan)
         except ValueError as error:
             raise SummaryError(
                 f"Context inventory or shard planning failed: {error}"
             ) from None
-        plan_errors = inspect_shard_plan(work, context).errors
+        plan_errors = inspect_shard_plan(work, context, expected_plan=shard_plan).errors
         if plan_errors:
             raise SummaryError(
                 "Tracebase generated an invalid shard plan: " + "; ".join(plan_errors)
@@ -358,6 +354,9 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 "id": shard.id,
                 "items": list(shard.items),
                 "readable_bytes": shard.readable_bytes,
+                "task_sha256": hashlib.sha256(
+                    (work / "shards" / shard.id / "TASK.md").read_bytes()
+                ).hexdigest(),
             }
             for shard in shard_plan
         ]

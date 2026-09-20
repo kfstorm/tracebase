@@ -20,6 +20,8 @@ if __package__ in {None, ""}:
     from tracebase.summary_planner import (  # type: ignore[import-untyped]
         SHARD_POLICY,
         PlannedShard,
+        plan_shards,
+        shard_task_text,
     )
 else:
     from .context_inventory import (
@@ -28,18 +30,19 @@ else:
         item_readable_sizes,
         load_context_inventory,
     )
-    from .summary_planner import SHARD_POLICY, PlannedShard
+    from .summary_planner import (
+        SHARD_POLICY,
+        PlannedShard,
+        plan_shards,
+        shard_task_text,
+    )
 
-_STATUS_BLOCK = re.compile(
-    r"<!--\s*SHARD_STATUS_BEGIN\s*-->(.*?)<!--\s*SHARD_STATUS_END\s*-->",
-    re.DOTALL,
-)
 _SHARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _USER_WORK_SECTION = "## User work"
 _CONTEXT_ONLY_SECTION = "## Context-only evidence"
 _PLAN_ARGUMENT_COUNT = 3
-_SHARD_FIELDS = {"id", "items", "status", "retry_count", "report"}
+_STATUS_FIELDS = {"status", "retry_count"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,21 +50,6 @@ class ShardObservability:
     """Protocol errors recorded by the shard validator."""
 
     errors: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _CommonValidation:
-    errors: tuple[str, ...]
-
-
-def _status_data(notes: str) -> Any:
-    match = _STATUS_BLOCK.search(notes)
-    if match is None:
-        raise ValueError("NOTES.md has no SHARD_STATUS block")
-    try:
-        return json.loads(match.group(1))
-    except json.JSONDecodeError as error:
-        raise ValueError("NOTES.md SHARD_STATUS block is not valid JSON") from error
 
 
 def _normalized_headings(report: str) -> set[str]:
@@ -85,43 +73,86 @@ def _normalized_headings(report: str) -> set[str]:
 def _read_context(
     context_dir: Path,
 ) -> tuple[ContextInventory | None, bool, list[str]]:
-    errors: list[str] = []
     try:
-        inventory = load_context_inventory(context_dir)
+        return load_context_inventory(context_dir), False, []
     except ContextInventoryError as error:
         return None, True, [str(error)]
-    return inventory, False, errors
 
 
-def _validate_items(
-    shard_id: str,
-    value: Any,
-    context_items: frozenset[str],
-    memberships: dict[str, list[str]],
-    *,
-    check_membership: bool,
-) -> list[str]:
+def _read_status(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, json.JSONDecodeError:
+        return None, [f"could not read valid status from {path}"]
+    if not isinstance(raw, dict) or set(raw) != _STATUS_FIELDS:
+        return None, [f"{path} must contain only status and retry_count"]
+    return raw, []
+
+
+def _assigned_paths(task: str) -> tuple[str, ...]:
+    lines = task.splitlines()
+    try:
+        start = lines.index("## Assigned evidence") + 1
+        end = lines.index("## Worker contract", start)
+    except ValueError:
+        return ()
+    return tuple(
+        line[2:] for line in lines[start:end] if line.startswith("- /context/")
+    )
+
+
+def _items_from_paths(
+    paths: tuple[str, ...], inventory: ContextInventory
+) -> tuple[tuple[str, ...], list[str]]:
     errors: list[str] = []
-    if not isinstance(value, list) or not value:
-        return [f"shard {shard_id!r} items must be a non-empty list"]
-    if len(value) > SHARD_POLICY.max_items:
-        errors.append(
-            f"shard {shard_id!r} has more than {SHARD_POLICY.max_items} Context items"
-        )
-    local: set[str] = set()
-    for item in value:
-        if not isinstance(item, str) or not item:
-            errors.append(f"shard {shard_id!r} contains a malformed item")
+    files_by_root = {item.root: set(item.files) for item in inventory.items}
+    assigned: dict[str, list[str]] = {}
+    for path in paths:
+        relative = path.removeprefix("/context/")
+        matches = [
+            root
+            for root, files in files_by_root.items()
+            if relative.startswith(root + "/")
+            and relative.removeprefix(root + "/") in files
+        ]
+        if len(matches) != 1:
+            errors.append(f"task assigns unknown Context file {path!r}")
             continue
-        if item in local:
-            errors.append(f"shard {shard_id!r} declares item {item!r} more than once")
-            continue
-        local.add(item)
-        if check_membership and item not in context_items:
-            errors.append(f"shard {shard_id!r} contains unknown Context item {item!r}")
-        elif check_membership:
-            memberships[item].append(shard_id)
-    return errors
+        root = matches[0]
+        file = relative.removeprefix(root + "/")
+        if file in assigned.setdefault(root, []):
+            errors.append(f"task assigns Context file {path!r} more than once")
+        else:
+            assigned[root].append(file)
+    for item in inventory.items:
+        files = assigned.get(item.root)
+        if files is not None and tuple(files) != item.files:
+            errors.append(f"task does not assign the exact files for {item.root!r}")
+    return tuple(
+        root for root in (item.root for item in inventory.items) if root in assigned
+    ), errors
+
+
+def _validate_report(work_dir: Path, shard_id: str) -> list[str]:
+    report_path = work_dir / "shards" / shard_id / "REPORT.md"
+    if report_path.is_symlink() or not report_path.is_file():
+        return [f"shard {shard_id!r} report is missing"]
+    try:
+        report = report_path.read_text(encoding="utf-8")
+    except OSError, UnicodeError:
+        return [f"shard {shard_id!r} report cannot be read"]
+    if not report.strip():
+        return [f"shard {shard_id!r} report is empty"]
+    required = {
+        _USER_WORK_SECTION.casefold()[3:],
+        _CONTEXT_ONLY_SECTION.casefold()[3:],
+    }
+    if not required.issubset(_normalized_headings(report)):
+        return [
+            f"shard {shard_id!r} report does not separate user work from "
+            "context-only evidence"
+        ]
+    return []
 
 
 def _validate_common(
@@ -130,167 +161,135 @@ def _validate_common(
     *,
     pre_dispatch: bool,
     expected_plan: tuple[PlannedShard, ...] | None = None,
-) -> _CommonValidation:
-    notes_path = work_dir / "NOTES.md"
-    try:
-        notes = notes_path.read_text(encoding="utf-8")
-    except OSError, UnicodeError:
-        return _CommonValidation((f"could not read {notes_path}",))
-
-    try:
-        data = _status_data(notes)
-    except ValueError as error:
-        return _CommonValidation((str(error),))
-    if not isinstance(data, dict) or not isinstance(data.get("shards"), list):
-        return _CommonValidation(("SHARD_STATUS.shards must be a list",))
-
+) -> tuple[str, ...]:
     errors: list[str] = []
-    context_inventory: ContextInventory | None = None
+    inventory: ContextInventory | None = None
     context_items: frozenset[str] = frozenset()
     context_sizes: dict[str, int] = {}
-    index_error = False
     if context_dir is not None:
-        context_inventory, index_error, context_errors = _read_context(context_dir)
+        inventory, index_error, context_errors = _read_context(context_dir)
         errors.extend(context_errors)
         if not index_error:
-            assert context_inventory is not None
-            context_items = frozenset(item.root for item in context_inventory.items)
+            assert inventory is not None
+            context_items = frozenset(item.root for item in inventory.items)
             try:
-                context_sizes = item_readable_sizes(context_dir, context_inventory)
+                context_sizes = item_readable_sizes(context_dir, inventory)
             except ContextInventoryError as error:
                 errors.append(str(error))
-        if not index_error and not data["shards"] and context_items:
-            errors.append("non-empty Context has no declared shards")
 
-    seen_shard_ids: set[str] = set()
-    actual_shard_ids: list[str] = []
+    shards_dir = work_dir / "shards"
+    if shards_dir.is_symlink() or not shards_dir.is_dir():
+        return (*errors, "work shards directory is missing")
+    shard_entries = tuple(shards_dir.iterdir())
+    shard_dirs = sorted(path for path in shard_entries if path.is_dir())
+    if any(not path.is_dir() for path in shard_entries):
+        errors.append("work shards directory contains a non-directory entry")
+    if any(path.is_symlink() for path in shard_dirs):
+        errors.append("shard directory must not be a symlink")
+    expected_by_id = {shard.id: shard for shard in expected_plan or ()}
+    actual_ids: list[str] = []
     memberships: dict[str, list[str]] = {item: [] for item in context_items}
-    expected_by_id = (
-        {shard.id: shard for shard in expected_plan}
-        if expected_plan is not None
-        else {}
-    )
-    for shard in data["shards"]:
-        if not isinstance(shard, dict):
-            errors.append("each shard status must be an object")
+    for shard_dir in shard_dirs:
+        shard_id = shard_dir.name
+        actual_ids.append(shard_id)
+        if _SHARD_ID.fullmatch(shard_id) is None:
+            errors.append(f"shard id {shard_id!r} is invalid")
             continue
-
-        shard_id = shard.get("id")
-        if not isinstance(shard_id, str) or _SHARD_ID.fullmatch(shard_id) is None:
-            errors.append("shard id is invalid")
-            continue
-        if shard_id in seen_shard_ids:
-            errors.append(f"shard {shard_id!r} is declared more than once")
-            continue
-        seen_shard_ids.add(shard_id)
-        actual_shard_ids.append(shard_id)
-
-        if expected_plan is not None:
-            expected = expected_by_id.get(shard_id)
-            if expected is None:
-                errors.append(f"shard {shard_id!r} was not in the host-generated plan")
-            else:
-                declared_items = shard.get("items")
-                actual_items = (
-                    tuple(declared_items) if isinstance(declared_items, list) else ()
-                )
-                if actual_items != expected.items:
+        task_path = shard_dir / "TASK.md"
+        status_path = shard_dir / "STATUS.json"
+        required_files = {"TASK.md", "STATUS.json"}
+        if not pre_dispatch:
+            required_files.add("REPORT.md") if (
+                shard_dir / "REPORT.md"
+            ).exists() else None
+        actual_files = {path.name for path in shard_dir.iterdir()}
+        if not required_files.issuperset(actual_files) or not {
+            "TASK.md",
+            "STATUS.json",
+        }.issubset(actual_files):
+            errors.append(f"shard {shard_id!r} has an invalid package layout")
+        if task_path.is_symlink() or not task_path.is_file():
+            errors.append(f"shard {shard_id!r} task is not a regular file")
+        if status_path.is_symlink() or not status_path.is_file():
+            errors.append(f"shard {shard_id!r} status is not a regular file")
+        try:
+            task = task_path.read_text(encoding="utf-8")
+        except OSError, UnicodeError:
+            task = ""
+            errors.append(f"shard {shard_id!r} task is missing or unreadable")
+        status, status_errors = _read_status(status_path)
+        errors.extend(status_errors)
+        if status is not None:
+            state = status.get("status")
+            retry_count = status.get("retry_count")
+            if pre_dispatch:
+                if state != "pending":
+                    errors.append(f"shard {shard_id!r} is not pending")
+                if (
+                    not isinstance(retry_count, int)
+                    or isinstance(retry_count, bool)
+                    or retry_count != 0
+                ):
                     errors.append(
-                        f"shard {shard_id!r} changed its host-assigned item list"
+                        f"shard {shard_id!r} retry_count must be 0 before dispatch"
                     )
-
-        unknown_fields = sorted(set(shard) - _SHARD_FIELDS)
-        if unknown_fields:
-            errors.append(
-                f"shard {shard_id!r} has unknown fields: " + ", ".join(unknown_fields)
-            )
-
-        retry_count = shard.get("retry_count")
-        status = shard.get("status")
-        if pre_dispatch:
-            if status != "pending":
-                errors.append(f"shard {shard_id!r} is not pending")
-            if (
+            elif state not in {"complete", "failed"}:
+                errors.append(f"shard {shard_id!r} is not in a terminal state")
+            elif (
                 not isinstance(retry_count, int)
                 or isinstance(retry_count, bool)
-                or retry_count != 0
+                or retry_count not in {0, 1}
             ):
-                errors.append(
-                    f"shard {shard_id!r} retry_count must be 0 before dispatch"
-                )
-        else:
-            if not isinstance(retry_count, int) or isinstance(retry_count, bool):
                 errors.append(f"shard {shard_id!r} retry_count is invalid")
-            elif retry_count < 0 or retry_count > 1:
-                errors.append(f"shard {shard_id!r} was retried more than once")
-            if status == "failed":
+            elif state == "failed" and retry_count != 1:
+                errors.append(f"shard {shard_id!r} failed without exhausting its retry")
+            elif state == "failed":
                 errors.append(f"shard {shard_id!r} reported failure")
-            elif status != "complete":
-                errors.append(f"shard {shard_id!r} is not in a terminal state")
+            elif state == "complete":
+                errors.extend(_validate_report(work_dir, shard_id))
 
-        if context_dir is not None and not index_error:
-            errors.extend(
-                _validate_items(
-                    shard_id,
-                    shard.get("items"),
-                    context_items,
-                    memberships,
-                    check_membership=True,
-                )
+        assigned_items: tuple[str, ...] = ()
+        if inventory is not None:
+            assigned_items, task_errors = _items_from_paths(
+                _assigned_paths(task), inventory
             )
-        else:
-            errors.extend(
-                _validate_items(
-                    shard_id,
-                    shard.get("items"),
-                    context_items,
-                    memberships,
-                    check_membership=False,
-                )
-            )
-
-        if context_dir is not None and not index_error:
-            declared_items = shard.get("items")
-            if isinstance(declared_items, list) and all(
-                isinstance(item, str) and item in context_items
-                for item in declared_items
-            ):
-                shard_bytes = sum(context_sizes[item] for item in declared_items)
+            errors.extend(f"shard {shard_id!r}: {error}" for error in task_errors)
+            for item in assigned_items:
+                memberships[item].append(shard_id)
+            if all(item in context_sizes for item in assigned_items):
+                shard_bytes = sum(context_sizes[item] for item in assigned_items)
                 oversized_item = (
-                    len(declared_items) == 1
-                    and context_sizes[declared_items[0]] > SHARD_POLICY.max_bytes
+                    len(assigned_items) == 1
+                    and context_sizes[assigned_items[0]] > SHARD_POLICY.max_bytes
                 )
                 if shard_bytes > SHARD_POLICY.max_bytes and not oversized_item:
                     errors.append(
-                        f"shard {shard_id!r} exceeds "
-                        f"{SHARD_POLICY.max_bytes} readable bytes"
+                        f"shard {shard_id!r} exceeds {SHARD_POLICY.max_bytes} "
+                        "readable bytes"
                     )
+            if len(assigned_items) > SHARD_POLICY.max_items:
+                errors.append(
+                    f"shard {shard_id!r} has more than {SHARD_POLICY.max_items} "
+                    "Context items"
+                )
 
-        expected_report = f"/work/shards/{shard_id}.md"
-        if shard.get("report") != expected_report:
-            errors.append(f"shard {shard_id!r} has a non-canonical report path")
+        expected = expected_by_id.get(shard_id)
+        if expected is not None:
+            if assigned_items != expected.items:
+                errors.append(f"shard {shard_id!r} changed its host-assigned item list")
+            if inventory is not None:
+                expected_task = shard_task_text(expected, inventory)
+                if task != expected_task:
+                    errors.append(
+                        f"shard {shard_id!r} task does not match the host plan"
+                    )
+        elif expected_plan is not None:
+            errors.append(f"shard {shard_id!r} was not in the host-generated plan")
 
-        if not pre_dispatch and shard.get("report") == expected_report:
-            report_path = work_dir / "shards" / f"{shard_id}.md"
-            if report_path.is_symlink() or not report_path.is_file():
-                errors.append(f"shard {shard_id!r} canonical report is missing")
-            else:
-                try:
-                    report_text = report_path.read_text(encoding="utf-8")
-                    if not report_text.strip():
-                        errors.append(f"shard {shard_id!r} canonical report is empty")
-                    elif not {
-                        _USER_WORK_SECTION.casefold()[3:],
-                        _CONTEXT_ONLY_SECTION.casefold()[3:],
-                    }.issubset(_normalized_headings(report_text)):
-                        errors.append(
-                            f"shard {shard_id!r} report does not separate user work "
-                            "from context-only evidence"
-                        )
-                except OSError, UnicodeError:
-                    errors.append(f"shard {shard_id!r} canonical report cannot be read")
+        if pre_dispatch and (shard_dir / "REPORT.md").exists():
+            errors.append(f"shard {shard_id!r} has a pre-created report")
 
-    if context_dir is not None and not index_error:
+    if inventory is not None:
         for item, owners in sorted(memberships.items()):
             if not owners:
                 errors.append(f"Context item {item!r} is not covered by any shard")
@@ -300,27 +299,28 @@ def _validate_common(
                     + ", ".join(owners)
                 )
     if expected_plan is not None:
-        expected_shard_ids = tuple(shard.id for shard in expected_plan)
-        if len(data["shards"]) != len(expected_plan):
-            errors.append(
-                "SHARD_STATUS.shards count differs from the host-generated plan"
-            )
-        if tuple(actual_shard_ids) != expected_shard_ids:
-            errors.append(
-                "SHARD_STATUS.shards order differs from the host-generated plan"
-            )
-        missing = set(expected_shard_ids) - seen_shard_ids
-        errors.extend(
-            f"host-generated shard {shard_id!r} is missing"
-            for shard_id in sorted(missing)
-        )
-    return _CommonValidation(tuple(errors))
+        expected_ids = tuple(shard.id for shard in expected_plan)
+        if tuple(actual_ids) != expected_ids:
+            errors.append("shard package order differs from the host-generated plan")
+    return tuple(errors)
 
 
-def inspect_shard_plan(work_dir: Path, context_dir: Path) -> ShardObservability:
-    """Validate the complete, untouched shard inventory before dispatch."""
+def inspect_shard_plan(
+    work_dir: Path,
+    context_dir: Path,
+    *,
+    expected_plan: tuple[PlannedShard, ...] | None = None,
+) -> ShardObservability:
+    """Validate the complete, untouched shard packages before dispatch."""
+    if expected_plan is None:
+        try:
+            expected_plan = plan_shards(context_dir)
+        except ValueError as error:
+            return ShardObservability((str(error),))
     return ShardObservability(
-        _validate_common(work_dir, context_dir, pre_dispatch=True).errors
+        _validate_common(
+            work_dir, context_dir, pre_dispatch=True, expected_plan=expected_plan
+        )
     )
 
 
@@ -337,7 +337,7 @@ def inspect_shards(
             context_dir,
             pre_dispatch=False,
             expected_plan=expected_plan,
-        ).errors
+        )
     )
 
 

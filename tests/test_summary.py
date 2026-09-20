@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -6,6 +7,7 @@ import pytest
 
 from tracebase import cli
 from tracebase.context import ContextRequest
+from tracebase.context_inventory import load_context_inventory
 from tracebase.summary import (
     OPENCODE_VERSION,
     SummaryError,
@@ -13,6 +15,7 @@ from tracebase.summary import (
     fingerprint_context,
     summarize,
 )
+from tracebase.summary_planner import PlannedShard, plan_shards, shard_task_text
 from tracebase.summary_shards import inspect_shard_plan, inspect_shards
 
 
@@ -58,21 +61,22 @@ class FakeRunner:
             raise AssertionError(f"unexpected runner call: {arguments}")
 
         work = self.output / "work"
-        (work / "shards").mkdir(exist_ok=True)
-        notes_text = (work / "NOTES.md").read_text(encoding="utf-8")
-        status_json = notes_text.split("<!-- SHARD_STATUS_BEGIN -->", 1)[1].split(
-            "<!-- SHARD_STATUS_END -->", 1
-        )[0]
-        host_specs = json.loads(status_json)["shards"]
+        shard_dirs = sorted((work / "shards").iterdir())
+        host_specs = []
+        for shard_dir in shard_dirs:
+            status = json.loads((shard_dir / "STATUS.json").read_text())
+            host_specs.append({"id": shard_dir.name, **status})
         self.root_saw_pending_plan = all(
             shard["status"] == "pending" and shard["retry_count"] == 0
             for shard in host_specs
         )
         shard_specs = self.shards or host_specs
         if self.mutate_items:
-            shard_specs = [
-                {**shard, "items": ["mutated/item"]} for shard in shard_specs
-            ]
+            task_path = work / "shards" / str(host_specs[0]["id"]) / "TASK.md"
+            task = task_path.read_text(encoding="utf-8")
+            task_path.write_text(
+                task.replace("/context/", "/context/mutated/", 1), encoding="utf-8"
+            )
         written_specs = shard_specs
         exhausted_retry = any(shard.get("retry_count") == 1 for shard in shard_specs)
         if "--session" in arguments and self.repair_only_shards is not None:
@@ -98,34 +102,22 @@ class FakeRunner:
             report = "## User work\n\nevidence\n"
             if include_context:
                 report += "\n## Context-only evidence\n\nNone.\n"
-            (work / f"shards/{shard_id}.md").write_text(report, encoding="utf-8")
+            (work / f"shards/{shard_id}/REPORT.md").write_text(report, encoding="utf-8")
 
-        retry = 1 if "--session" in arguments else 0
-        if shard_specs and isinstance(shard_specs[0].get("retry_count"), int):
-            retry = shard_specs[0]["retry_count"]
         status = "complete"
         if exhausted_retry or (
             self.incomplete
             and not ("--session" in arguments and self.repair_on_recovery)
         ):
             status = "failed"
-        notes = {
-            "shards": [
-                {
-                    **shard,
-                    "status": status,
-                    "retry_count": shard.get("retry_count", retry),
-                    "report": f"/work/shards/{shard['id']}.md",
-                }
-                for shard in shard_specs
-            ]
-        }
-        (work / "NOTES.md").write_text(
-            "<!-- SHARD_STATUS_BEGIN -->"
-            + json.dumps(notes)
-            + "<!-- SHARD_STATUS_END -->",
-            encoding="utf-8",
-        )
+        for shard in shard_specs:
+            retry = shard.get("retry_count", 0)
+            if "--session" in arguments and not exhausted_retry:
+                retry = 1
+            (work / f"shards/{shard['id']}/STATUS.json").write_text(
+                json.dumps({"status": status, "retry_count": retry}),
+                encoding="utf-8",
+            )
         if not self.missing_result or (
             "--session" in arguments and self.repair_on_recovery
         ):
@@ -153,30 +145,30 @@ def _write_context(
 ) -> Path:
     result = tmp_path / "context"
     result.mkdir()
-    links = "".join(
-        f"- **{label}** [attribution mode: `{mode}`]({root}/overview.md)\n"
-        for root, label, mode in items
-    )
-    (result / "index.md").write_text(
-        "# Context Output\n\n"
-        "Requested interval: `2026-01-01T01:00:00+01:00 <= t < "
-        "2026-01-01T03:00:00+01:00`\n" + links,
-        encoding="utf-8",
-    )
     inventory = []
-    for root, label, mode in items:
+    for root, label, _mode in items:
         item_root = result.joinpath(*root.split("/"))
         item_root.mkdir(parents=True)
         (item_root / "overview.md").write_text(label, encoding="utf-8")
         inventory.append(
             {
                 "root": root,
-                "attribution_mode": mode,
                 "files": ["overview.md"],
             }
         )
     (result / "index.json").write_text(
-        json.dumps({"items": inventory}, indent=2) + "\n", encoding="utf-8"
+        json.dumps(
+            {
+                "requested_interval": {
+                    "from": "2026-01-01T01:00:00+01:00",
+                    "to": "2026-01-01T03:00:00+01:00",
+                },
+                "items": inventory,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     return result
 
@@ -202,23 +194,13 @@ def large_two_item_context(tmp_path: Path) -> Path:
     )
     for item in ("one", "two"):
         (source / f"{item}/activity.md").write_bytes(b"x" * 40000)
+    inventory_path = source / "index.json"
+    inventory = json.loads(inventory_path.read_text())
+    for item in inventory["items"]:
+        if item["root"] in {"one", "two"}:
+            item["files"].append("activity.md")
+    inventory_path.write_text(json.dumps(inventory) + "\n")
     return source
-
-
-def _status(
-    shards: list[dict[str, object]], *, status: str = "complete", retry_count: int = 0
-) -> dict[str, object]:
-    return {
-        "shards": [
-            {
-                **shard,
-                "status": shard.get("status", status),
-                "retry_count": shard.get("retry_count", retry_count),
-                "report": shard.get("report", f"/work/shards/{shard['id']}.md"),
-            }
-            for shard in shards
-        ]
-    }
 
 
 def _write_status(
@@ -228,18 +210,29 @@ def _write_status(
     status: str = "complete",
     retry_count: int = 0,
 ) -> None:
-    (work_dir / "NOTES.md").write_text(
-        "<!-- SHARD_STATUS_BEGIN -->"
-        + json.dumps(_status(shards, status=status, retry_count=retry_count))
-        + "<!-- SHARD_STATUS_END -->",
-        encoding="utf-8",
-    )
+    shutil.rmtree(work_dir / "shards", ignore_errors=True)
     (work_dir / "shards").mkdir(exist_ok=True)
     for shard in shards:
-        (work_dir / "shards" / f"{shard['id']}.md").write_text(
-            "## User work\n\nNone.\n\n## Context-only evidence\n\nNone.\n",
+        shard_dir = work_dir / "shards" / str(shard["id"])
+        shard_dir.mkdir()
+        (shard_dir / "TASK.md").write_text(
+            "# Summary shard task\n\n## Assigned evidence\n\n",
             encoding="utf-8",
         )
+        (shard_dir / "STATUS.json").write_text(
+            json.dumps(
+                {
+                    "status": shard.get("status", status),
+                    "retry_count": shard.get("retry_count", retry_count),
+                }
+            ),
+            encoding="utf-8",
+        )
+        if status != "pending":
+            (shard_dir / "REPORT.md").write_text(
+                "## User work\n\nNone.\n\n## Context-only evidence\n\nNone.\n",
+                encoding="utf-8",
+            )
 
 
 def _write_plan(
@@ -250,6 +243,18 @@ def _write_plan(
     retry_count: int = 0,
 ) -> None:
     _write_status(tmp_path, shards, status=status, retry_count=retry_count)
+    context_dir = tmp_path / "context"
+    if context_dir.is_dir():
+        inventory = load_context_inventory(context_dir)
+        for shard in shards:
+            shard_id = str(shard["id"])
+            items = tuple(
+                item for item in shard.get("items", []) if isinstance(item, str)
+            )
+            task = shard_task_text(PlannedShard(shard_id, items, 0), inventory)
+            (tmp_path / "shards" / shard_id / "TASK.md").write_text(
+                task, encoding="utf-8"
+            )
 
 
 def _run_validator(
@@ -284,6 +289,8 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     assert manifest["variant"] == "high"
     assert manifest["opencode_version"] == OPENCODE_VERSION
     assert manifest["context_input"] == fingerprint_context(source)
+    assert len(manifest["shard_plan"]) == 1
+    assert len(manifest["shard_plan"][0]["task_sha256"]) == 64
 
 
 def test_host_creates_pending_plan_before_root_starts(tmp_path: Path) -> None:
@@ -297,35 +304,15 @@ def test_host_creates_pending_plan_before_root_starts(tmp_path: Path) -> None:
     assert runner.root_saw_pending_plan
 
 
-def test_root_item_mutation_is_rejected_during_final_reconciliation(
-    tmp_path: Path,
-) -> None:
-    source = context(tmp_path)
-    output = tmp_path / "summary"
-    runner = FakeRunner(output.parent / ".unused", mutate_items=True)
-    _bind_runner_to_staging(runner, tmp_path)
-
-    with pytest.raises(SummaryError, match="changed its host-assigned item list"):
-        summarize(SummaryRequest(source, "model", None, output), runner)
-
-    assert not output.exists()
-
-
-def test_root_shard_reordering_is_rejected_during_final_reconciliation(
+def test_root_task_mutation_is_rejected_during_final_reconciliation(
     tmp_path: Path,
 ) -> None:
     source = large_two_item_context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(
-        output.parent / ".unused",
-        shards=[
-            {"id": "shard-02", "items": ["two"]},
-            {"id": "shard-01", "items": ["one"]},
-        ],
-    )
+    runner = FakeRunner(output.parent / ".unused", mutate_items=True)
     _bind_runner_to_staging(runner, tmp_path)
 
-    with pytest.raises(SummaryError, match="order"):
+    with pytest.raises(SummaryError, match="task does not match the host plan"):
         summarize(SummaryRequest(source, "model", None, output), runner)
 
     assert not output.exists()
@@ -340,81 +327,31 @@ def test_summary_accepts_cross_source_batch(tmp_path: Path) -> None:
     assert summarize(SummaryRequest(source, "model", None, output), runner) == output
 
 
-def test_summary_rejects_uncovered_context_item(tmp_path: Path) -> None:
-    source = multi_source_context(tmp_path)
-    output = tmp_path / "summary"
-    runner = FakeRunner(
-        tmp_path / ".unused",
-        shards=[{"id": "one", "items": ["chatgpt/conversation/alpha"]}],
-    )
-    _bind_runner_to_staging(runner, tmp_path)
-
-    with pytest.raises(SummaryError, match="shard protocol"):
-        summarize(SummaryRequest(source, "model", None, output), runner)
-
-    assert not output.exists()
-
-
 def test_summarizer_contract_describes_generic_partitioning() -> None:
     prompt = (
         Path(__file__).parents[1] / "src/tracebase/prompts/summarizer-v1.md"
     ).read_text(encoding="utf-8")
     normalized = " ".join(prompt.split())
     required = (
-        "Host-created shard plan",
-        "existing host-created `/work/NOTES.md`",
-        "Do not create or recreate the",
-        "Maintain the existing host-created `SHARD_STATUS` block",
-        "Tracebase has already generated and validated the complete shard plan",
-        "The complete plan is frozen before dispatch",
-        "Preserve every host-assigned shard ID, exact `items` list, and report path",
-        "Do not re-plan, split, merge, rename, remove, or otherwise change "
-        "shard membership",
-        "Dispatch exactly the host-created shards",
-        "Modify only `status` and `retry_count`",
-        "The host-created status for every shard is exactly `pending`",
-        "After a valid completed report is verified, set that shard's `status` "
-        "exactly to `complete`",
-        "If the single allowed retry is exhausted without a valid report, set "
-        "that shard's `status` exactly to `failed`",
-        "Keep `retry_count` at exactly `0` when no retry was used, and set it to "
-        "exactly `1` when the single retry was used",
-        "Do not use `completed`, `done`, `error`, or any other synonym",
-        "Shard membership is an execution-only partition",
-        "Worker Relevance Contract",
-        "activity.md` contains the only dialogue eligible",
-        "background.md` is earlier supporting context only",
-        "Any historical PR, commit, implementation, or other work found only in",
-        "keep the earlier work itself as background context only",
+        "complete shard plan and every shard package",
+        "self-contained `TASK.md`",
+        "Do not re-plan, split, merge, rename, remove",
+        "Read /work/shards/<id>/TASK.md and complete exactly that task.",
+        "Read and update only `status` and `retry_count`",
+        "Initial state is exactly",
+        "status exactly to `complete`",
+        "status exactly to `failed`",
+        "activity.md` contains retained user/assistant text",
+        "background.md` contains only bounded earlier dialogue",
+        "specific unresolved material fact",
     )
     for clause in required:
         assert clause in normalized
-    assert "For `actor_scoped`, follow the explicit `[User work]`" in normalized
-    assert (
-        "Workers apply the attribution mode shown in `index.md` and the applicable "
-        "source-specific child views when reviewing their assigned evidence"
-    ) in normalized
-    assert (
-        "During reduce, the root interprets completed worker reports under the same "
-        "attribution rules before identifying workstreams"
-    ) in normalized
-    assert (
-        "The root must read `/work/TASK.md`, `/work/NOTES.md`, `/context/index.md`, "
-        "and the existing host-created shard plan/status"
-    ) in normalized
-    assert (
-        "must not directly review individual Context evidence during normal execution"
-    ) in normalized
-    assert (
-        "After all worker reports are complete, build or update the materially "
-        "meaningful workstream inventory from the completed `User work` report sections"
-    ) in normalized
-    assert (
-        "Only perform a targeted direct Context read for a specific unresolved "
-        "material fact"
-    ) in normalized
-    assert "Explore it as needed. Start from index.md" not in normalized
-    assert "Before reviewing individual evidence, record an inventory" not in normalized
+    assert "[User work]" in normalized
+    assert "[Context only]" in normalized
+    assert "attribution mode" not in normalized
+    assert "index.md" not in normalized
+    assert "SHARD_STATUS" not in normalized
 
 
 def test_recovery_reuses_root_and_preserves_item_assignment(tmp_path: Path) -> None:
@@ -433,7 +370,7 @@ def test_recovery_reuses_root_and_preserves_item_assignment(tmp_path: Path) -> N
     recovery_calls = [call for call in runner.calls if "--session" in call]
     assert len(recovery_calls) == 1
     recovery_prompt = recovery_calls[0][-1]
-    assert "same assigned items" in recovery_prompt
+    assert "same task and assignment" in recovery_prompt
     assert "same assigned scope" not in recovery_prompt
     assert "retry_count is already 1" in recovery_prompt
     assert "do not start another worker" in recovery_prompt
@@ -509,13 +446,13 @@ def test_retry_limit_is_rejected(tmp_path: Path) -> None:
         retry_count=2,
     )
     assert any(
-        "retried more than once" in error for error in inspect_shards(tmp_path).errors
+        "retry_count is invalid" in error for error in inspect_shards(tmp_path).errors
     )
 
 
 def test_report_requires_both_evidence_sections(tmp_path: Path) -> None:
     _write_status(tmp_path, [{"id": "one", "items": ["synthetic/new/item"]}])
-    (tmp_path / "shards/one.md").write_text(
+    (tmp_path / "shards/one/REPORT.md").write_text(
         "## User work\n\nevidence\n", encoding="utf-8"
     )
 
@@ -527,7 +464,7 @@ def test_report_requires_both_evidence_sections(tmp_path: Path) -> None:
 @pytest.mark.parametrize("level", ["#", "##", "###", "######"])
 def test_report_accepts_any_atx_heading_level(tmp_path: Path, level: str) -> None:
     _write_status(tmp_path, [{"id": "one", "items": ["synthetic/new/item"]}])
-    (tmp_path / "shards/one.md").write_text(
+    (tmp_path / "shards/one/REPORT.md").write_text(
         f"{level} User work\n\nevidence\n\n{level} Context-only evidence\n\nnone\n",
         encoding="utf-8",
     )
@@ -545,18 +482,8 @@ def test_plan_accepts_exact_cross_source_partition(tmp_path: Path) -> None:
         ("chatgpt/conversation/two", "chatgpt", "personal"),
     )
     shards = [
-        {
-            "id": "mixed",
-            "items": [
-                "synthetic/new-source/item-a",
-                "github/example/repo/pull/1",
-                "opencode/project/session/1",
-            ],
-        },
-        {
-            "id": "conversations",
-            "items": ["chatgpt/conversation/one", "chatgpt/conversation/two"],
-        },
+        {"id": shard.id, "items": list(shard.items)}
+        for shard in plan_shards(context_dir)
     ]
     _write_plan(tmp_path, shards)
 
@@ -574,8 +501,8 @@ def test_plan_accepts_directory_subtree_split_without_semantic_claim(
     _write_plan(
         tmp_path,
         [
-            {"id": "first", "items": ["github/example/repo/issue/1"]},
-            {"id": "second", "items": ["github/example/repo/issue/2"]},
+            {"id": shard.id, "items": list(shard.items)}
+            for shard in plan_shards(context_dir)
         ],
     )
 
@@ -585,9 +512,9 @@ def test_plan_accepts_directory_subtree_split_without_semantic_claim(
 @pytest.mark.parametrize(
     ("shards", "expected"),
     [
-        ([{"id": "one", "items": []}], "items must be a non-empty list"),
-        ([{"id": "one", "items": [""]}], "malformed item"),
-        ([{"id": "one", "items": ["unknown/item"]}], "unknown Context item"),
+        ([{"id": "one", "items": []}], "not covered"),
+        ([{"id": "one", "items": [""]}], "unknown Context file"),
+        ([{"id": "one", "items": ["unknown/item"]}], "unknown Context file"),
         ([{"id": "one", "items": ["repo", "repo"]}], "more than once"),
     ],
 )
@@ -622,30 +549,40 @@ def test_plan_rejects_duplicate_membership_and_missing_item(tmp_path: Path) -> N
     assert any("'two' is not covered" in error for error in errors)
 
 
-def test_plan_rejects_duplicate_ids_obsolete_fields_and_bad_report(
+def test_plan_rejects_invalid_package_status_and_extra_files(
     tmp_path: Path,
 ) -> None:
     context_dir = context(tmp_path)
+    plan = plan_shards(context_dir)
     _write_plan(
         tmp_path,
-        [
-            {
-                "id": "one",
-                "items": ["repo"],
-                "scope": "repo",
-                "attribution_modes": ["personal"],
-                "report": "/work/shards/wrong.md",
-            },
-            {"id": "one", "items": ["repo"]},
-        ],
+        [{"id": shard.id, "items": list(shard.items)} for shard in plan],
+    )
+    shard_dir = tmp_path / "shards" / plan[0].id
+    (shard_dir / "extra.txt").write_text("unexpected", encoding="utf-8")
+    (shard_dir / "STATUS.json").write_text(
+        json.dumps({"status": "pending", "retry_count": 0, "extra": True}),
+        encoding="utf-8",
     )
 
     errors = inspect_shard_plan(tmp_path, context_dir).errors
 
-    assert any("declared more than once" in error for error in errors)
-    assert any("unknown fields" in error for error in errors)
-    assert any("attribution_modes" in error and "scope" in error for error in errors)
-    assert any("non-canonical report path" in error for error in errors)
+    assert any("invalid package layout" in error for error in errors)
+    assert any("only status and retry_count" in error for error in errors)
+
+
+def test_plan_rejects_legacy_flat_shard_file(tmp_path: Path) -> None:
+    context_dir = context(tmp_path)
+    plan = plan_shards(context_dir)
+    _write_plan(
+        tmp_path,
+        [{"id": shard.id, "items": list(shard.items)} for shard in plan],
+    )
+    (tmp_path / "shards/legacy.md").write_text("legacy", encoding="utf-8")
+
+    errors = inspect_shard_plan(tmp_path, context_dir).errors
+
+    assert "work shards directory contains a non-directory entry" in errors
 
 
 def test_plan_requires_pending_zero_retry_and_canonical_reports(tmp_path: Path) -> None:
@@ -695,6 +632,11 @@ def test_plan_applies_generic_byte_limit_and_allows_one_oversized_item(
     (context_dir / "one/activity.md").write_bytes(b"x" * 200000)
     (context_dir / "two/activity.md").write_bytes(b"x" * 100000)
     (context_dir / "huge/activity.md").write_bytes(b"x" * 300000)
+    inventory_path = context_dir / "index.json"
+    inventory = json.loads(inventory_path.read_text())
+    for item in inventory["items"]:
+        item["files"].append("activity.md")
+    inventory_path.write_text(json.dumps(inventory) + "\n")
 
     _write_plan(
         tmp_path,
@@ -704,7 +646,13 @@ def test_plan_applies_generic_byte_limit_and_allows_one_oversized_item(
         ],
     )
 
-    errors = inspect_shard_plan(tmp_path, context_dir).errors
+    expected_plan = (
+        PlannedShard("too-large", ("one", "two"), 0),
+        PlannedShard("oversized", ("huge",), 0),
+    )
+    errors = inspect_shard_plan(
+        tmp_path, context_dir, expected_plan=expected_plan
+    ).errors
 
     assert any("exceeds 65536 readable bytes" in error for error in errors)
     assert not any("oversized" in error for error in errors)
@@ -725,7 +673,9 @@ def test_final_validation_requires_complete_status_report_and_partition(
     assert "shard 'one' is not in a terminal state" in errors
     assert "Context item 'two' is not covered by any shard" in errors
 
-    _write_status(tmp_path, [{"id": "one", "items": ["one"]}], status="failed")
+    _write_status(
+        tmp_path, [{"id": "one", "items": ["one"]}], status="failed", retry_count=1
+    )
     errors = inspect_shards(tmp_path, context_dir).errors
     assert "shard 'one' reported failure" in errors
     assert "shard 'one' is not in a terminal state" not in errors
@@ -733,7 +683,11 @@ def test_final_validation_requires_complete_status_report_and_partition(
 
 def test_executable_validator_has_stable_output(tmp_path: Path) -> None:
     context_dir = context(tmp_path)
-    _write_plan(tmp_path, [{"id": "one", "items": ["repo"]}])
+    plan = plan_shards(context_dir)
+    _write_plan(
+        tmp_path,
+        [{"id": shard.id, "items": list(shard.items)} for shard in plan],
+    )
 
     result = _run_validator(tmp_path, context_dir)
 
@@ -749,7 +703,7 @@ def test_executable_validator_reports_unknown_item(tmp_path: Path) -> None:
     result = _run_validator(tmp_path, context_dir)
 
     assert result.returncode == 1
-    assert "unknown Context item" in result.stdout
+    assert "unknown Context file" in result.stdout
     assert "repo" in result.stdout
 
 

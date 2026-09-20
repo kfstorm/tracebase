@@ -72,7 +72,6 @@ def render_dialogue(
     transcript: DialogueTranscript,
     bucket: str,
     timezone: tzinfo,
-    attribution_mode: str,
 ) -> list[str]:
     """Render one transcript bucket using the shared conversational format."""
     turns = transcript.activity if bucket == "activity" else transcript.background
@@ -80,8 +79,6 @@ def render_dialogue(
         return []
     lines = [
         f"# {'Activity' if bucket == 'activity' else 'Background'}",
-        "",
-        f"Attribution mode: `{attribution_mode}`",
         "",
     ]
     for turn in turns:
@@ -107,16 +104,13 @@ def write_dialogue_markdown(path: Path, lines: list[str]) -> None:
 def render_dialogue_files(
     transcript: DialogueTranscript,
     timezone: tzinfo,
-    attribution_mode: str,
     overview: list[str],
 ) -> dict[str, list[str]]:
     files = {
         "overview.md": overview,
-        "activity.md": render_dialogue(
-            transcript, "activity", timezone, attribution_mode
-        ),
+        "activity.md": render_dialogue(transcript, "activity", timezone),
     }
-    background = render_dialogue(transcript, "background", timezone, attribution_mode)
+    background = render_dialogue(transcript, "background", timezone)
     if background:
         files["background.md"] = background
     return files

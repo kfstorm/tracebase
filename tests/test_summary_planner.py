@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from tracebase.context_inventory import ContextInventoryError, load_context_inventory
-from tracebase.summary_planner import ShardPolicy, plan_shards
+from tracebase.summary_planner import ShardPolicy, plan_shards, write_initial_plan
 
 
 def _context(
@@ -15,21 +15,33 @@ def _context(
     context = tmp_path / "context"
     context.mkdir()
     inventory = []
-    for root, mode, payload_size in items:
+    for root, _mode, payload_size in items:
         item_root = context.joinpath(*root.split("/"))
         item_root.mkdir(parents=True)
         (item_root / "overview.md").write_text(root, encoding="utf-8")
         if payload_size:
             (item_root / "activity.md").write_bytes(b"x" * payload_size)
+        files = ["overview.md"]
+        if payload_size:
+            files.append("activity.md")
         inventory.append(
             {
                 "root": root,
-                "attribution_mode": mode,
-                "files": ["overview.md"],
+                "files": files,
             }
         )
     (context / "index.json").write_text(
-        json.dumps({"items": inventory}) + "\n", encoding="utf-8"
+        json.dumps(
+            {
+                "requested_interval": {
+                    "from": "2026-01-01T00:00:00+00:00",
+                    "to": "2026-01-02T00:00:00+00:00",
+                },
+                "items": inventory,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
     )
     return context
 
@@ -57,7 +69,6 @@ def test_inventory_preserves_order_without_extra_metadata(tmp_path: Path) -> Non
         "synthetic/source/item-a",
         "future/source/item-b",
     ]
-    assert inventory.items[0].attribution_mode.value == "personal"
     assert not hasattr(inventory.items[0], "group")
 
 
@@ -66,7 +77,7 @@ def test_inventory_preserves_order_without_extra_metadata(tmp_path: Path) -> Non
     [
         lambda value: value["items"].append(value["items"][0].copy()),
         lambda value: value["items"][0].__setitem__("root", "missing/item"),
-        lambda value: value["items"][0].__setitem__("attribution_mode", "unknown"),
+        lambda value: value["items"][0].__setitem__("extra", "forbidden"),
         lambda value: value["items"][0].__setitem__("group", "forbidden"),
     ],
 )
@@ -100,6 +111,14 @@ def test_inventory_missing_item_directory_is_not_measured_as_zero(
     shutil.rmtree(context / "one")
 
     with pytest.raises(ContextInventoryError, match="directory"):
+        load_context_inventory(context)
+
+
+def test_inventory_rejects_legacy_index_markdown(tmp_path: Path) -> None:
+    context = _context(tmp_path, [("one", "personal", 0)])
+    (context / "index.md").write_text("legacy", encoding="utf-8")
+
+    with pytest.raises(ContextInventoryError, match=r"index\.md"):
         load_context_inventory(context)
 
 
@@ -259,3 +278,30 @@ def test_stable_input_produces_stable_plan(tmp_path: Path) -> None:
 
     assert first == second
     assert first[0].items == ("source-z/opaque-1", "source-a/opaque-2")
+
+
+def test_initial_plan_materializes_self_contained_worker_packages(
+    tmp_path: Path,
+) -> None:
+    context = _context(
+        tmp_path,
+        [("one", "personal", 0), ("two", "personal", 0)],
+    )
+    work = tmp_path / "work"
+    plan = plan_shards(context)
+
+    write_initial_plan(work, context, plan)
+
+    shard_dir = work / "shards" / "shard-01"
+    assert {path.name for path in shard_dir.iterdir()} == {"TASK.md", "STATUS.json"}
+    assert not (shard_dir / "REPORT.md").exists()
+    assert json.loads((shard_dir / "STATUS.json").read_text()) == {
+        "status": "pending",
+        "retry_count": 0,
+    }
+    task = (shard_dir / "TASK.md").read_text()
+    assert "- /context/one/overview.md" in task
+    assert "- /context/two/overview.md" in task
+    assert "Do not read or modify `/work/TASK.md`" in task
+    assert "Write exactly one report to:" in task
+    assert "SHARD_STATUS" not in (work / "NOTES.md").read_text()

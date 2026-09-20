@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from .archive import ArchiveError, PublishedRun, PublishedSnapshot
 from .attribution import source_attribution_mode
 from .context_adapter import (
-    ContextIndexEntry,
+    ContextOrdering,
     RenderedContextItem,
     number_context_items,
     render_source_item,
@@ -298,19 +298,10 @@ def _session_sort_key(item: ContextItem) -> tuple[datetime, str, str]:
     )
 
 
-def _session_span(projection: OpenCodeProjection, timezone: Any) -> str:
-    times = [turn.timestamp for turn in projection.dialogue.activity]
-    first = min(times).astimezone(timezone).strftime("%H:%M")
-    last = max(times).astimezone(timezone).strftime("%H:%M")
-    return first if first == last else f"{first}-{last}"
-
-
 class OpenCodeContextAdapter:
     source_kind = "opencode"
     object_kinds = frozenset({"session"})
     attribution_mode = source_attribution_mode("opencode")
-    index_section = "OpenCode"
-    empty_index_message = "No OpenCode root sessions are available."
 
     def project(
         self, snapshot: PublishedSnapshot, start: datetime, end: datetime
@@ -351,22 +342,18 @@ class OpenCodeContextAdapter:
 
         return render_source_item(self, item, result, output, render_opencode)
 
-    def index_header(self, _items: tuple[ContextItem, ...]) -> tuple[str, ...]:
-        return ()
-
-    def index_metadata(
+    def ordering_metadata(
         self, item: ContextItem, result: ContextExtractionResult
-    ) -> ContextIndexEntry:
+    ) -> ContextOrdering:
         projection = item.projection
         if not isinstance(projection, OpenCodeProjection):
             raise ArchiveError("OpenCode context projection was invalid")
         timezone = result.request.start.tzinfo
         if timezone is None:
             raise ArchiveError("Context request timezone is invalid")
-        return ContextIndexEntry(
+        return ContextOrdering(
             _session_directory(projection),
             (item.path,),
-            f"{_session_span(projection, timezone)} - {_session_title(projection)}",
         )
 
 

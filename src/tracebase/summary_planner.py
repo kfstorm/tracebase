@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -172,35 +171,61 @@ def plan_shards(
     )
 
 
-def initial_status(
-    plan: tuple[PlannedShard, ...],
-) -> dict[str, list[dict[str, object]]]:
-    """Serialize a host plan using the mutable worker-status schema."""
-    return {
-        "shards": [
-            {
-                "id": shard.id,
-                "items": list(shard.items),
-                "status": "pending",
-                "retry_count": 0,
-                "report": f"/work/shards/{shard.id}.md",
-            }
-            for shard in plan
-        ]
-    }
+def _worker_template() -> str:
+    return (Path(__file__).parent / "prompts/summary-worker-task-v1.md").read_text(
+        encoding="utf-8"
+    )
 
 
-def write_initial_plan(work_dir: Path, plan: tuple[PlannedShard, ...]) -> None:
-    """Write durable host-owned notes and the complete pending inventory."""
-    work_dir.joinpath("shards").mkdir(parents=True, exist_ok=True)
-    status = json.dumps(initial_status(plan), ensure_ascii=False, separators=(",", ":"))
+def shard_task_text(
+    shard: PlannedShard,
+    inventory: ContextInventory,
+) -> str:
+    """Render one deterministic, self-contained worker task."""
+    files_by_root = {item.root: item.files for item in inventory.items}
+    evidence_paths = [
+        f"/context/{item}/{file}"
+        for item in shard.items
+        for file in files_by_root.get(item, ("overview.md",))
+    ]
+    evidence = "\n".join(f"- {path}" for path in evidence_paths)
+    report = f"/work/shards/{shard.id}/REPORT.md"
+    return (
+        "# Summary shard task\n\n"
+        f"Shard: {shard.id}\n\n"
+        "## Assigned evidence\n\n"
+        f"{evidence}\n\n"
+        "## Worker contract\n\n"
+        f"{_worker_template().rstrip()}\n\n"
+        "## Output\n\n"
+        "Write exactly one report to:\n\n"
+        f"{report}\n"
+    )
+
+
+def write_initial_plan(
+    work_dir: Path, context_dir: Path, plan: tuple[PlannedShard, ...]
+) -> None:
+    """Materialize immutable shard packages before the root session starts."""
+    try:
+        inventory = load_context_inventory(context_dir)
+    except ContextInventoryError as error:
+        raise ValueError(str(error)) from None
+    shards_dir = work_dir / "shards"
+    shards_dir.mkdir(parents=True, exist_ok=True)
+    for shard in plan:
+        shard_dir = shards_dir / shard.id
+        shard_dir.mkdir()
+        (shard_dir / "TASK.md").write_text(
+            shard_task_text(shard, inventory), encoding="utf-8"
+        )
+        (shard_dir / "STATUS.json").write_text(
+            '{"status":"pending","retry_count":0}\n', encoding="utf-8"
+        )
     notes = (
         "# Summary shard plan\n\n"
         "Tracebase generated and validated this execution partition before the "
         "root model started. Shard membership is an execution partition only; "
-        "it does not establish a semantic or workstream relationship.\n\n"
-        "<!-- SHARD_STATUS_BEGIN -->\n"
-        f"{status}\n"
-        "<!-- SHARD_STATUS_END -->\n"
+        "it does not establish a semantic or workstream relationship.\n"
     )
     work_dir.joinpath("NOTES.md").write_text(notes, encoding="utf-8")
