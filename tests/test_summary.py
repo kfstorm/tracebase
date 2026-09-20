@@ -19,7 +19,12 @@ from tracebase.summary import (
     summarize,
     summarize_archive,
 )
-from tracebase.summary_planner import PlannedShard, plan_shards, shard_task_text
+from tracebase.summary_planner import (
+    SHARD_POLICY,
+    PlannedShard,
+    plan_shards,
+    shard_task_text,
+)
 from tracebase.summary_shards import inspect_shard_plan, inspect_shards
 
 
@@ -197,7 +202,7 @@ def large_two_item_context(tmp_path: Path) -> Path:
         ("two", "two"),
     )
     for item in ("one", "two"):
-        (source / f"{item}/activity.md").write_bytes(b"x" * 40000)
+        (source / f"{item}/activity.md").write_bytes(b"x" * 140000)
     inventory_path = source / "index.json"
     inventory = json.loads(inventory_path.read_text())
     for item in inventory["items"]:
@@ -811,7 +816,9 @@ def test_plan_applies_generic_byte_limit_and_allows_one_oversized_item(
         tmp_path, context_dir, expected_plan=expected_plan
     ).errors
 
-    assert any("exceeds 65536 readable bytes" in error for error in errors)
+    assert any(
+        f"exceeds {SHARD_POLICY.max_bytes} readable bytes" in error for error in errors
+    )
     assert not any("oversized" in error for error in errors)
 
 

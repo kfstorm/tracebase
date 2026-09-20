@@ -6,6 +6,8 @@ import pytest
 
 from tracebase.context_inventory import ContextInventoryError, load_context_inventory
 from tracebase.summary_planner import (
+    SHARD_POLICY,
+    SUMMARY_SHARD_MAX_BYTES,
     PlannedShard,
     ShardPolicy,
     plan_shards,
@@ -56,7 +58,8 @@ def _context(
 def test_policy_has_only_the_authoritative_limits() -> None:
     policy = ShardPolicy()
 
-    assert policy.max_bytes == 64 * 1024
+    assert policy.max_bytes == SUMMARY_SHARD_MAX_BYTES
+    assert SHARD_POLICY.max_bytes == SUMMARY_SHARD_MAX_BYTES
     assert policy.max_items == 8
     assert not hasattr(policy, "tiny_group_bytes")
 
@@ -133,9 +136,9 @@ def test_intact_small_subtrees_pack_across_sources(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
         [
-            ("github/item", 20_000),
-            ("opencode/item", 25_000),
-            ("chatgpt/item", 15_000),
+            ("github/item", 80_000),
+            ("opencode/item", 80_000),
+            ("chatgpt/item", 80_000),
         ],
     )
 
@@ -144,16 +147,16 @@ def test_intact_small_subtrees_pack_across_sources(tmp_path: Path) -> None:
     assert [shard.items for shard in plan] == [
         ("github/item", "opencode/item", "chatgpt/item")
     ]
-    assert plan[0].readable_bytes <= 64 * 1024
+    assert plan[0].readable_bytes <= SHARD_POLICY.max_bytes
 
 
 def test_overflowing_subtree_is_isolated_from_intact_siblings(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
         [
-            ("github/repo/item-a", 90_000),
-            ("opencode/item", 30_000),
-            ("chatgpt/item", 20_000),
+            ("github/repo/item-a", 280_000),
+            ("opencode/item", 100_000),
+            ("chatgpt/item", 100_000),
         ],
     )
 
@@ -172,8 +175,8 @@ def test_intact_siblings_may_pack_around_isolated_overflow_units(
         tmp_path,
         [
             ("a", 20_000),
-            ("b/item-1", 40_000),
-            ("b/item-2", 40_000),
+            ("b/item-1", 140_000),
+            ("b/item-2", 140_000),
             ("c", 20_000),
         ],
     )
@@ -194,10 +197,10 @@ def test_packed_items_follow_interleaved_inventory_order(
         tmp_path,
         [
             ("a/item-1", 10_000),
-            ("b/item-1", 40_000),
+            ("b/item-1", 140_000),
             ("c/item-1", 10_000),
             ("a/item-2", 10_000),
-            ("b/item-2", 40_000),
+            ("b/item-2", 140_000),
             ("c/item-2", 10_000),
         ],
     )
@@ -217,8 +220,8 @@ def test_overflowing_project_subtree_does_not_use_sibling_capacity(
     context = _context(
         tmp_path,
         [
-            ("github/project/item-a", 40_000),
-            ("github/project/item-b", 40_000),
+            ("github/project/item-a", 140_000),
+            ("github/project/item-b", 140_000),
             ("other/item", 20_000),
         ],
     )

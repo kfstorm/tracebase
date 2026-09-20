@@ -12,12 +12,18 @@ from .context_inventory import (
     load_context_inventory,
 )
 
+SUMMARY_SHARD_MAX_BYTES = 256 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class ShardPolicy:
-    """Authoritative generic execution limits for every Context source."""
+    """Authoritative generic execution limits for every Context source.
 
-    max_bytes: int = 64 * 1024
+    The 256 KiB default is roughly 64K tokens under a 4-bytes-per-token
+    working assumption.
+    """
+
+    max_bytes: int = SUMMARY_SHARD_MAX_BYTES
     max_items: int = 8
 
 
