@@ -520,6 +520,7 @@ def github_output(
     object_kind: str = "pull-request",
     effective_options: dict[str, object] | None = None,
     with_profile: bool = True,
+    observation_window: dict[str, str] | None = None,
 ) -> Path:
     payload = {"node_id": "PR_1", **(pull_request or {})}
     publish_github(
@@ -532,6 +533,7 @@ def github_output(
         },
         object_kind=object_kind,
         effective_options=effective_options,
+        observation_window=observation_window,
     )
     if with_profile:
         profile_root = (
@@ -1199,14 +1201,40 @@ def test_github_pr_overview_uses_issue_labels_and_pull_request_state(
                 "draft": False,
             },
         },
+        observation_window={
+            "from": "2026-01-03T00:00:00+00:00",
+            "to": "2026-01-04T00:00:00+00:00",
+        },
     )
 
     overview = text(output, "overview.md")
+    lines = overview.splitlines()
+    evidence_start = lines.index("## Evidence semantics")
+    observed_start = lines.index("## Observed item state")
+    description_start = lines.index("## Description")
+    evidence_section = lines[evidence_start:observed_start]
+    observed_section = lines[observed_start:description_start]
 
     assert "- State: merged" in overview
     assert "- Merged at: 2026-01-01 10:34" in overview
     assert "- Labels: alpha, zeta" in overview
     assert "- Merged:" not in overview
+    assert evidence_start < observed_start < description_start
+    assert "- Author: @author" in observed_section
+    assert "- Type: Pull request" in observed_section
+    assert "- State: merged" in observed_section
+    assert "- Merged at: 2026-01-01 10:34" in observed_section
+    assert "- Labels: alpha, zeta" in observed_section
+    assert "- Draft: false" in observed_section
+    assert "Mutable fields may include later-observed changes" in "\n".join(
+        observed_section
+    )
+    assert "- Author: @author" not in evidence_section
+    assert "- Type: Pull request" not in evidence_section
+    assert "- State: merged" not in evidence_section
+    assert "- Merged at: 2026-01-01 10:34" not in evidence_section
+    assert "- Labels: alpha, zeta" not in evidence_section
+    assert "- Draft: false" not in evidence_section
 
 
 def test_github_non_merged_closed_pr_remains_closed(tmp_path: Path) -> None:

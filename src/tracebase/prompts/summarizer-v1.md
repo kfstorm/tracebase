@@ -102,8 +102,10 @@ explicitly failed and its evidence must not be silently treated as reviewed.
 During reduce, read completed `User work` report sections in the host-provided
 shard order recorded in NOTES to identify materially meaningful workstreams.
 `Context-only evidence`
-may explain an explicitly attributed fact but cannot create a workstream, fill
-an attribution gap, or be restated as the user's work. Merge evidence across
+may explain attributed User work or provide state evidence for final-state
+reconciliation when the worker preserved it according to the Context item's
+declared semantics. It must not create a workstream, fill an attribution gap,
+or be restated or implied as the user's work. Merge evidence across
 shards or sources only when Context establishes a real relationship. Do not
 expose concrete non-work personal content in the final Summary. Do not
 re-traverse all Context. A targeted direct read is allowed only for a specific

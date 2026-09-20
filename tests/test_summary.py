@@ -511,6 +511,26 @@ def test_summarizer_contract_reduces_worker_filtered_evidence() -> None:
         assert source_term not in lowered
 
 
+def test_summarizer_contract_allows_context_only_state_reconciliation() -> None:
+    prompt = (
+        Path(__file__).parents[1] / "src/tracebase/prompts/summarizer-v1.md"
+    ).read_text(encoding="utf-8")
+    normalized = " ".join(prompt.split())
+
+    assert (
+        "`Context-only evidence` may explain attributed User work or provide state "
+        "evidence for final-state reconciliation when the worker preserved it "
+        "according to the Context item's declared semantics"
+    ) in normalized
+    assert (
+        "It must not create a workstream, fill an attribution gap, or be restated "
+        "or implied as the user's work"
+    ) in normalized
+    lowered = normalized.casefold()
+    for source_term in ("github", "opencode", "chatgpt"):
+        assert source_term not in lowered
+
+
 def test_worker_contract_preserves_evidence_interpretation_rules() -> None:
     prompt = (
         Path(__file__).parents[1] / "src/tracebase/prompts/summary-worker-task-v1.md"

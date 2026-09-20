@@ -779,6 +779,7 @@ def _overview(
         ]
     )
     lines.extend(context_semantics_lines(item.adapter))
+    lines.extend(["## Observed item state", ""])
     author = github_actor_login(issue_value)
     if author:
         lines.append(f"- Author: {_actor_label(issue_value, projection.tracked_login)}")
@@ -812,9 +813,6 @@ def _overview(
     )
     if isinstance(draft, bool):
         lines.append(f"- Draft: {str(draft).lower()}")
-    body = issue_value.get("body")
-    if isinstance(body, str) and body:
-        lines.extend(["", "## Description", "", body, ""])
     if _selected_observation_is_after_request_end(item, result):
         lines.extend(
             [
@@ -823,6 +821,9 @@ def _overview(
                 "guaranteed to equal the exact state at the request end.",
             ]
         )
+    body = issue_value.get("body")
+    if isinstance(body, str) and body:
+        lines.extend(["", "## Description", "", body, ""])
     diff_record = next(
         (
             record
