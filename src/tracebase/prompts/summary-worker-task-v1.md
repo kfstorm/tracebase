@@ -41,9 +41,18 @@ support. Preserve grouping and order shown in Context. Keep evidence that the
 item declares context-only out of User work, and do not replace missing
 attribution with actorless or collective wording.
 
-Preserve stable external identifiers already present in assigned Context when
-they materially identify reported work or state; do not invent missing
-identifiers.
+Preserve materially useful URLs, identifiers, repository or project references,
+and other work references already present in assigned Context when they help
+identify reported work, relate it to other evidence, explain an outcome, or
+preserve an explicit relationship. When Context explicitly establishes a
+material relationship between referenced work entities, preserve the relevant
+references and relationship in the report. Do not mechanically retain incidental
+references, and do not invent, expand, normalize, or canonicalize missing
+references.
+
+Do not construct URLs or repository/project references from short labels, paths,
+or titles; do not expand incomplete identifiers; do not infer relationships from
+matching numeric identifiers, titles, time, or similar descriptions.
 
 The report must contain these two required normalized ATX sections, at any
 heading level, including an empty section when needed. Additional or nested

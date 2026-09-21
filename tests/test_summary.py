@@ -583,6 +583,13 @@ def test_summarizer_contract_reduces_worker_filtered_evidence() -> None:
         "Do not reconstruct or reinterpret item semantics",
         "Do not reverse-engineer item semantics",
         "without promoting evidence that their reports classify as context-only",
+        "matching URLs, sufficiently scoped identifiers, repository or project "
+        "references, and explicit relationships preserved in reports",
+        "Exact shared references are strong evidence",
+        "numeric identifiers alone",
+        "similar titles or wording",
+        "chronology",
+        "repository proximity",
     ):
         assert clause in normalized
     lowered = normalized.casefold()
@@ -652,11 +659,14 @@ def test_worker_contract_preserves_evidence_interpretation_rules() -> None:
         "preserve important motivation, decisions, final state, uncertainty, Context "
         "paths, and technical detail for root synthesis"
     ) not in normalized
-    assert (
-        "Preserve stable external identifiers already present in assigned Context "
-        "when they materially identify reported work or state; do not invent missing "
-        "identifiers"
-    ) in normalized
+    for clause in (
+        "materially useful URLs",
+        "identifiers",
+        "repository or project references",
+        "explicit relationship",
+        "do not invent, expand, normalize, or canonicalize missing references",
+    ):
+        assert clause in normalized
     assert "Do not read `/work/MUTABLE_STATE.md`" in normalized
     assert normalized.count("## User work") == 1
     assert normalized.count("## Context-only evidence") == 1
