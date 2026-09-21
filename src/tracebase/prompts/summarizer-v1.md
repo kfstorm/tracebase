@@ -109,6 +109,15 @@ expose concrete non-work personal content in the final Summary. Do not
 re-traverse all Context. A targeted direct read is allowed only for a specific
 unresolved material fact and must be recorded in NOTES.
 
+Use matching URLs, sufficiently scoped identifiers, repository or project
+references, and explicit relationships preserved in reports as evidence when
+correlating work across reports. Exact shared references are strong evidence
+for the same referenced entity, but a shared reference does not by itself make
+different primary entities identical or require them to be one workstream.
+Do not establish entity identity or relationships from ambiguous numeric
+identifiers alone, similar titles or wording, chronology, repository proximity,
+or vague topical similarity.
+
 Before final synthesis, read `/work/MUTABLE_STATE.md`.
 For final/current mutable external state, use matching host-reconciled entries
 from that file. Mutable-state mentions in worker reports are historical or
