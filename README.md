@@ -185,11 +185,11 @@ For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebas
 The `summary` command runs the production Summarizer in a pinned Docker image. It requires Docker and a configured OpenCode authentication file so the selected model can run. The archive mode creates Context Output from the requested range, then publishes `summary.md` and `manifest.json`:
 
 By default, Summary resolves the `latest` tag for `opencode-ai` through the npm
-registry before running, so registry access is required. Use
-`--opencode-version VERSION_OR_TAG` to select an exact published version or an
-existing dist-tag such as `beta` or `next`. The resolved version determines the
-Docker image tag; the manifest records the version reported by OpenCode inside
-the container.
+registry before running. Use `--opencode-version VERSION_OR_TAG` to select an
+exact version or an existing dist-tag such as `beta` or `next`. Dist-tags require
+registry access; an exact version can reuse a cached Docker image offline. The
+resolved version determines the Docker image and build version; the manifest
+records the version reported by OpenCode inside the container.
 
 ```bash
 uv run tracebase summary \

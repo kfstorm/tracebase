@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import subprocess
@@ -29,6 +30,8 @@ from tracebase.summary_planner import (
     shard_task_text,
 )
 from tracebase.summary_shards import inspect_shard_plan, inspect_shards
+
+LONG_VERSION = "1.2.3+" + "a" * 130
 
 
 @pytest.fixture(autouse=True)
@@ -1203,8 +1206,8 @@ def test_cli_archive_mode_composes_summary(tmp_path: Path, monkeypatch) -> None:
         ("latest", "1.2.3"),
         ("beta", "1.3.0-beta.1"),
         ("next", "1.3.0-beta.1"),
-        ("1.2.3", "1.2.3"),
-        ("1.3.0-beta.1", "1.3.0-beta.1"),
+        ("2026-preview", "1.3.0-beta.1"),
+        ("vnext", "1.3.0-beta.1"),
     ],
 )
 def test_resolve_opencode_version_from_registry(
@@ -1220,14 +1223,26 @@ def test_resolve_opencode_version_from_registry(
                         "latest": "1.2.3",
                         "beta": "1.3.0-beta.1",
                         "next": "1.3.0-beta.1",
+                        "2026-preview": "1.3.0-beta.1",
+                        "vnext": "1.3.0-beta.1",
                     },
-                    "versions": {"1.2.3": {}, "1.3.0-beta.1": {}},
                 }
             ).encode()
         )
 
     monkeypatch.setattr("tracebase.summary.urlopen", open_registry)
     assert resolve_opencode_version(requested) == expected
+
+
+@pytest.mark.parametrize("requested", ["1.2.3", "1.3.0-beta.1", "1.2.3+build.1"])
+def test_exact_version_does_not_query_registry(
+    monkeypatch: pytest.MonkeyPatch, requested: str
+) -> None:
+    monkeypatch.setattr(
+        "tracebase.summary.urlopen",
+        lambda *args, **kwargs: pytest.fail("registry queried"),
+    )
+    assert resolve_opencode_version(requested) == requested
 
 
 @pytest.mark.parametrize(
@@ -1243,14 +1258,14 @@ def test_resolve_opencode_version_from_registry(
         "../pkg",
     ],
 )
-def test_reject_unsupported_package_specs_before_registry(
+def test_reject_unsupported_package_specs_not_in_dist_tags(
     monkeypatch: pytest.MonkeyPatch, requested: str
 ) -> None:
     monkeypatch.setattr(
         "tracebase.summary.urlopen",
-        lambda *args, **kwargs: pytest.fail("registry queried"),
+        lambda *args, **kwargs: BytesIO(b'{"dist-tags": {}}'),
     )
-    with pytest.raises(SummaryError, match="invalid OpenCode version or dist-tag"):
+    with pytest.raises(SummaryError, match="invalid OpenCode version or unknown"):
         resolve_opencode_version(requested)
 
 
@@ -1259,25 +1274,15 @@ def test_reject_unsupported_package_specs_before_registry(
     [
         (
             "missing",
-            {"versions": {}, "dist-tags": {}},
-            "dist-tag 'missing' does not exist",
-        ),
-        (
-            "1.2.3",
-            {"versions": {}, "dist-tags": {}},
-            "version '1.2.3' is not published",
+            {"dist-tags": {}},
+            "unknown opencode-ai dist-tag 'missing'",
         ),
         (
             "latest",
-            {"versions": {}, "dist-tags": {"latest": "1.2.3"}},
+            {"dist-tags": {"latest": "^1.2.3"}},
             "invalid opencode-ai response",
         ),
-        (
-            "latest",
-            {"versions": {}, "dist-tags": {"latest": "^1.2.3"}},
-            "invalid opencode-ai response",
-        ),
-        ("latest", {"versions": [], "dist-tags": {}}, "invalid opencode-ai response"),
+        ("latest", {"dist-tags": []}, "invalid opencode-ai response"),
     ],
 )
 def test_resolver_rejects_missing_or_invalid_registry_data(
@@ -1311,8 +1316,25 @@ def test_resolver_reports_registry_failure(monkeypatch: pytest.MonkeyPatch) -> N
         resolve_opencode_version("latest")
 
 
+@pytest.mark.parametrize(
+    ("requested_version", "resolved_version", "image_tag"),
+    [
+        ("beta", "1.2.3", "tracebase-opencode:1.2.3"),
+        ("1.2.3+build.1", "1.2.3+build.1", "tracebase-opencode:1.2.3_build.1"),
+        (
+            LONG_VERSION,
+            LONG_VERSION,
+            "tracebase-opencode:sha256-"
+            + hashlib.sha256(LONG_VERSION.encode()).hexdigest(),
+        ),
+    ],
+)
 def test_summary_build_uses_resolved_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_version: str,
+    resolved_version: str,
+    image_tag: str,
 ) -> None:
     source = context(tmp_path)
     runner = FakeRunner(tmp_path / ".unused")
@@ -1321,7 +1343,7 @@ def test_summary_build_uses_resolved_version(
     requested: list[str] = []
     monkeypatch.setattr(
         "tracebase.summary.resolve_opencode_version",
-        lambda value: requested.append(value) or "1.2.3",
+        lambda value: requested.append(value) or resolved_version,
     )
     monkeypatch.setattr(
         "tracebase.summary.ensure_image",
@@ -1334,15 +1356,55 @@ def test_summary_build_uses_resolved_version(
 
     summarize(
         SummaryRequest(
-            source, "model", None, tmp_path / "output", opencode_version="beta"
+            source,
+            "model",
+            None,
+            tmp_path / "output",
+            opencode_version=requested_version,
         )
     )
 
-    assert builds == [("tracebase-opencode:1.2.3", "1.2.3")]
-    assert requested == ["beta"]
+    assert builds == [(image_tag, resolved_version)]
+    assert requested == [requested_version]
     manifest = json.loads((tmp_path / "output/manifest.json").read_text())
     assert manifest["opencode_version"] == "container-reported-version"
-    assert "beta" not in json.dumps(manifest)
+    assert requested_version not in json.dumps(manifest)
+
+
+def test_exact_version_reuses_cached_image_without_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = context(tmp_path)
+    runner = FakeRunner(tmp_path / ".unused")
+    _bind_runner_to_staging(runner, tmp_path)
+    docker_calls: list[list[str]] = []
+
+    def docker_run(
+        arguments: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        docker_calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0)
+
+    monkeypatch.setattr(
+        "tracebase.summary.resolve_opencode_version", resolve_opencode_version
+    )
+    monkeypatch.setattr(
+        "tracebase.summary.urlopen",
+        lambda *args, **kwargs: pytest.fail("registry queried"),
+    )
+    monkeypatch.setattr("tracebase.summary.prepare_state", lambda _state, _model: "{}")
+    monkeypatch.setattr(
+        "tracebase.summary.ContainerRunner", lambda _image, _mounts: runner
+    )
+    monkeypatch.setattr("tracebase.summary_container.subprocess.run", docker_run)
+
+    summarize(
+        SummaryRequest(
+            source, "model", None, tmp_path / "output", opencode_version="1.2.3"
+        )
+    )
+
+    assert docker_calls == [["docker", "image", "inspect", "tracebase-opencode:1.2.3"]]
 
 
 def test_summary_has_no_fixed_opencode_version() -> None:

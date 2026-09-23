@@ -33,12 +33,12 @@ from .summary_planner import PlannedShard, plan_shards, write_initial_plan
 from .summary_shards import inspect_shard_plan, inspect_shards
 
 _EXACT_VERSION = re.compile(
-    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
-    r"(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
-    r"(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
-_DIST_TAG = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
+_MAX_DOCKER_TAG_LENGTH = 128
 SHARD_RECOVERY_PROMPT = """Shard protocol validation failed.
 
 Reread /work/TASK.md and /work/NOTES.md. Fix only the shard-protocol errors
@@ -73,13 +73,9 @@ class SummaryError(RuntimeError):
 
 
 def resolve_opencode_version(requested: str) -> str:
-    """Resolve an exact published opencode-ai version or an existing npm dist-tag."""
-    exact = _EXACT_VERSION.fullmatch(requested) is not None
-    if not exact and _DIST_TAG.fullmatch(requested) is None:
-        raise SummaryError(
-            f"invalid OpenCode version or dist-tag {requested!r}: "
-            "use an exact npm version or an existing opencode-ai dist-tag"
-        )
+    """Use an exact version directly or resolve an opencode-ai npm dist-tag."""
+    if _EXACT_VERSION.fullmatch(requested):
+        return requested
     try:
         request = Request(
             "https://registry.npmjs.org/opencode-ai",
@@ -94,20 +90,25 @@ def resolve_opencode_version(requested: str) -> str:
 
     if not isinstance(metadata, dict):
         raise SummaryError("invalid opencode-ai response from npm registry")
-    versions = metadata.get("versions")
     tags = metadata.get("dist-tags")
-    if not isinstance(versions, dict) or not isinstance(tags, dict):
+    if not isinstance(tags, dict):
         raise SummaryError("invalid opencode-ai response from npm registry")
-    if not exact and requested not in tags:
-        raise SummaryError(f"opencode-ai dist-tag {requested!r} does not exist")
-    resolved = requested if exact else tags[requested]
+    if requested not in tags:
+        raise SummaryError(
+            f"invalid OpenCode version or unknown opencode-ai dist-tag {requested!r}"
+        )
+    resolved = tags[requested]
     if not isinstance(resolved, str) or _EXACT_VERSION.fullmatch(resolved) is None:
         raise SummaryError("invalid opencode-ai response from npm registry")
-    if resolved not in versions:
-        if exact:
-            raise SummaryError(f"opencode-ai version {requested!r} is not published")
-        raise SummaryError("invalid opencode-ai response from npm registry")
     return resolved
+
+
+def _image_tag_for_version(version: str) -> str:
+    # SemVer build metadata allows '+', which Docker image tags do not.
+    tag = version.replace("+", "_")
+    if len(tag) > _MAX_DOCKER_TAG_LENGTH:
+        tag = "sha256-" + hashlib.sha256(version.encode("utf-8")).hexdigest()
+    return f"tracebase-opencode:{tag}"
 
 
 class Runner(Protocol):
@@ -451,7 +452,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         dockerfile = Path(__file__).parent / "container/Dockerfile"
         if runner is None:
             config = prepare_state(state, request.model)
-            image = f"tracebase-opencode:{resolved_version}"
+            image = _image_tag_for_version(resolved_version)
             ensure_image(image, dockerfile, resolved_version)
             runner = ContainerRunner(
                 image,
