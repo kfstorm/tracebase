@@ -146,4 +146,11 @@ def ensure_image(image: str, dockerfile: Path, opencode_version: str) -> None:
         check=False,
     )
     if result.returncode != 0:
-        raise ContainerError("could not build the Summarizer container image")
+        message = "could not build the Summarizer container image"
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        if stdout and stderr:
+            message += f"\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        elif output := stdout or stderr:
+            message += f"\n{output}"
+        raise ContainerError(message)

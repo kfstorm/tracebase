@@ -3,8 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from tracebase.summary import IMAGE, OPENCODE_VERSION
-from tracebase.summary_container import ContainerMounts, ContainerRunner, ensure_image
+from tracebase.summary_container import (
+    ContainerError,
+    ContainerMounts,
+    ContainerRunner,
+    ensure_image,
+)
+
+IMAGE = "tracebase-opencode:1.2.3"
+VERSION = "1.2.3"
 
 
 def record_docker_runs(
@@ -28,7 +35,7 @@ def test_ensure_image_passes_authoritative_opencode_version_to_build(
 ) -> None:
     calls = record_docker_runs(monkeypatch, [1, 0])
 
-    ensure_image(IMAGE, tmp_path / "Dockerfile", OPENCODE_VERSION)
+    ensure_image(IMAGE, tmp_path / "Dockerfile", VERSION)
 
     assert calls[0] == ["docker", "image", "inspect", IMAGE]
     assert calls[1] == [
@@ -39,7 +46,7 @@ def test_ensure_image_passes_authoritative_opencode_version_to_build(
         "--file",
         str(tmp_path / "Dockerfile"),
         "--build-arg",
-        f"OPENCODE_VERSION={OPENCODE_VERSION}",
+        f"OPENCODE_VERSION={VERSION}",
         str(tmp_path),
     ]
 
@@ -49,9 +56,55 @@ def test_ensure_image_does_not_build_existing_image(
 ) -> None:
     calls = record_docker_runs(monkeypatch, [0])
 
-    ensure_image(IMAGE, tmp_path / "Dockerfile", OPENCODE_VERSION)
+    ensure_image(IMAGE, tmp_path / "Dockerfile", VERSION)
 
     assert calls == [["docker", "image", "inspect", IMAGE]]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        (
+            "",
+            "  synthetic build error  \n",
+            "could not build the Summarizer container image\nsynthetic build error",
+        ),
+        (
+            "  synthetic build log  \n",
+            "",
+            "could not build the Summarizer container image\nsynthetic build log",
+        ),
+        (
+            "  synthetic build log  \n",
+            "  synthetic build error  \n",
+            "could not build the Summarizer container image\n"
+            "stdout:\nsynthetic build log\nstderr:\nsynthetic build error",
+        ),
+        (" \n", "\t", "could not build the Summarizer container image"),
+    ],
+)
+def test_ensure_image_build_failure_includes_available_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stdout: str,
+    stderr: str,
+    expected: str,
+) -> None:
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 1),
+            subprocess.CompletedProcess([], 1, stdout, stderr),
+        ]
+    )
+    monkeypatch.setattr(
+        "tracebase.summary_container.subprocess.run",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    with pytest.raises(ContainerError) as error:
+        ensure_image(IMAGE, tmp_path / "Dockerfile", VERSION)
+
+    assert str(error.value) == expected
 
 
 def test_dockerfile_requires_an_explicit_opencode_version() -> None:
