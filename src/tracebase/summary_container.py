@@ -86,7 +86,12 @@ class ContainerRunner:
                 self.image,
             ]
         )
-        command.extend(["-c", 'exec opencode "$@" > /export.stdout', "opencode"])
+        # The pinned image can contain an older model catalog than the host.
+        # Refresh it in the same container before resolving the requested model.
+        shell_command = 'exec opencode "$@" > /export.stdout'
+        if "run" in arguments:
+            shell_command = "opencode models --refresh >/dev/null && " + shell_command
+        command.extend(["-c", shell_command, "opencode"])
         command.extend(arguments)
         return command
 

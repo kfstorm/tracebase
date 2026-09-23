@@ -124,6 +124,7 @@ def _container_command(
     tmp_path: Path,
     *,
     mutable_state: Path | None = None,
+    arguments: list[str] | None = None,
 ) -> list[str]:
     runner = ContainerRunner(
         "image",
@@ -144,7 +145,7 @@ def _container_command(
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
     monkeypatch.setattr("tracebase.summary_container.subprocess.run", run)
-    runner.run([], "{}", tmp_path / "stdout")
+    runner.run(arguments or [], "{}", tmp_path / "stdout")
     return calls[0]
 
 
@@ -164,3 +165,17 @@ def test_container_mounts_host_mutable_state_read_only(
     command = _container_command(monkeypatch, tmp_path, mutable_state=mutable_state)
 
     assert f"{mutable_state}:/work/MUTABLE_STATE.md:ro" in command
+
+
+def test_container_refreshes_model_catalog_before_running_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    command = _container_command(
+        monkeypatch,
+        tmp_path,
+        arguments=["--pure", "run", "--model", "openai/example", "hi"],
+    )
+
+    assert command[command.index("-c") + 1] == (
+        'opencode models --refresh >/dev/null && exec opencode "$@" > /export.stdout'
+    )
