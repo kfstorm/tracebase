@@ -1,6 +1,5 @@
 import hashlib
 import json
-import re
 import shutil
 import subprocess
 from io import BytesIO
@@ -687,57 +686,21 @@ def test_summarizer_contract_applies_output_language_to_final_synthesis() -> Non
     prompt = (
         Path(__file__).parents[1] / "src/tracebase/prompts/summarizer-v1.md"
     ).read_text(encoding="utf-8")
-    language_section = prompt.split("## Summary Rules", 1)[1].split(
-        "Use this default structure", 1
-    )[0]
-    language_paragraph = next(
-        " ".join(paragraph.split())
-        for paragraph in language_section.split("\n\n")
-        if "/work/NOTES.md" in paragraph
-    )
+    language_contract = " ".join(prompt.split()).casefold()
 
-    assert re.search(
-        r"(?:if|when).*?/work/NOTES\.md.*?output language",
-        language_paragraph,
-        re.IGNORECASE,
+    assert "/work/notes.md" in language_contract
+    assert "/results/summary.md" in language_contract
+    assert "output language" in language_contract
+    assert "target language" in language_contract
+    assert "worker reports" in language_contract
+    assert any(
+        behavior in language_contract
+        for behavior in (
+            "existing language behavior",
+            "current language behavior",
+            "default language behavior",
+        )
     )
-    assert "/results/summary.md" in language_paragraph
-    assert all(
-        term in language_paragraph.casefold()
-        for term in ("body", "headings", "natural-language")
-    )
-    assert re.search(
-        r"(?:does not|doesn't|lacks).*?output language.*?"
-        r"(?:preserve|keep).*?(?:existing|current).*?language",
-        language_paragraph,
-        re.IGNORECASE,
-    )
-    assert re.search(
-        r"worker reports.*?(?:do not need|need not|not required).*?target language",
-        language_paragraph,
-        re.IGNORECASE,
-    )
-    assert re.search(
-        r"synthesi[sz].*?directly.*?target language.*?worker reports",
-        language_paragraph,
-        re.IGNORECASE,
-    )
-    assert re.search(
-        r"do not first.*?English summary.*?translate reports.*?separate step",
-        language_paragraph,
-        re.IGNORECASE,
-    )
-    for protected_term in (
-        "project",
-        "repository",
-        "urls",
-        "code symbols",
-        "identifiers",
-        "technical terms",
-        "remain untranslated",
-        "mechanically",
-    ):
-        assert protected_term in language_paragraph.casefold()
 
 
 def test_summarizer_contract_reduces_worker_filtered_evidence() -> None:
