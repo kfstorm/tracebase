@@ -184,6 +184,10 @@ For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebas
 
 The `summary` command runs the production Summarizer in a pinned Docker image. It requires Docker and a configured OpenCode authentication file so the selected model can run. The archive mode creates Context Output from the requested range, then publishes `summary.md` and `manifest.json`:
 
+Use `--language LANGUAGE` to choose the natural language for the Summary text and
+headings. For example, `--language zh-CN` requests Simplified Chinese. Omit the
+option to keep the current language behavior.
+
 By default, Summary resolves the `latest` tag for `opencode-ai` through the npm
 registry before running. Use `--opencode-version VERSION_OR_TAG` to select an
 exact version or an existing dist-tag such as `beta` or `next`. Dist-tags require
@@ -198,6 +202,7 @@ uv run tracebase summary \
   --to 2026-09-02T00:00:00+00:00 \
   --model openai/gpt-5.6-luna \
   --variant high \
+  --language zh-CN \
   --output "$HOME/.tracebase/summary-2026-09-01"
 ```
 

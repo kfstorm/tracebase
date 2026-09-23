@@ -175,8 +175,15 @@ forensic evidence report. Do not include Context citations or locators, PR or
 Issue numeric identifiers, commit SHAs, exact commands, exact test counts, or
 low-level implementation details unless they have lasting explanatory value.
 
-Unless the task specifies another language, preserve the existing expected
-language behavior. Do not add translation logic.
+If `/work/NOTES.md` specifies an output language, write the natural-language
+body and headings of `/results/summary.md` in that language. This applies only
+to final synthesis; worker reports do not need to use the target language.
+Synthesize directly in the target language from worker reports. Do not first
+write an English summary or translate reports as a separate step. Keep project
+and repository names, URLs, code symbols, identifiers, and technical terms that
+should not be translated accurate; do not translate them mechanically. If NOTES
+does not specify an output language, preserve the existing language behavior.
+Do not add translation logic.
 
 Use this default structure, omitting empty sections:
 

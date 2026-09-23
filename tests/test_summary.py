@@ -67,6 +67,8 @@ class FakeRunner:
         self.root_saw_pending_plan = False
         self.root_saw_mutable_state = False
         self.root_mutable_state = ""
+        self.root_notes = ""
+        self.shard_tasks: list[str] = []
 
     def run(
         self,
@@ -87,6 +89,11 @@ class FakeRunner:
         if self.root_saw_mutable_state:
             self.root_mutable_state = (work / "MUTABLE_STATE.md").read_text()
         shard_dirs = sorted((work / "shards").iterdir())
+        self.root_notes = (work / "NOTES.md").read_text(encoding="utf-8")
+        self.shard_tasks = [
+            (shard_dir / "TASK.md").read_text(encoding="utf-8")
+            for shard_dir in shard_dirs
+        ]
         host_specs = []
         for shard_dir in shard_dirs:
             status = json.loads((shard_dir / "STATUS.json").read_text())
@@ -330,6 +337,7 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["model"] == "openai/model"
     assert manifest["variant"] == "high"
+    assert manifest["output_language"] is None
     assert manifest["opencode_version"] == "container-reported-version"
     assert "requested_opencode_version" not in manifest
     assert manifest["context_input"] == fingerprint_context(source)
@@ -339,6 +347,7 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     }
     assert len(manifest["shard_plan"]) == 1
     assert len(manifest["shard_plan"][0]["task_sha256"]) == 64
+    assert "Output language" not in runner.root_notes
 
 
 def test_model_context_view_contains_only_manifest_evidence(tmp_path: Path) -> None:
@@ -374,30 +383,66 @@ def test_archive_to_generated_context_summary_still_works(
     generated = tmp_path / "generated-context"
     runner = FakeRunner(tmp_path / ".unused")
     _bind_runner_to_staging(runner, tmp_path)
+    summarized_requests: list[SummaryRequest] = []
+    context_requests: list[ContextRequest] = []
 
-    def generate(_archive: Path, _request: ContextRequest, target: Path) -> None:
+    def generate(_archive: Path, request: ContextRequest, target: Path) -> None:
+        context_requests.append(request)
         source = _write_context(tmp_path, ("repo", "generated"))
         shutil.copytree(source, target)
 
     monkeypatch.setattr("tracebase.summary.generate_context", generate)
     monkeypatch.setattr(
         "tracebase.summary.summarize",
-        lambda request: summarize(request, runner),
+        lambda request: (
+            summarized_requests.append(request) or summarize(request, runner)
+        ),
+    )
+    context_request = ContextRequest.parse(
+        "2026-01-01T01:00:00+01:00", "2026-01-01T03:00:00+01:00"
     )
 
     assert (
         summarize_archive(
             archive,
             generated,
-            ContextRequest.parse(
-                "2026-01-01T01:00:00+01:00", "2026-01-01T03:00:00+01:00"
-            ),
+            context_request,
             "model",
             None,
             output,
+            output_language="zh-CN",
         )
         == output
     )
+    assert summarized_requests[0].output_language == "zh-CN"
+    assert context_requests == [context_request]
+
+
+def test_output_language_is_available_only_to_root_and_manifest(
+    tmp_path: Path,
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+    runner = FakeRunner(tmp_path / ".unused")
+    _bind_runner_to_staging(runner, tmp_path)
+
+    summarize(
+        SummaryRequest(
+            source,
+            "model",
+            None,
+            output,
+            output_language="ZH-cn",
+        ),
+        runner,
+    )
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["output_language"] == "zh-CN"
+    assert runner.root_notes.count("Output language: zh-CN") == 1
+    assert runner.shard_tasks
+    assert all("Output language" not in task for task in runner.shard_tasks)
+    assert all("zh-CN" not in task for task in runner.shard_tasks)
 
 
 def test_debug_layout_separates_host_and_model_context(
@@ -434,6 +479,59 @@ def test_summary_request_does_not_accept_interval_override(tmp_path: Path) -> No
                 "from": "2026-01-01T00:00:00+00:00",
                 "to": "2026-01-02T00:00:00+00:00",
             },
+        )
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        ("en", "en"),
+        ("zh-CN", "zh-CN"),
+        ("ZH-cn", "zh-CN"),
+        ("zh-hant-tw", "zh-Hant-TW"),
+        ("de-CH-1901", "de-CH-1901"),
+        ("qzx", "qzx"),
+    ],
+)
+def test_summary_request_normalizes_output_language(
+    tmp_path: Path, requested: str, expected: str
+) -> None:
+    request = SummaryRequest(
+        context(tmp_path),
+        "model",
+        None,
+        tmp_path / "summary",
+        output_language=requested,
+    )
+
+    assert request.output_language == expected
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "",
+        "x",
+        "English",
+        "please write in Chinese",
+        "en_US",
+        "en--US",
+        "en-Latn-Cyrl",
+        "en-US-GB",
+        "en-u-ca-gregory",
+        "a" * 36,
+    ],
+)
+def test_summary_request_rejects_invalid_output_language(
+    tmp_path: Path, requested: str
+) -> None:
+    with pytest.raises(SummaryError, match="invalid output language tag"):
+        SummaryRequest(
+            context(tmp_path),
+            "model",
+            None,
+            tmp_path / "summary",
+            output_language=requested,
         )
 
 
@@ -582,6 +680,28 @@ def test_summarizer_contract_describes_generic_partitioning() -> None:
     assert "index.md" not in normalized
     assert "Read every host-created package" not in normalized
     assert "SHARD_STATUS" not in normalized
+
+
+def test_summarizer_contract_applies_output_language_to_final_synthesis() -> None:
+    prompt = (
+        Path(__file__).parents[1] / "src/tracebase/prompts/summarizer-v1.md"
+    ).read_text(encoding="utf-8")
+    normalized = " ".join(prompt.split())
+
+    for clause in (
+        "If `/work/NOTES.md` specifies an output language",
+        "write the natural-language body and headings of `/results/summary.md` "
+        "in that language",
+        "If NOTES does not specify an output language, preserve the existing "
+        "language behavior",
+        "Synthesize directly in the target language from worker reports",
+        "Do not first write an English summary or translate reports as a separate step",
+        "worker reports do not need to use the target language",
+        "project and repository names, URLs, code symbols, identifiers, and "
+        "technical terms that should not be translated accurate",
+        "do not translate them mechanically",
+    ):
+        assert clause in normalized
 
 
 def test_summarizer_contract_reduces_worker_filtered_evidence() -> None:
@@ -1136,6 +1256,7 @@ def test_cli_context_mode_dispatches_summary(tmp_path: Path, monkeypatch) -> Non
     assert result == 0
     assert seen[0].context == source
     assert seen[0].opencode_version == "latest"
+    assert seen[0].output_language is None
 
 
 def test_cli_context_mode_accepts_opencode_version(tmp_path: Path, monkeypatch) -> None:
@@ -1164,7 +1285,67 @@ def test_cli_context_mode_accepts_opencode_version(tmp_path: Path, monkeypatch) 
     assert seen[0].opencode_version == "beta"
 
 
-def test_cli_archive_mode_composes_summary(tmp_path: Path, monkeypatch) -> None:
+def test_cli_context_mode_passes_normalized_output_language(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = context(tmp_path)
+    seen: list[SummaryRequest] = []
+    monkeypatch.setattr(
+        cli, "summarize", lambda request: seen.append(request) or tmp_path
+    )
+
+    result = cli.main(
+        [
+            "summary",
+            "--context",
+            str(source),
+            "--model",
+            "model",
+            "--output",
+            str(tmp_path / "output"),
+            "--language",
+            "ZH-cn",
+        ]
+    )
+
+    assert result == 0
+    assert seen[0].output_language == "zh-CN"
+
+
+def test_cli_rejects_invalid_output_language(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
+) -> None:
+    source = context(tmp_path)
+    monkeypatch.setattr(cli, "summarize", lambda _request: pytest.fail())
+
+    result = cli.main(
+        [
+            "summary",
+            "--context",
+            str(source),
+            "--model",
+            "model",
+            "--output",
+            str(tmp_path / "output"),
+            "--language",
+            "please write in Chinese",
+        ]
+    )
+
+    assert result == 1
+    assert "invalid output language tag" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("language", "context_output"),
+    [(None, "retained-context"), ("zh-CN", None)],
+)
+def test_cli_archive_mode_forwards_optional_output_language(
+    tmp_path: Path,
+    monkeypatch,
+    language: str | None,
+    context_output: str | None,
+) -> None:
     output = tmp_path / "output"
     calls: list[tuple[object, ...]] = []
     monkeypatch.setattr(
@@ -1173,31 +1354,35 @@ def test_cli_archive_mode_composes_summary(tmp_path: Path, monkeypatch) -> None:
         lambda *arguments, **kwargs: calls.append((*arguments, kwargs)) or output,
     )
 
-    result = cli.main(
-        [
-            "summary",
-            "--archive",
-            "archive",
-            "--from",
-            "2026-01-01T01:00:00+01:00",
-            "--to",
-            "2026-01-01T03:00:00+01:00",
-            "--model",
-            "model",
-            "--context-output",
-            "retained-context",
-            "--output",
-            str(output),
-        ]
-    )
+    arguments = [
+        "summary",
+        "--archive",
+        "archive",
+        "--from",
+        "2026-01-01T01:00:00+01:00",
+        "--to",
+        "2026-01-01T03:00:00+01:00",
+        "--model",
+        "model",
+    ]
+    if context_output is not None:
+        arguments.extend(["--context-output", context_output])
+    arguments.extend(["--output", str(output)])
+    if language is not None:
+        arguments.extend(["--language", language])
+
+    result = cli.main(arguments)
 
     assert result == 0
     assert calls[0][0] == Path("archive")
-    assert calls[0][1] == Path("retained-context")
+    assert calls[0][1] == (Path(context_output) if context_output is not None else None)
     assert calls[0][2] == ContextRequest.parse(
         "2026-01-01T01:00:00+01:00", "2026-01-01T03:00:00+01:00"
     )
-    assert calls[0][-1] == {"opencode_version": "latest"}
+    assert calls[0][-1] == {
+        "opencode_version": "latest",
+        "output_language": language,
+    }
 
 
 @pytest.mark.parametrize(
