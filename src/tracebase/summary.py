@@ -44,6 +44,12 @@ _EXACT_VERSION = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
 _MAX_DOCKER_TAG_LENGTH = 128
+_MAX_OUTPUT_LANGUAGE_LENGTH = 35
+# Keep the primary subtag short enough to reject language names without a registry.
+_LANGUAGE_SUBTAG = re.compile(r"[A-Za-z]{2,3}")
+_SCRIPT_SUBTAG = re.compile(r"[A-Za-z]{4}")
+_REGION_SUBTAG = re.compile(r"(?:[A-Za-z]{2}|[0-9]{3})")
+_VARIANT_SUBTAG = re.compile(r"(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3})")
 SHARD_RECOVERY_PROMPT = """Shard protocol validation failed.
 
 Reread /work/TASK.md and /work/NOTES.md. Fix only the shard-protocol errors
@@ -75,6 +81,43 @@ the required result exists at /results/summary.md."""
 
 class SummaryError(RuntimeError):
     """Raised when a valid complete Summary Output cannot be produced."""
+
+
+def normalize_output_language(value: str | None) -> str | None:
+    """Validate a conservative BCP-47-style tag and normalize its casing."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > _MAX_OUTPUT_LANGUAGE_LENGTH:
+        raise ValueError("invalid output language tag")
+
+    subtags = value.split("-")
+    if not _LANGUAGE_SUBTAG.fullmatch(subtags[0]):
+        raise ValueError("invalid output language tag")
+
+    normalized = [subtags[0].lower()]
+    index = 1
+    if index < len(subtags) and _SCRIPT_SUBTAG.fullmatch(subtags[index]):
+        normalized.append(subtags[index].title())
+        index += 1
+    if index < len(subtags) and _REGION_SUBTAG.fullmatch(subtags[index]):
+        normalized.append(subtags[index].upper())
+        index += 1
+
+    variants: set[str] = set()
+    for subtag in subtags[index:]:
+        variant = subtag.lower()
+        if not _VARIANT_SUBTAG.fullmatch(subtag) or variant in variants:
+            raise ValueError("invalid output language tag")
+        normalized.append(variant)
+        variants.add(variant)
+    return "-".join(normalized)
+
+
+def _normalize_summary_language(value: str | None) -> str | None:
+    try:
+        return normalize_output_language(value)
+    except ValueError as error:
+        raise SummaryError("invalid output language tag") from error
 
 
 def resolve_opencode_version(requested: str) -> str:
@@ -133,6 +176,12 @@ class SummaryRequest:
     output: Path
     debug_output: Path | None = None
     opencode_version: str = "latest"
+    output_language: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "output_language", _normalize_summary_language(self.output_language)
+        )
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -386,6 +435,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         "created_at": datetime.now(UTC).isoformat(),
         "model": request.model,
         "variant": request.variant,
+        "output_language": request.output_language,
         "tracebase_version": _tracebase_version(),
     }
     try:
@@ -430,7 +480,12 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
         try:
             shard_plan = plan_shards(context_host)
-            write_initial_plan(work, context_host, shard_plan)
+            write_initial_plan(
+                work,
+                context_host,
+                shard_plan,
+                output_language=request.output_language,
+            )
         except ValueError as error:
             raise SummaryError(
                 f"Context inventory or shard planning failed: {error}"
@@ -557,8 +612,10 @@ def summarize_archive(
     output: Path,
     debug_output: Path | None = None,
     opencode_version: str = "latest",
+    output_language: str | None = None,
 ) -> Path:
     """Compose archive extraction with production summarization."""
+    output_language = _normalize_summary_language(output_language)
     outputs = [output]
     if debug_output is not None:
         outputs.append(debug_output)
@@ -592,6 +649,7 @@ def summarize_archive(
                 output,
                 debug_output=debug_output,
                 opencode_version=opencode_version,
+                output_language=output_language,
             )
         )
     finally:

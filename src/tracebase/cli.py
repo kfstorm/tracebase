@@ -116,6 +116,11 @@ def _parser() -> argparse.ArgumentParser:
     summary.add_argument("--from", dest="from_text")
     summary.add_argument("--to", dest="to_text")
     summary.add_argument("--model", required=True)
+    summary.add_argument(
+        "--language",
+        metavar="LANGUAGE",
+        help="BCP-47-style output language tag",
+    )
     summary.add_argument("--variant")
     summary.add_argument(
         "--opencode-version", default="latest", metavar="VERSION_OR_TAG"
@@ -208,6 +213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Path(arguments.output),
                     Path(arguments.debug_output) if arguments.debug_output else None,
                     opencode_version=arguments.opencode_version,
+                    output_language=arguments.language,
                 )
             else:
                 if arguments.from_text or arguments.to_text or arguments.context_output:
@@ -224,6 +230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if arguments.debug_output
                         else None,
                         opencode_version=arguments.opencode_version,
+                        output_language=arguments.language,
                     )
                 )
         except (ContextError, SummaryError) as error:

@@ -224,6 +224,7 @@ def write_initial_plan(
     work_dir: Path,
     context_dir: Path,
     plan: tuple[PlannedShard, ...],
+    output_language: str | None = None,
 ) -> None:
     """Materialize immutable shard packages before the root session starts."""
     try:
@@ -250,4 +251,6 @@ def write_initial_plan(
         f"\nRequested interval: [{interval[0]}, {interval[1]})\n"
         "\nShard order:\n" + "".join(f"- {shard.id}\n" for shard in plan)
     )
+    if output_language is not None:
+        notes += f"\nOutput language: {output_language}\n"
     work_dir.joinpath("NOTES.md").write_text(notes, encoding="utf-8")
