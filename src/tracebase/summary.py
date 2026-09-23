@@ -113,6 +113,13 @@ def normalize_output_language(value: str | None) -> str | None:
     return "-".join(normalized)
 
 
+def _normalize_summary_language(value: str | None) -> str | None:
+    try:
+        return normalize_output_language(value)
+    except ValueError as error:
+        raise SummaryError("invalid output language tag") from error
+
+
 def resolve_opencode_version(requested: str) -> str:
     """Use an exact version directly or resolve an opencode-ai npm dist-tag."""
     if _EXACT_VERSION.fullmatch(requested):
@@ -172,11 +179,9 @@ class SummaryRequest:
     output_language: str | None = None
 
     def __post_init__(self) -> None:
-        try:
-            language = normalize_output_language(self.output_language)
-        except ValueError as error:
-            raise SummaryError("invalid output language tag") from error
-        object.__setattr__(self, "output_language", language)
+        object.__setattr__(
+            self, "output_language", _normalize_summary_language(self.output_language)
+        )
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -610,10 +615,7 @@ def summarize_archive(
     output_language: str | None = None,
 ) -> Path:
     """Compose archive extraction with production summarization."""
-    try:
-        output_language = normalize_output_language(output_language)
-    except ValueError as error:
-        raise SummaryError("invalid output language tag") from error
+    output_language = _normalize_summary_language(output_language)
     outputs = [output]
     if debug_output is not None:
         outputs.append(debug_output)
