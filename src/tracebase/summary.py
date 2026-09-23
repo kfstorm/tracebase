@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from .context import ContextRequest, generate_context
 from .context_inventory import (
@@ -29,8 +32,13 @@ from .summary_opencode import prepare_config, prepare_state
 from .summary_planner import PlannedShard, plan_shards, write_initial_plan
 from .summary_shards import inspect_shard_plan, inspect_shards
 
-OPENCODE_VERSION = "1.18.29"
-IMAGE = f"tracebase-opencode:{OPENCODE_VERSION}"
+_EXACT_VERSION = re.compile(
+    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+_DIST_TAG = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
 SHARD_RECOVERY_PROMPT = """Shard protocol validation failed.
 
 Reread /work/TASK.md and /work/NOTES.md. Fix only the shard-protocol errors
@@ -64,6 +72,44 @@ class SummaryError(RuntimeError):
     """Raised when a valid complete Summary Output cannot be produced."""
 
 
+def resolve_opencode_version(requested: str) -> str:
+    """Resolve an exact published opencode-ai version or an existing npm dist-tag."""
+    exact = _EXACT_VERSION.fullmatch(requested) is not None
+    if not exact and _DIST_TAG.fullmatch(requested) is None:
+        raise SummaryError(
+            f"invalid OpenCode version or dist-tag {requested!r}: "
+            "use an exact npm version or an existing opencode-ai dist-tag"
+        )
+    try:
+        request = Request(
+            "https://registry.npmjs.org/opencode-ai",
+            headers={"Accept": "application/vnd.npm.install-v1+json"},
+        )
+        with urlopen(request, timeout=15) as response:
+            metadata = json.load(response)
+    except (OSError, URLError, TimeoutError) as error:
+        raise SummaryError("could not query npm registry for opencode-ai") from error
+    except (ValueError, UnicodeError) as error:
+        raise SummaryError("invalid opencode-ai response from npm registry") from error
+
+    if not isinstance(metadata, dict):
+        raise SummaryError("invalid opencode-ai response from npm registry")
+    versions = metadata.get("versions")
+    tags = metadata.get("dist-tags")
+    if not isinstance(versions, dict) or not isinstance(tags, dict):
+        raise SummaryError("invalid opencode-ai response from npm registry")
+    if not exact and requested not in tags:
+        raise SummaryError(f"opencode-ai dist-tag {requested!r} does not exist")
+    resolved = requested if exact else tags[requested]
+    if not isinstance(resolved, str) or _EXACT_VERSION.fullmatch(resolved) is None:
+        raise SummaryError("invalid opencode-ai response from npm registry")
+    if resolved not in versions:
+        if exact:
+            raise SummaryError(f"opencode-ai version {requested!r} is not published")
+        raise SummaryError("invalid opencode-ai response from npm registry")
+    return resolved
+
+
 class Runner(Protocol):
     def run(
         self,
@@ -80,6 +126,7 @@ class SummaryRequest:
     variant: str | None
     output: Path
     debug_output: Path | None = None
+    opencode_version: str = "latest"
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -325,6 +372,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         ):
             raise SummaryError("debug output must not overlap other outputs")
     fingerprint_context(request.context)
+    resolved_version = resolve_opencode_version(request.opencode_version)
     target.parent.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix=".summary-run.", dir=target.parent))
     provenance: dict[str, Any] = {
@@ -403,9 +451,10 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         dockerfile = Path(__file__).parent / "container/Dockerfile"
         if runner is None:
             config = prepare_state(state, request.model)
-            ensure_image(IMAGE, dockerfile, OPENCODE_VERSION)
+            image = f"tracebase-opencode:{resolved_version}"
+            ensure_image(image, dockerfile, resolved_version)
             runner = ContainerRunner(
-                IMAGE,
+                image,
                 ContainerMounts(
                     context_evidence,
                     work,
@@ -498,6 +547,7 @@ def summarize_archive(
     variant: str | None,
     output: Path,
     debug_output: Path | None = None,
+    opencode_version: str = "latest",
 ) -> Path:
     """Compose archive extraction with production summarization."""
     outputs = [output]
@@ -532,6 +582,7 @@ def summarize_archive(
                 variant,
                 output,
                 debug_output=debug_output,
+                opencode_version=opencode_version,
             )
         )
     finally:

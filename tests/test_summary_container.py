@@ -3,8 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from tracebase.summary import IMAGE, OPENCODE_VERSION
 from tracebase.summary_container import ContainerMounts, ContainerRunner, ensure_image
+
+IMAGE = "tracebase-opencode:1.2.3"
+VERSION = "1.2.3"
 
 
 def record_docker_runs(
@@ -28,7 +30,7 @@ def test_ensure_image_passes_authoritative_opencode_version_to_build(
 ) -> None:
     calls = record_docker_runs(monkeypatch, [1, 0])
 
-    ensure_image(IMAGE, tmp_path / "Dockerfile", OPENCODE_VERSION)
+    ensure_image(IMAGE, tmp_path / "Dockerfile", VERSION)
 
     assert calls[0] == ["docker", "image", "inspect", IMAGE]
     assert calls[1] == [
@@ -39,7 +41,7 @@ def test_ensure_image_passes_authoritative_opencode_version_to_build(
         "--file",
         str(tmp_path / "Dockerfile"),
         "--build-arg",
-        f"OPENCODE_VERSION={OPENCODE_VERSION}",
+        f"OPENCODE_VERSION={VERSION}",
         str(tmp_path),
     ]
 
@@ -49,7 +51,7 @@ def test_ensure_image_does_not_build_existing_image(
 ) -> None:
     calls = record_docker_runs(monkeypatch, [0])
 
-    ensure_image(IMAGE, tmp_path / "Dockerfile", OPENCODE_VERSION)
+    ensure_image(IMAGE, tmp_path / "Dockerfile", VERSION)
 
     assert calls == [["docker", "image", "inspect", IMAGE]]
 
