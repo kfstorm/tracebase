@@ -525,16 +525,13 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 shutil.rmtree(target, ignore_errors=True)
                 raise SummaryError("debug output publication failed") from None
         return target
-    except SummaryError as error:
-        if debug_target is not None and not debug_target.exists():
-            try:
-                debug_target.parent.mkdir(parents=True, exist_ok=True)
-                _publish_debug(run, debug_target, provenance, "failed", str(error))
-            except OSError, SummaryError:
-                pass
-        raise
-    except (OSError, TypeError, ValueError, RuntimeError) as error:
-        summary_error = SummaryError("summary operation failed")
+    except (SummaryError, OSError, TypeError, ValueError, RuntimeError) as error:
+        if isinstance(error, SummaryError):
+            summary_error = error
+        elif isinstance(error, ContainerError):
+            summary_error = SummaryError(str(error))
+        else:
+            summary_error = SummaryError("summary operation failed")
         if debug_target is not None and not debug_target.exists():
             try:
                 debug_target.parent.mkdir(parents=True, exist_ok=True)
@@ -543,6 +540,8 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 )
             except OSError, SummaryError:
                 pass
+        if isinstance(error, SummaryError):
+            raise
         raise summary_error from error
     finally:
         shutil.rmtree(run, ignore_errors=True)

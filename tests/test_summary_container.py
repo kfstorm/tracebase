@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -179,3 +180,98 @@ def test_container_refreshes_model_catalog_before_running_model(
     assert command[command.index("-c") + 1] == (
         'opencode models --refresh >/dev/null && exec opencode "$@" > /export.stdout'
     )
+
+
+@pytest.mark.parametrize(
+    ("error_event", "expected"),
+    [
+        (
+            {
+                "type": "error",
+                "error": {
+                    "name": "UnknownError",
+                    "data": {
+                        "message": (
+                            "Unexpected server error. Check server logs for details."
+                        ),
+                        "ref": "err_example123",
+                    },
+                },
+            },
+            "OpenCode error: UnknownError: Unexpected server error. "
+            "Check server logs for details. (ref err_example123)",
+        ),
+        (
+            {
+                "type": "error",
+                "error": {
+                    "name": "ProviderError",
+                    "data": {
+                        "message": "Authorization: Bearer synthetic-secret",
+                        "ref": "err_example456",
+                    },
+                },
+            },
+            "OpenCode error: ProviderError (ref err_example456)",
+        ),
+    ],
+)
+def test_failed_model_run_surfaces_safe_json_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error_event: dict[str, object],
+    expected: str,
+) -> None:
+    runner = ContainerRunner(
+        "image",
+        ContainerMounts(
+            tmp_path / "context",
+            tmp_path / "work",
+            tmp_path / "results",
+            tmp_path / "state",
+        ),
+    )
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        capture = Path(
+            command[command.index("--entrypoint") + 3].split(":/export.stdout:")[0]
+        )
+        capture.write_text(
+            json.dumps({"type": "text", "part": {"text": "private evidence"}})
+            + "\n"
+            + json.dumps(error_event)
+            + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 1, "", "")
+
+    monkeypatch.setattr("tracebase.summary_container.subprocess.run", run)
+
+    with pytest.raises(ContainerError) as error:
+        runner.run(["--pure", "run", "--format", "json"], "{}")
+
+    assert str(error.value) == f"container command failed with exit code 1; {expected}"
+    assert "private evidence" not in str(error.value)
+
+
+def test_failed_container_without_json_error_reports_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = ContainerRunner(
+        "image",
+        ContainerMounts(
+            tmp_path / "context",
+            tmp_path / "work",
+            tmp_path / "results",
+            tmp_path / "state",
+        ),
+    )
+    monkeypatch.setattr(
+        "tracebase.summary_container.subprocess.run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 125, "", ""),
+    )
+
+    with pytest.raises(
+        ContainerError, match="container command failed with exit code 125"
+    ):
+        runner.run(["--pure", "run", "--format", "json"], "{}")

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -11,6 +13,41 @@ from pathlib import Path
 
 class ContainerError(RuntimeError):
     """Raised when the evaluation container cannot run a command."""
+
+
+_ERROR_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]{0,63}\Z")
+_ERROR_REF = re.compile(r"err_[A-Za-z0-9_-]{1,64}\Z")
+_SAFE_MESSAGES = {"Unexpected server error. Check server logs for details."}
+
+
+def _opencode_error(output: str) -> str | None:
+    # OpenCode error messages may contain provider-supplied content. Only emit
+    # bounded identifiers and known generic messages into diagnostics.
+    detail = None
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "error":
+            continue
+        error = event.get("error")
+        if not isinstance(error, dict):
+            continue
+        name = error.get("name")
+        data = error.get("data")
+        data = data if isinstance(data, dict) else {}
+        reference = data.get("ref")
+        message = data.get("message")
+        parts = ["OpenCode error"]
+        if isinstance(name, str) and _ERROR_NAME.fullmatch(name):
+            parts.append(name)
+        detail = ": ".join(parts)
+        if isinstance(message, str) and message in _SAFE_MESSAGES:
+            detail += f": {message}"
+        if isinstance(reference, str) and _ERROR_REF.fullmatch(reference):
+            detail += f" (ref {reference})"
+    return detail
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,8 +151,10 @@ class ContainerRunner:
         except OSError as error:
             raise ContainerError("could not prepare container output") from error
         if result.returncode != 0:
+            detail = _opencode_error(captured_stdout)
             raise ContainerError(
                 f"container command failed with exit code {result.returncode}"
+                + (f"; {detail}" if detail is not None else "")
             )
         return subprocess.CompletedProcess(
             result.args, result.returncode, captured_stdout, result.stderr
