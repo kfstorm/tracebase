@@ -27,7 +27,12 @@ from .mutable_state import (
     reconcile_mutable_state,
     render_mutable_state,
 )
-from .summary_container import ContainerMounts, ContainerRunner, ensure_image
+from .summary_container import (
+    ContainerError,
+    ContainerMounts,
+    ContainerRunner,
+    ensure_image,
+)
 from .summary_opencode import prepare_config, prepare_state
 from .summary_planner import PlannedShard, plan_shards, write_initial_plan
 from .summary_shards import inspect_shard_plan, inspect_shards
@@ -453,7 +458,10 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         if runner is None:
             config = prepare_state(state, request.model)
             image = _image_tag_for_version(resolved_version)
-            ensure_image(image, dockerfile, resolved_version)
+            try:
+                ensure_image(image, dockerfile, resolved_version)
+            except ContainerError as error:
+                raise SummaryError(str(error)) from error
             runner = ContainerRunner(
                 image,
                 ContainerMounts(

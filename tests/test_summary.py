@@ -1407,6 +1407,35 @@ def test_exact_version_reuses_cached_image_without_registry(
     assert docker_calls == [["docker", "image", "inspect", "tracebase-opencode:1.2.3"]]
 
 
+def test_image_build_failure_reaches_summary_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = context(tmp_path)
+    output = tmp_path / "summary"
+
+    def docker_run(
+        arguments: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if arguments[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(arguments, 1)
+        assert arguments[1] == "build"
+        return subprocess.CompletedProcess(
+            arguments, 1, "", "npm error: synthetic build failure\n"
+        )
+
+    monkeypatch.setattr("tracebase.summary.prepare_state", lambda _state, _model: "{}")
+    monkeypatch.setattr("tracebase.summary_container.subprocess.run", docker_run)
+
+    with pytest.raises(SummaryError) as error:
+        summarize(SummaryRequest(source, "model", None, output))
+
+    assert str(error.value) == (
+        "could not build the Summarizer container image\n"
+        "npm error: synthetic build failure"
+    )
+    assert not output.exists()
+
+
 def test_summary_has_no_fixed_opencode_version() -> None:
     assert not hasattr(summary, "OPENCODE_VERSION")
     assert not hasattr(summary, "IMAGE")
