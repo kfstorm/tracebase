@@ -23,6 +23,7 @@ from tracebase.summary import (
     summarize,
     summarize_archive,
 )
+from tracebase.summary_container import ContainerError
 from tracebase.summary_planner import (
     SHARD_POLICY,
     PlannedShard,
@@ -1618,6 +1619,38 @@ def test_image_build_failure_reaches_summary_error(
         "npm error: synthetic build failure"
     )
     assert not output.exists()
+
+
+def test_model_run_error_reaches_summary_debug_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = context(tmp_path)
+    runner = FakeRunner(tmp_path)
+    original_run = runner.run
+
+    def run(arguments: list[str], config: str, stdout_path: Path | None = None):
+        if "run" in arguments:
+            raise ContainerError(
+                "container command failed with exit code 1; "
+                "OpenCode error: UnknownError (ref err_example123)"
+            )
+        return original_run(arguments, config, stdout_path)
+
+    monkeypatch.setattr(runner, "run", run)
+    debug = tmp_path / "debug"
+
+    with pytest.raises(SummaryError, match="OpenCode error: UnknownError") as error:
+        summarize(
+            SummaryRequest(
+                source, "model", None, tmp_path / "summary", debug_output=debug
+            ),
+            runner,
+        )
+
+    assert "err_example123" in str(error.value)
+    assert (
+        "err_example123" in json.loads((debug / "manifest.json").read_text())["error"]
+    )
 
 
 def test_summary_has_no_fixed_opencode_version() -> None:
