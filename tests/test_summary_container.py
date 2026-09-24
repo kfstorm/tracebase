@@ -168,18 +168,40 @@ def test_container_mounts_host_mutable_state_read_only(
     assert f"{mutable_state}:/work/MUTABLE_STATE.md:ro" in command
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--pure", "run", "--model", "openai/example", "hi"],
+        ["run", "--model", "openai/example", "hi"],
+    ],
+)
 def test_container_refreshes_model_catalog_before_running_model(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: list[str]
 ) -> None:
     command = _container_command(
         monkeypatch,
         tmp_path,
-        arguments=["--pure", "run", "--model", "openai/example", "hi"],
+        arguments=arguments,
     )
 
     assert command[command.index("-c") + 1] == (
         'opencode models --refresh >/dev/null && exec opencode "$@" > /export.stdout'
     )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--pure", "--version"],
+        ["--pure", "models", "run"],
+    ],
+)
+def test_container_skips_model_refresh_for_non_run_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: list[str]
+) -> None:
+    command = _container_command(monkeypatch, tmp_path, arguments=arguments)
+
+    assert command[command.index("-c") + 1] == 'exec opencode "$@" > /export.stdout'
 
 
 @pytest.mark.parametrize(
