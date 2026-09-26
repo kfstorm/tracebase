@@ -2,6 +2,8 @@ import hashlib
 import json
 import shutil
 import subprocess
+from collections.abc import Callable
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from urllib.error import URLError
@@ -43,7 +45,8 @@ def mock_registry_for_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
 class FakeRunner:
     def __init__(
         self,
-        output: Path,
+        work: Path,
+        results: Path,
         *,
         incomplete: bool = False,
         missing_context_section: bool = False,
@@ -54,7 +57,8 @@ class FakeRunner:
         shards: list[dict[str, object]] | None = None,
         mutate_items: bool = False,
     ) -> None:
-        self.output = output
+        self.work = work
+        self.results = results
         self.incomplete = incomplete
         self.missing_context_section = missing_context_section
         self.missing_context_section_for = missing_context_section_for or set()
@@ -85,7 +89,7 @@ class FakeRunner:
         if "run" not in arguments:
             raise AssertionError(f"unexpected runner call: {arguments}")
 
-        work = self.output / "work"
+        work = self.work
         self.root_saw_mutable_state = (work / "MUTABLE_STATE.md").is_file()
         if self.root_saw_mutable_state:
             self.root_mutable_state = (work / "MUTABLE_STATE.md").read_text()
@@ -154,22 +158,23 @@ class FakeRunner:
         if not self.missing_result or (
             "--session" in arguments and self.repair_on_recovery
         ):
-            (self.output / "results/summary.md").write_text(
+            (self.results / "summary.md").write_text(
                 "# Work summary\n", encoding="utf-8"
             )
         return subprocess.CompletedProcess(arguments, 0, '{"sessionID":"root"}\n', "")
 
 
-def _bind_runner_to_staging(runner: FakeRunner, parent: Path) -> None:
-    original_run = runner.run
+def _capture_runner(
+    create: Callable[[Path, Path], FakeRunner],
+) -> tuple[Callable[[Path, Path], FakeRunner], list[FakeRunner]]:
+    created: list[FakeRunner] = []
 
-    def run(arguments: list[str], config: str, stdout_path: Path | None = None):
-        candidates = list(parent.glob(".summary-run.*"))
-        if candidates:
-            runner.output = candidates[0]
-        return original_run(arguments, config, stdout_path)
+    def factory(work: Path, results: Path) -> FakeRunner:
+        runner = create(work, results)
+        created.append(runner)
+        return runner
 
-    runner.run = run  # type: ignore[method-assign]
+    return factory, created
 
 
 def _write_context(
@@ -325,11 +330,10 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
 ) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(output.parent / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
+    runner_factory, created = _capture_runner(FakeRunner)
 
     published = summarize(
-        SummaryRequest(source, "openai/model", "high", output), runner
+        SummaryRequest(source, "openai/model", "high", output), runner_factory
     )
 
     assert published == output
@@ -348,7 +352,7 @@ def test_existing_context_publishes_canonical_summary_and_provenance(
     }
     assert len(manifest["shard_plan"]) == 1
     assert len(manifest["shard_plan"][0]["task_sha256"]) == 64
-    assert "Output language" not in runner.root_notes
+    assert "Output language" not in created[0].root_notes
 
 
 def test_model_context_view_contains_only_manifest_evidence(tmp_path: Path) -> None:
@@ -382,8 +386,6 @@ def test_archive_to_generated_context_summary_still_works(
     archive.mkdir()
     output = tmp_path / "summary"
     generated = tmp_path / "generated-context"
-    runner = FakeRunner(tmp_path / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
     summarized_requests: list[SummaryRequest] = []
     context_requests: list[ContextRequest] = []
 
@@ -396,7 +398,7 @@ def test_archive_to_generated_context_summary_still_works(
     monkeypatch.setattr(
         "tracebase.summary.summarize",
         lambda request: (
-            summarized_requests.append(request) or summarize(request, runner)
+            summarized_requests.append(request) or summarize(request, FakeRunner)
         ),
     )
     context_request = ContextRequest.parse(
@@ -424,8 +426,7 @@ def test_output_language_is_available_only_to_root_and_manifest(
 ) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(tmp_path / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
+    runner_factory, created = _capture_runner(FakeRunner)
 
     summarize(
         SummaryRequest(
@@ -435,11 +436,12 @@ def test_output_language_is_available_only_to_root_and_manifest(
             output,
             output_language="ZH-cn",
         ),
-        runner,
+        runner_factory,
     )
 
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["output_language"] == "zh-CN"
+    runner = created[0]
     assert runner.root_notes.count("Output language: zh-CN") == 1
     assert runner.shard_tasks
     assert all("Output language" not in task for task in runner.shard_tasks)
@@ -452,10 +454,8 @@ def test_debug_layout_separates_host_and_model_context(
     source = context(tmp_path)
     output = tmp_path / "summary"
     debug = tmp_path / "debug"
-    runner = FakeRunner(tmp_path / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
 
-    summarize(SummaryRequest(source, "model", None, output, debug), runner)
+    summarize(SummaryRequest(source, "model", None, output, debug), FakeRunner)
 
     assert (debug / "context-host/index.json").is_file()
     assert (debug / "context-host/mutable-state.json").is_file()
@@ -539,11 +539,11 @@ def test_summary_request_rejects_invalid_output_language(
 def test_host_creates_pending_plan_before_root_starts(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(output.parent / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
+    runner_factory, created = _capture_runner(FakeRunner)
 
-    summarize(SummaryRequest(source, "model", None, output), runner)
+    summarize(SummaryRequest(source, "model", None, output), runner_factory)
 
+    runner = created[0]
     assert runner.root_saw_pending_plan
     assert runner.root_saw_mutable_state
 
@@ -580,11 +580,11 @@ def test_host_reconciles_mutable_state_before_root_starts(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     output = tmp_path / "summary"
-    runner = FakeRunner(output.parent / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
+    runner_factory, created = _capture_runner(FakeRunner)
 
-    summarize(SummaryRequest(source, "model", None, output), runner)
+    summarize(SummaryRequest(source, "model", None, output), runner_factory)
 
+    runner = created[0]
     assert "- State: closed" in runner.root_mutable_state
     assert "- State: open" not in runner.root_mutable_state
     assert "- Caveat: selected mutable fields" in runner.root_mutable_state
@@ -596,13 +596,12 @@ def test_invalid_mutable_state_stops_before_root_starts(tmp_path: Path) -> None:
         json.dumps({"items": [], "unexpected": True}) + "\n", encoding="utf-8"
     )
     output = tmp_path / "summary"
-    runner = FakeRunner(output.parent / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
+    runner_factory, created = _capture_runner(FakeRunner)
 
     with pytest.raises(SummaryError, match="Mutable state metadata validation"):
-        summarize(SummaryRequest(source, "model", None, output), runner)
+        summarize(SummaryRequest(source, "model", None, output), runner_factory)
 
-    assert runner.calls == []
+    assert created == []
 
 
 def test_root_task_mutation_is_rejected_during_final_reconciliation(
@@ -610,11 +609,11 @@ def test_root_task_mutation_is_rejected_during_final_reconciliation(
 ) -> None:
     source = large_two_item_context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(output.parent / ".unused", mutate_items=True)
-    _bind_runner_to_staging(runner, tmp_path)
-
     with pytest.raises(SummaryError, match="task does not match the host plan"):
-        summarize(SummaryRequest(source, "model", None, output), runner)
+        summarize(
+            SummaryRequest(source, "model", None, output),
+            partial(FakeRunner, mutate_items=True),
+        )
 
     assert not output.exists()
 
@@ -622,10 +621,9 @@ def test_root_task_mutation_is_rejected_during_final_reconciliation(
 def test_summary_accepts_cross_source_batch(tmp_path: Path) -> None:
     source = multi_source_context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(tmp_path / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
-
-    assert summarize(SummaryRequest(source, "model", None, output), runner) == output
+    assert (
+        summarize(SummaryRequest(source, "model", None, output), FakeRunner) == output
+    )
 
 
 def test_mixed_source_worker_contract_is_partition_independent(tmp_path: Path) -> None:
@@ -834,16 +832,16 @@ def test_recovery_reuses_root_and_preserves_item_assignment(tmp_path: Path) -> N
     source = context(tmp_path)
     output = tmp_path / "summary"
     debug = tmp_path / "debug"
-    runner = FakeRunner(
-        tmp_path / ".unused",
-        incomplete=True,
-        repair_on_recovery=True,
+    runner_factory, created = _capture_runner(
+        partial(FakeRunner, incomplete=True, repair_on_recovery=True)
     )
-    _bind_runner_to_staging(runner, tmp_path)
 
-    summarize(SummaryRequest(source, "model", None, output, debug_output=debug), runner)
+    summarize(
+        SummaryRequest(source, "model", None, output, debug_output=debug),
+        runner_factory,
+    )
 
-    recovery_calls = [call for call in runner.calls if "--session" in call]
+    recovery_calls = [call for call in created[0].calls if "--session" in call]
     assert len(recovery_calls) == 1
     recovery_prompt = recovery_calls[0][-1]
     assert "same task and assignment" in recovery_prompt
@@ -855,25 +853,26 @@ def test_recovery_reuses_root_and_preserves_item_assignment(tmp_path: Path) -> N
 def test_missing_result_recovery_publishes_summary(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(
-        tmp_path / ".unused",
-        missing_result=True,
-        repair_on_recovery=True,
+    runner_factory, created = _capture_runner(
+        partial(FakeRunner, missing_result=True, repair_on_recovery=True)
     )
-    _bind_runner_to_staging(runner, tmp_path)
 
-    assert summarize(SummaryRequest(source, "model", None, output), runner) == output
-    assert len([call for call in runner.calls if "--session" in call]) == 1
+    assert (
+        summarize(SummaryRequest(source, "model", None, output), runner_factory)
+        == output
+    )
+    assert len([call for call in created[0].calls if "--session" in call]) == 1
 
 
 def test_failed_shard_after_recovery_does_not_publish(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(tmp_path / ".unused", incomplete=True)
-    _bind_runner_to_staging(runner, tmp_path)
 
     with pytest.raises(SummaryError, match="shard protocol"):
-        summarize(SummaryRequest(source, "model", None, output), runner)
+        summarize(
+            SummaryRequest(source, "model", None, output),
+            partial(FakeRunner, incomplete=True),
+        )
 
     assert not output.exists()
 
@@ -881,38 +880,43 @@ def test_failed_shard_after_recovery_does_not_publish(tmp_path: Path) -> None:
 def test_exhausted_retry_does_not_start_another_worker(tmp_path: Path) -> None:
     source = context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(
-        tmp_path / ".unused",
-        incomplete=True,
-        repair_on_recovery=True,
-        shards=[{"id": "shard-01", "items": ["repo"], "retry_count": 1}],
+    runner_factory, created = _capture_runner(
+        partial(
+            FakeRunner,
+            incomplete=True,
+            repair_on_recovery=True,
+            shards=[{"id": "shard-01", "items": ["repo"], "retry_count": 1}],
+        )
     )
-    _bind_runner_to_staging(runner, tmp_path)
 
     with pytest.raises(SummaryError, match="shard protocol"):
-        summarize(SummaryRequest(source, "model", None, output), runner)
+        summarize(SummaryRequest(source, "model", None, output), runner_factory)
 
-    assert runner.report_writes == ["shard-01"]
+    assert created[0].report_writes == ["shard-01"]
     assert not output.exists()
 
 
 def test_recovery_can_repair_only_the_invalid_shard(tmp_path: Path) -> None:
     source = large_two_item_context(tmp_path)
     output = tmp_path / "summary"
-    runner = FakeRunner(
-        tmp_path / ".unused",
-        missing_context_section_for={"shard-01"},
-        repair_on_recovery=True,
-        repair_only_shards={"shard-01"},
-        shards=[
-            {"id": "shard-01", "items": ["one"]},
-            {"id": "shard-02", "items": ["two"]},
-        ],
+    runner_factory, created = _capture_runner(
+        partial(
+            FakeRunner,
+            missing_context_section_for={"shard-01"},
+            repair_on_recovery=True,
+            repair_only_shards={"shard-01"},
+            shards=[
+                {"id": "shard-01", "items": ["one"]},
+                {"id": "shard-02", "items": ["two"]},
+            ],
+        )
     )
-    _bind_runner_to_staging(runner, tmp_path)
 
-    assert summarize(SummaryRequest(source, "model", None, output), runner) == output
-    assert runner.report_writes == ["shard-01", "shard-02", "shard-01"]
+    assert (
+        summarize(SummaryRequest(source, "model", None, output), runner_factory)
+        == output
+    )
+    assert created[0].report_writes == ["shard-01", "shard-02", "shard-01"]
 
 
 def test_retry_limit_is_rejected(tmp_path: Path) -> None:
@@ -1522,8 +1526,6 @@ def test_summary_build_uses_resolved_version(
     image_tag: str,
 ) -> None:
     source = context(tmp_path)
-    runner = FakeRunner(tmp_path / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
     builds: list[tuple[str, str]] = []
     requested: list[str] = []
     monkeypatch.setattr(
@@ -1535,7 +1537,8 @@ def test_summary_build_uses_resolved_version(
         lambda image, _dockerfile, version: builds.append((image, version)),
     )
     monkeypatch.setattr(
-        "tracebase.summary.ContainerRunner", lambda _image, _mounts: runner
+        "tracebase.summary.ContainerRunner",
+        lambda _image, mounts: FakeRunner(mounts.work, mounts.results),
     )
     monkeypatch.setattr("tracebase.summary.prepare_state", lambda _state, _model: "{}")
 
@@ -1560,8 +1563,6 @@ def test_exact_version_reuses_cached_image_without_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = context(tmp_path)
-    runner = FakeRunner(tmp_path / ".unused")
-    _bind_runner_to_staging(runner, tmp_path)
     docker_calls: list[list[str]] = []
 
     def docker_run(
@@ -1579,7 +1580,8 @@ def test_exact_version_reuses_cached_image_without_registry(
     )
     monkeypatch.setattr("tracebase.summary.prepare_state", lambda _state, _model: "{}")
     monkeypatch.setattr(
-        "tracebase.summary.ContainerRunner", lambda _image, _mounts: runner
+        "tracebase.summary.ContainerRunner",
+        lambda _image, mounts: FakeRunner(mounts.work, mounts.results),
     )
     monkeypatch.setattr("tracebase.summary_container.subprocess.run", docker_run)
 
@@ -1625,18 +1627,22 @@ def test_model_run_error_reaches_summary_debug_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = context(tmp_path)
-    runner = FakeRunner(tmp_path)
-    original_run = runner.run
+    original_run = FakeRunner.run
 
-    def run(arguments: list[str], config: str, stdout_path: Path | None = None):
+    def run(
+        self: FakeRunner,
+        arguments: list[str],
+        config: str,
+        stdout_path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         if "run" in arguments:
             raise ContainerError(
                 "container command failed with exit code 1; "
                 "OpenCode error: UnknownError (ref err_example123)"
             )
-        return original_run(arguments, config, stdout_path)
+        return original_run(self, arguments, config, stdout_path)
 
-    monkeypatch.setattr(runner, "run", run)
+    monkeypatch.setattr(FakeRunner, "run", run)
     debug = tmp_path / "debug"
 
     with pytest.raises(SummaryError, match="OpenCode error: UnknownError") as error:
@@ -1644,7 +1650,7 @@ def test_model_run_error_reaches_summary_debug_output(
             SummaryRequest(
                 source, "model", None, tmp_path / "summary", debug_output=debug
             ),
-            runner,
+            FakeRunner,
         )
 
     assert "err_example123" in str(error.value)

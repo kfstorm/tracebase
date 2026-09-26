@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -413,7 +414,10 @@ def _publish_debug(
             shutil.rmtree(staging, ignore_errors=True)
 
 
-def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
+def summarize(
+    request: SummaryRequest,
+    runner_factory: Callable[[Path, Path], Runner] | None = None,
+) -> Path:
     """Run the canonical Summarizer and atomically publish its valid result."""
     target = request.output.absolute()
     debug_target = request.debug_output.absolute() if request.debug_output else None
@@ -510,7 +514,8 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
         ]
         expected_plan = shard_plan
         dockerfile = Path(__file__).parent / "container/Dockerfile"
-        if runner is None:
+        runner: Runner
+        if runner_factory is None:
             config = prepare_state(state, request.model)
             image = _image_tag_for_version(resolved_version)
             try:
@@ -529,6 +534,7 @@ def summarize(request: SummaryRequest, runner: Runner | None = None) -> Path:
                 ),
             )
         else:
+            runner = runner_factory(work, results)
             config = prepare_config(request.model)
         provenance["opencode_version"] = runner.run(
             ["--pure", "--version"], config
