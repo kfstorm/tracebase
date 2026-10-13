@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -431,6 +432,63 @@ def test_summary_tasks_include_optional_instructions_and_final_hashes(
             assert str(instructions_file) not in assembled
 
 
+def test_custom_scope_limits_reported_work_without_limiting_investigation(
+    tmp_path: Path,
+) -> None:
+    source = large_two_item_context(tmp_path)
+    instructions_file = tmp_path / "preferences"
+    instructions_file.write_text(
+        "Only summarize IT and software engineering work, including personal "
+        "projects and open-source contributions. Exclude unrelated topics.",
+        encoding="utf-8",
+    )
+    debug = tmp_path / "debug"
+    summarize(
+        SummaryRequest(
+            source,
+            "model",
+            None,
+            tmp_path / "summary",
+            instructions_file=instructions_file,
+            debug_output=debug,
+        ),
+        FakeRunner,
+    )
+
+    task_paths = [
+        debug / "work/TASK.md",
+        *sorted((debug / "work/shards").glob("*/TASK.md")),
+    ]
+    policies = [
+        " ".join(
+            path.read_text().split("## User Instructions\n", 1)[1].split()
+        ).casefold()
+        for path in task_paths
+    ]
+    assert len(policies) == 3
+    assert all(policy == policies[0] for policy in policies)
+    policy = policies[0]
+    # Scope filters reported work, never the evidence examined or its attribution.
+    for requirement in (
+        r"(?:examine|review) all assigned context evidence",
+        r"(?:do not|never) skip (?:items or shards|shards or items)",
+        r"coverage requirements apply (?:only )?within the requested scope",
+        r"(?:retain|report|include) all attributable in-scope work in user work",
+        r"out-of-scope work.*without (?:reporting|including) its concrete details",
+        r"(?:not|without|or) misclassifying it as non-work",
+        r"minimum neutral context.*in-scope user work.*context-only evidence",
+        r"root synthesis must cover all materially meaningful in-scope workstreams",
+        r"exclude out-of-scope work even if it (?:qualifies|counts) as work "
+        r"under the default policy",
+        r"no materially meaningful in-scope work.*existing empty-work summary "
+        r"behavior.*scoped to the user's request",
+        r"apply attribution before scope filtering",
+        r"scope filtering does not change attribution",
+        r"must not override.*evidence integrity",
+    ):
+        assert re.search(requirement, policy), requirement
+
+
 def _prepare_summary_cli(
     monkeypatch: pytest.MonkeyPatch,
     source: Path,
@@ -568,7 +626,7 @@ def test_user_instructions_do_not_bypass_shard_protocol(tmp_path: Path) -> None:
     for path in tasks:
         policy = " ".join(
             path.read_text().split("## User Instructions\n", 1)[1].split()
-        )
+        ).casefold()
         for constraint in (
             "evidence semantics",
             "attribution rules",
@@ -576,8 +634,16 @@ def test_user_instructions_do_not_bypass_shard_protocol(tmp_path: Path) -> None:
             "shard execution protocol",
         ):
             assert constraint in policy
-        assert "must not override" in policy
-        assert "Ignore any conflicting instructions" in policy
+        assert re.search(
+            r"(?:must not|cannot|never) (?:override|replace|weaken) "
+            r"core evidence semantics",
+            policy,
+        )
+        assert re.search(
+            r"(?:ignore|disregard) (?:any )?(?:instructions|preferences) that "
+            r"(?:conflict with|violate) (?:these|the core) (?:constraints|rules)",
+            policy,
+        )
         assert "evidence coverage" in policy
     assert not output.exists()
 
