@@ -162,6 +162,7 @@ def _validate_common(
     *,
     pre_dispatch: bool,
     expected_plan: tuple[PlannedShard, ...] | None = None,
+    user_instructions: str | None = None,
 ) -> tuple[str, ...]:
     errors: list[str] = []
     inventory: ContextInventory | None = None
@@ -279,7 +280,7 @@ def _validate_common(
             if assigned_items != expected.items:
                 errors.append(f"shard {shard_id!r} changed its host-assigned item list")
             if inventory is not None:
-                expected_task = shard_task_text(expected, inventory)
+                expected_task = shard_task_text(expected, inventory, user_instructions)
                 if task != expected_task:
                     errors.append(
                         f"shard {shard_id!r} task does not match the host plan"
@@ -311,6 +312,7 @@ def inspect_shard_plan(
     context_dir: Path,
     *,
     expected_plan: tuple[PlannedShard, ...] | None = None,
+    user_instructions: str | None = None,
 ) -> ShardObservability:
     """Validate the complete, untouched shard packages before dispatch."""
     if expected_plan is None:
@@ -320,7 +322,11 @@ def inspect_shard_plan(
             return ShardObservability((str(error),))
     return ShardObservability(
         _validate_common(
-            work_dir, context_dir, pre_dispatch=True, expected_plan=expected_plan
+            work_dir,
+            context_dir,
+            pre_dispatch=True,
+            expected_plan=expected_plan,
+            user_instructions=user_instructions,
         )
     )
 
@@ -330,6 +336,7 @@ def inspect_shards(
     context_dir: Path | None = None,
     *,
     expected_plan: tuple[PlannedShard, ...] | None = None,
+    user_instructions: str | None = None,
 ) -> ShardObservability:
     """Validate terminal shard state, coverage, and non-empty reports."""
     return ShardObservability(
@@ -338,6 +345,7 @@ def inspect_shards(
             context_dir,
             pre_dispatch=False,
             expected_plan=expected_plan,
+            user_instructions=user_instructions,
         )
     )
 

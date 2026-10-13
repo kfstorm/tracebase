@@ -35,7 +35,12 @@ from .summary_container import (
     ensure_image,
 )
 from .summary_opencode import prepare_config, prepare_state
-from .summary_planner import PlannedShard, plan_shards, write_initial_plan
+from .summary_planner import (
+    PlannedShard,
+    append_user_instructions,
+    plan_shards,
+    write_initial_plan,
+)
 from .summary_shards import inspect_shard_plan, inspect_shards
 
 _EXACT_VERSION = re.compile(
@@ -178,6 +183,7 @@ class SummaryRequest:
     debug_output: Path | None = None
     opencode_version: str = "latest"
     output_language: str | None = None
+    instructions_file: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -190,6 +196,19 @@ def _write_json(path: Path, value: Any) -> None:
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _read_user_instructions(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise SummaryError("instructions file does not exist") from error
+    except UnicodeError as error:
+        raise SummaryError("instructions file must contain valid UTF-8 text") from error
+    except OSError as error:
+        raise SummaryError("could not read instructions file") from error
 
 
 def _read_result(path: Path) -> str:
@@ -325,6 +344,7 @@ def _run_recovery(
     work: Path,
     context: Path,
     expected_plan: tuple[PlannedShard, ...],
+    user_instructions: str | None,
 ) -> tuple[tuple[str, ...], bool]:
     recovery = [
         *command[:-1],
@@ -337,7 +357,9 @@ def _run_recovery(
         resumed.stdout, encoding="utf-8"
     )
     (runtime / "root-recovery.stderr.log").write_text(resumed.stderr, encoding="utf-8")
-    final_errors = inspect_shards(work, context, expected_plan=expected_plan).errors
+    final_errors = inspect_shards(
+        work, context, expected_plan=expected_plan, user_instructions=user_instructions
+    ).errors
     final_result_present = _has_result(result_path)
     _write_json(
         runtime / "root-recovery.json",
@@ -419,6 +441,7 @@ def summarize(
     runner_factory: Callable[[Path, Path], Runner] | None = None,
 ) -> Path:
     """Run the canonical Summarizer and atomically publish its valid result."""
+    user_instructions = _read_user_instructions(request.instructions_file)
     target = request.output.absolute()
     debug_target = request.debug_output.absolute() if request.debug_output else None
     _validate_target(target, "summary output")
@@ -480,7 +503,12 @@ def summarize(
             raise SummaryError("Mutable state metadata validation failed") from error
         prompt = Path(__file__).parent / "prompts/summarizer-v1.md"
         task = work / "TASK.md"
-        task.write_bytes(prompt.read_bytes())
+        task.write_text(
+            append_user_instructions(
+                prompt.read_text(encoding="utf-8"), user_instructions
+            ),
+            encoding="utf-8",
+        )
         provenance["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
         try:
             shard_plan = plan_shards(context_host)
@@ -489,13 +517,17 @@ def summarize(
                 context_host,
                 shard_plan,
                 output_language=request.output_language,
+                user_instructions=user_instructions,
             )
         except ValueError as error:
             raise SummaryError(
                 f"Context inventory or shard planning failed: {error}"
             ) from None
         plan_errors = inspect_shard_plan(
-            work, context_host, expected_plan=shard_plan
+            work,
+            context_host,
+            expected_plan=shard_plan,
+            user_instructions=user_instructions,
         ).errors
         if plan_errors:
             raise SummaryError(
@@ -543,7 +575,10 @@ def summarize(
             runtime, runner, config, request.model, request.variant
         )
         validation_errors = inspect_shards(
-            work, context_host, expected_plan=expected_plan
+            work,
+            context_host,
+            expected_plan=expected_plan,
+            user_instructions=user_instructions,
         ).errors
         result_missing = not _has_result(results / "summary.md")
         if validation_errors or result_missing:
@@ -559,6 +594,7 @@ def summarize(
                 work,
                 context_host,
                 expected_plan,
+                user_instructions,
             )
             if not result_present:
                 raise SummaryError("Summarizer result /results/summary.md is missing")
@@ -618,6 +654,7 @@ def summarize_archive(
     debug_output: Path | None = None,
     opencode_version: str = "latest",
     output_language: str | None = None,
+    instructions_file: Path | None = None,
 ) -> Path:
     """Compose archive extraction with production summarization."""
     output_language = _normalize_summary_language(output_language)
@@ -655,6 +692,7 @@ def summarize_archive(
                 debug_output=debug_output,
                 opencode_version=opencode_version,
                 output_language=output_language,
+                instructions_file=instructions_file,
             )
         )
     finally:
