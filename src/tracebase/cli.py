@@ -123,6 +123,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     summary.add_argument("--variant")
     summary.add_argument(
+        "--instructions-file",
+        type=Path,
+        metavar="PATH",
+        help="UTF-8 plain-text summary preferences",
+    )
+    summary.add_argument(
         "--opencode-version", default="latest", metavar="VERSION_OR_TAG"
     )
     summary.add_argument("--output", required=True)
@@ -214,6 +220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Path(arguments.debug_output) if arguments.debug_output else None,
                     opencode_version=arguments.opencode_version,
                     output_language=arguments.language,
+                    instructions_file=arguments.instructions_file,
                 )
             else:
                 if arguments.from_text or arguments.to_text or arguments.context_output:
@@ -231,6 +238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         else None,
                         opencode_version=arguments.opencode_version,
                         output_language=arguments.language,
+                        instructions_file=arguments.instructions_file,
                     )
                 )
         except (ContextError, SummaryError) as error:

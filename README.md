@@ -230,6 +230,23 @@ uv run tracebase summary \
   --output "$HOME/.tracebase/summary-2026-09-01"
 ```
 
+Use `--instructions-file PATH` in either mode to customize summary scope,
+relevance, emphasis, or presentation with a UTF-8 plain-text file. Any extension
+is accepted. For example, `summary-preferences.txt` could contain
+`Only summarize software engineering work, including personal projects and open-source contributions.`:
+
+```bash
+uv run tracebase summary \
+  --context "$HOME/.tracebase/context-2026-09-01" \
+  --model openai/gpt-5.6-luna \
+  --instructions-file summary-preferences.txt \
+  --output "$HOME/.tracebase/summary-2026-09-01"
+```
+
+The summary still describes your work based on the available records. Without
+this option, Tracebase keeps its default summary behavior and requires no
+instructions file.
+
 Summary Output contains materially meaningful user work rather than all activity
 in Context. Unrelated personal activity and collaborator-only activity are
 excluded. Summary Output, retained Context Output, and debug output may contain
