@@ -243,9 +243,9 @@ uv run tracebase summary \
   --output "$HOME/.tracebase/summary-2026-09-01"
 ```
 
-These preferences cannot override evidence semantics, attribution rules,
-security constraints, or the execution protocol. Without this option, Tracebase
-keeps its default summary behavior and requires no instructions file.
+The summary still describes your work based on the available records. Without
+this option, Tracebase keeps its default summary behavior and requires no
+instructions file.
 
 Summary Output contains materially meaningful user work rather than all activity
 in Context. Unrelated personal activity and collaborator-only activity are
