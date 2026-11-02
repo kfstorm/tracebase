@@ -598,10 +598,11 @@ def _discovery_page(
 
 
 def _ordinary(item: dict[str, Any]) -> bool:
+    # Discovery responses may omit the automation flag for ordinary conversations.
     return (
         item.get("gizmo_id") is None
         and item.get("is_temporary_chat") is False
-        and item.get("is_automation_conversation") is False
+        and item.get("is_automation_conversation", False) is False
     )
 
 
@@ -845,7 +846,7 @@ def _hydrate(run: CollectionRun, api: _ChatGPTAPI, candidate: _Candidate) -> Non
                 "ordinary_predicate": [
                     "gizmo_id is null",
                     "is_temporary_chat === false",
-                    "is_automation_conversation === false",
+                    "is_automation_conversation is absent or === false",
                 ],
                 "discovery_entries": list(candidate.discovery_entries),
             },

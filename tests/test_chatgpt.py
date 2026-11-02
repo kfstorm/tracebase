@@ -3,6 +3,7 @@ import stat
 import subprocess
 from io import StringIO
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
@@ -555,6 +556,70 @@ def session_response(
     if name is not None:
         account["name"] = name
     return ProbeResponse(200, {"accessToken": "must-not-leak", "account": account})
+
+
+@pytest.mark.parametrize("missing_automation_flag", [False, True])
+def test_collect_hydrates_ordinary_conversations_with_optional_automation_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_automation_flag: bool,
+) -> None:
+    discovery = DiscoveryAPI()
+    hydration = HydrationAPI()
+    if missing_automation_flag:
+        for partition in discovery.pages.values():
+            for entry in partition:
+                if entry["is_automation_conversation"] is False:
+                    del entry["is_automation_conversation"]
+
+    class CollectionPage(AuthPage):
+        def evaluate(self, _expression: str, _arg: object) -> dict[str, object]:
+            assert isinstance(_arg, dict)
+            url = urlsplit(_arg["url"])
+            params = dict(parse_qsl(url.query))
+            if url.path == "/api/auth/session":
+                result = response(
+                    {"accessToken": "synthetic-token", "account": {"id": "account-1"}}
+                )
+            elif url.path == "/backend-api/conversations":
+                result = discovery.request(url.path, params)
+            else:
+                result = hydration.request(url.path, params)
+            return {
+                "status": result.status,
+                "headers": {},
+                "body": result.body.decode(),
+            }
+
+    browser = AuthBrowser(ProbeContext(ProbeRequest([])), CollectionPage())
+    monkeypatch.setattr("tracebase.chatgpt._Browser", lambda *_args, **_kwargs: browser)
+    run = CollectionRun(
+        Archive(tmp_path / "archive"),
+        "chatgpt",
+        "account-1",
+        RANGE,
+        collector_version="test",
+        effective_options={},
+    )
+
+    result = collect(run, reporter())
+    published = run.publish(result.coverage)
+
+    assert result.coverage["selected_conversations"] == 3
+    assert run.snapshot_count == 3
+    for snapshot in (published / "snapshots/conversation").iterdir():
+        assert json.loads((snapshot / "conversation.json").read_text())["messages"] == [
+            {"id": "current"}
+        ]
+    assert {
+        endpoint
+        for endpoint, _params in hydration.calls
+        if not endpoint.endswith("/messages")
+    } == {
+        "/backend-api/conversations/active-conversation",
+        "/backend-api/conversations/at-start",
+        "/backend-api/conversations/archived-conversation",
+    }
 
 
 def test_auth_probe_uses_context_request_and_safe_identity() -> None:
