@@ -174,6 +174,11 @@ def _text(message: dict[str, Any]) -> tuple[str, str, datetime] | None:
     role = author.get("role") if isinstance(author, dict) else None
     if role not in {"user", "assistant"} or _hidden(message):
         return None
+    metadata = message.get("metadata")
+    if isinstance(metadata, dict):
+        automation_id = metadata.get("automation_id")
+        if isinstance(automation_id, str) and automation_id.strip():
+            return None
     content = message.get("content")
     if not isinstance(content, dict) or content.get("content_type") != "text":
         return None

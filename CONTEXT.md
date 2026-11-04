@@ -89,6 +89,13 @@ regenerations, or edits. ChatGPT `create_time` is the placement timestamp;
 `update_time` and edit mutations are not v1 activity semantics. Canvas/textdocs
 and attachment binaries remain unsupported.
 
+ChatGPT omits messages with a non-empty, whitespace-trimmed string
+`metadata.automation_id` from both Activity and Background. Filtering applies
+only to the marked message; ordinary messages in the same conversation remain
+eligible. Other metadata and message relationships do not identify automation
+for Context, so automated messages without this marker may remain. Raw Archive
+evidence retains the complete provider responses.
+
 Context Markdown preserves source-native evidence type, temporal grouping,
 relationship, and order. Where attribution annotations are present, they are
 orthogonal record-level annotations such as `[User work]` or `[Context only]`;
