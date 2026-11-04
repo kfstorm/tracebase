@@ -42,8 +42,9 @@ def chat_message(
     update_time: int | None = None,
     parts: list[object] | None = None,
     hidden: bool = False,
+    metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    metadata: dict[str, object] = {}
+    metadata = dict(metadata or {})
     if hidden:
         metadata["is_visually_hidden_from_conversation"] = True
     return {
@@ -360,13 +361,26 @@ def test_chatgpt_mixed_string_and_non_string_parts_skip_message() -> None:
     assert projection is None
 
 
-def test_chatgpt_reconstructs_multiple_older_pages_by_manifest_order() -> None:
+@pytest.mark.parametrize("include_automation", [False, True])
+def test_chatgpt_reconstructs_multiple_older_pages_by_manifest_order(
+    include_automation: bool,
+) -> None:
     oldest = chat_message("oldest", 1767139200, text="oldest")
     older = chat_message("older", 1767225600, text="older")
     latest = chat_message("latest", 1767229260, role="assistant", text="latest")
+    older_messages = [older]
+    if include_automation:
+        older_messages.append(
+            chat_message(
+                "automated-older",
+                1767229200,
+                role="assistant",
+                metadata={"automation_id": "automation-1"},
+            )
+        )
     snapshot = chat_snapshot(
         [latest],
-        [[older], [oldest]],
+        [older_messages, [oldest]],
         descriptors=[
             ("messages.002.json", "older-messages", 3, "hydration-1"),
             ("conversation.json", "detail", 1, "hydration-1"),
@@ -486,6 +500,152 @@ def test_chatgpt_filters_records_and_uses_create_time_not_update_time() -> None:
 def test_chatgpt_with_no_in_range_text_is_not_projected() -> None:
     later = chat_message("later", 1767312000, text="later")
     assert project_chatgpt(chat_snapshot([later]), START, END) is None
+
+
+def test_chatgpt_filters_automation_without_propagating_to_related_messages() -> None:
+    partial = chat_message(
+        "automated-partial",
+        1767229200,
+        role="assistant",
+        text="automated partial",
+        metadata={"automation_id": " automation-1 ", "working_turn_id": "turn-1"},
+    )
+    partial["end_turn"] = False
+    final = chat_message(
+        "automated-final",
+        1767229260,
+        role="assistant",
+        text="automated final",
+        metadata={
+            "automation_id": "automation-1",
+            "working_turn_id": "turn-1",
+            "async_source": "automation-1",
+        },
+    )
+    final["end_turn"] = True
+    snapshot = chat_snapshot(
+        [
+            chat_message("prompt", 1767232800, text="prompt"),
+            partial,
+            final,
+            chat_message(
+                "follow-up",
+                1767229320,
+                text="follow-up",
+                metadata={
+                    "parent_id": "automated-final",
+                    "working_turn_id": "turn-1",
+                    "async_source": "automation-1",
+                },
+            ),
+            chat_message(
+                "reply",
+                1767229380,
+                role="assistant",
+                text="reply",
+                metadata={"async_source": "ordinary-source"},
+            ),
+        ]
+    )
+    evidence_before = dict(snapshot.evidence)
+
+    projection = project_chatgpt(snapshot, START, END)
+
+    assert projection is not None
+    assert [(turn.role, turn.text) for turn in projection.dialogue.activity] == [
+        ("user", "prompt"),
+        ("user", "follow-up"),
+        ("assistant", "reply"),
+    ]
+    assert snapshot.evidence == evidence_before
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_chatgpt_automation_only_activity_does_not_select_conversation(
+    role: str,
+) -> None:
+    snapshot = chat_snapshot(
+        [
+            chat_message("background", 1767139200, text="background"),
+            chat_message(
+                "automated",
+                1767229200,
+                role=role,
+                metadata={"automation_id": "automation-1"},
+            ),
+        ]
+    )
+
+    assert project_chatgpt(snapshot, START, END) is None
+
+
+@pytest.mark.parametrize(
+    "automation_id",
+    [
+        None,
+        "",
+        " \t\n",
+        False,
+        True,
+        0,
+        1,
+        [],
+        ["automation-1"],
+        {},
+        {"id": "automation-1"},
+    ],
+)
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_chatgpt_unusable_automation_id_does_not_filter_text(
+    automation_id: object, role: str
+) -> None:
+    message = chat_message(
+        "ordinary",
+        1767229200,
+        role=role,
+        text="ordinary text",
+        metadata={"automation_id": automation_id},
+    )
+
+    projection = project_chatgpt(chat_snapshot([message]), START, END)
+
+    assert projection is not None
+    assert [(turn.role, turn.text) for turn in projection.dialogue.activity] == [
+        (role, "ordinary text")
+    ]
+
+
+def test_chatgpt_filters_automation_from_background() -> None:
+    projection = project_chatgpt(
+        chat_snapshot(
+            [
+                chat_message("background-prompt", 1767139200, text="background prompt"),
+                chat_message(
+                    "automated-background",
+                    1767142800,
+                    role="assistant",
+                    text="automated background",
+                    metadata={"automation_id": "automation-1"},
+                ),
+                chat_message(
+                    "background-reply",
+                    1767142860,
+                    role="assistant",
+                    text="background reply",
+                ),
+                chat_message("current", 1767229200, text="current"),
+            ]
+        ),
+        START,
+        END,
+    )
+
+    assert projection is not None
+    assert [turn.text for turn in projection.dialogue.background] == [
+        "background prompt",
+        "background reply",
+    ]
+    assert [turn.text for turn in projection.dialogue.activity] == ["current"]
 
 
 def publish_chatgpt_batch(
