@@ -20,8 +20,8 @@ from urllib.parse import quote, urlencode
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth  # type: ignore[import-untyped]
 
-from .archive import ArchiveError, CollectionRange, CollectionRun, Snapshot
-from .collector import CollectionContext, CollectionResult
+from .archive import ArchiveError, CollectionRun, Snapshot
+from .collector import CollectionContext, CollectionResult, DiscoverySince
 from .progress import ProgressEvent, ProgressReporter
 
 _CHATGPT_URL = "https://chatgpt.com"
@@ -618,7 +618,7 @@ def _unique_entries(
 
 def _discover_partition(
     api: _ChatGPTAPI,
-    collection_range: CollectionRange,
+    discovery: DiscoverySince,
     is_archived: bool,
     is_starred: bool,
     pass_number: int,
@@ -652,9 +652,7 @@ def _discover_partition(
             if previous_update is not None and updated > previous_update:
                 ordering_verified = False
             previous_update = updated
-            if not _ordinary(item) or not (
-                collection_range.start <= updated < collection_range.end
-            ):
+            if not _ordinary(item) or not discovery.includes(updated):
                 continue
             entry = {
                 "pass": pass_number,
@@ -688,7 +686,7 @@ def _discover_partition(
             items
             and ordering_verified
             and previous_update is not None
-            and previous_update < collection_range.start
+            and not discovery.includes(previous_update)
         ):
             early_stopped = True
             break
@@ -708,7 +706,7 @@ def _discover_partition(
 
 def _discover(
     api: _ChatGPTAPI,
-    collection_range: CollectionRange,
+    discovery: DiscoverySince,
     reporter: ProgressReporter,
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]], int]:
     candidates: dict[str, _Candidate] = {}
@@ -718,7 +716,7 @@ def _discover(
         for is_archived, is_starred in _DISCOVERY_PARTITIONS:
             partition_candidates, partition_coverage = _discover_partition(
                 api,
-                collection_range,
+                discovery,
                 is_archived,
                 is_starred,
                 pass_number,
@@ -915,7 +913,9 @@ def _collect_api(
             label="Discovering ChatGPT conversations",
         )
     )
-    candidates, discovery, passes = _discover(api, run.collection_range, reporter)
+    candidates, discovery, passes = _discover(
+        api, DiscoverySince.for_collection(run.collection_range), reporter
+    )
     reporter.emit(
         ProgressEvent(
             kind="finish",

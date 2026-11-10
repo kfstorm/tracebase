@@ -67,6 +67,13 @@ _Avoid_: Partial collection, background sync
 The required half-open interval `[from, to)` supplied to a Collection Run as ISO 8601 timestamps with explicit offsets and whole-second precision. The endpoints are parsed as instants, must satisfy `from < to`, and successful ranges are compared within the same logical source to prevent unintended overlap.
 _Avoid_: Run date, observation time
 
+Collectors discover mutable Source Items whose latest update is at or after
+`from`, including updates at or after `to`: those Items may still contain
+activity within the Collection Range. The range end does not limit candidate
+discovery or truncate Source-native Evidence. Context applies its own requested
+work time range using source-specific record semantics. Collection Range overlap
+checks still apply to the declared `[from, to)` interval.
+
 **Observation Window**:
 The start and end of the collector's observation of one source object. It is distinct from timestamps reported by the source object.
 _Avoid_: Snapshot time, source update time

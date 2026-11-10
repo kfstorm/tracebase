@@ -49,11 +49,8 @@ class TestOpenCodeCollectionCli:
         cwd: Path = PROJECT_ROOT,
     ) -> subprocess.CompletedProcess[str]:
         from_text = "2026-01-01T00:00:00+00:00"
-        to_text = "2026-01-01T01:00:00+00:00"
         if "--from" in arguments:
             from_text = arguments[arguments.index("--from") + 1]
-        if "--to" in arguments:
-            to_text = arguments[arguments.index("--to") + 1]
         environment = os.environ | {
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
             "TRACEBASE_DISCOVERY": str(discovery or FIXTURES / "session-list.json"),
@@ -67,9 +64,6 @@ class TestOpenCodeCollectionCli:
             "TRACEBASE_PROJECT_COUNT": str(project_count or ""),
             "TRACEBASE_EXPECTED_START": str(
                 int(datetime.fromisoformat(from_text).timestamp() * 1000)
-            ),
-            "TRACEBASE_EXPECTED_CURSOR": str(
-                int(datetime.fromisoformat(to_text).timestamp() * 1000)
             ),
             "TRACEBASE_SERVER_PID": str(fake_bin / "server.pid"),
         }
@@ -134,7 +128,6 @@ elif arguments == [
                 return
             expected = {
                 "start": [os.environ["TRACEBASE_EXPECTED_START"]],
-                "cursor": [os.environ["TRACEBASE_EXPECTED_CURSOR"]],
                 "archived": ["true"],
                 "limit": ["10000"],
             }
@@ -185,6 +178,7 @@ elif len(arguments) == 2 and arguments[0] == "export":
         "overlaps-start": "overlaps-start.json",
         "session/unsafe:1": "session-unsafe-1.json",
         "updated-after-end": "session-unsafe-1.json",
+        "at-end": "session-unsafe-1.json",
     }
     if session_id == "large":
         export_path = Path(os.environ["TRACEBASE_LARGE_EXPORT"])
@@ -203,7 +197,7 @@ else:
         executable.chmod(0o755)
         return directory
 
-    def test_collects_sessions_updated_in_range_with_raw_exports_and_metadata(
+    def test_collects_sessions_updated_since_start_with_raw_exports_and_metadata(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -222,18 +216,16 @@ else:
             }
             assert run_manifest["coverage"]["session_discovery_options"] == {
                 "start": 1767225600000,
-                "cursor": 1767229200000,
                 "archived": True,
                 "limit": 10000,
             }
-            assert run_manifest["coverage"]["selected_session_count"] == 3
+            assert run_manifest["coverage"]["selected_session_count"] == 5
             assert {entry["source_id"] for entry in run_manifest["snapshots"]} == {
                 "ends-at-start",
                 "overlaps-start",
                 "session/unsafe:1",
-            }
-            assert "updated-after-end" not in {
-                entry["source_id"] for entry in run_manifest["snapshots"]
+                "updated-after-end",
+                "at-end",
             }
 
             source_id = "session/unsafe:1"

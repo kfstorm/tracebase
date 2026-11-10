@@ -3,9 +3,20 @@ import json
 import os
 import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
+
+from tests.test_chatgpt import (
+    DiscoveryAPI,
+    HydrationAPI,
+    collection_browser,
+    item,
+)
+from tracebase import chatgpt
+from tracebase.archive import Archive, CollectionRange, CollectionRun
+from tracebase.progress import LineProgressSink, ProgressReporter
 
 PROJECT_ROOT = Path(__file__).parents[1]
 COLLECTION_FROM = "2026-01-01T00:00:00+00:00"
@@ -29,6 +40,66 @@ GITHUB_TIMELINE_RESPONSE = b'[{"event": "source-response-marker-18-timeline"}]'
 OPENCODE_SESSION_EXPORT = b'{"export":"session-export-marker-18"}'
 
 
+def _collect_chatgpt_candidate(
+    archive: Path, updated: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discovery = DiscoveryAPI()
+    discovery.pages = {key: [] for key in discovery.pages}
+    discovery.pages[(False, False)] = [
+        item("candidate", updated, archived=False, starred=False)
+    ]
+    hydration = HydrationAPI()
+
+    browser = collection_browser(discovery, hydration)
+    monkeypatch.setattr(chatgpt, "_Browser", lambda *_args, **_kwargs: browser)
+    run = CollectionRun(
+        Archive(archive),
+        "chatgpt",
+        "account-1",
+        CollectionRange.parse(COLLECTION_FROM, COLLECTION_TO),
+        "test",
+        {},
+    )
+    result = chatgpt.collect(run, ProgressReporter(LineProgressSink(StringIO())))
+    run.publish(result.coverage)
+
+
+@pytest.mark.parametrize("source", ["chatgpt", "opencode", "github"])
+@pytest.mark.parametrize(
+    ("updated", "expected_count"),
+    [
+        ("2025-12-31T23:59:59+00:00", 0),
+        (COLLECTION_FROM, 1),
+        (COLLECTION_TO, 1),
+        ("2026-01-02T12:00:00+00:00", 1),
+    ],
+)
+def test_collection_preserves_candidates_updated_after_requested_interval(
+    source: str,
+    updated: str,
+    expected_count: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "archive"
+    if source == "chatgpt":
+        _collect_chatgpt_candidate(archive, updated, monkeypatch)
+    else:
+        fixture = tmp_path / "bin"
+        _make_source_fixture(fixture, source)
+        monkeypatch.setenv("TRACEBASE_CANDIDATE_UPDATED", updated)
+        result = _run_collect(source, archive, fixture)
+        assert result.returncode == 0, result.stderr
+    manifests = list((archive / "runs").glob("*/run.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    assert len(manifest["snapshots"]) == expected_count
+    assert manifest["collection_range"] == {
+        "from": COLLECTION_FROM,
+        "to": COLLECTION_TO,
+    }
+
+
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
     path.chmod(0o755)
@@ -49,6 +120,8 @@ def _make_github_fixture(directory: Path) -> None:
 import json
 import os
 import sys
+from datetime import datetime
+from urllib.parse import parse_qs, urlsplit
 
 SOURCE_ID = __SOURCE_ID__
 SECOND_SOURCE_ID = __SECOND_SOURCE_ID__
@@ -80,6 +153,20 @@ elif endpoint.startswith("/search/issues?"):
             }
         ],
     }
+    if os.environ.get("TRACEBASE_CANDIDATE_UPDATED"):
+        updated = datetime.fromisoformat(os.environ["TRACEBASE_CANDIDATE_UPDATED"])
+        query = parse_qs(urlsplit(endpoint).query)["q"][0]
+        time_filter = next(
+            token[8:] for token in query.split() if token.startswith("updated:")
+        )
+        if time_filter.startswith(">="):
+            selected = updated >= datetime.fromisoformat(time_filter[2:])
+        else:
+            start, end = map(datetime.fromisoformat, time_filter.split(".."))
+            selected = start <= updated <= end
+        if not selected:
+            payload["items"] = []
+            payload["total_count"] = 0
     if os.environ.get("TRACEBASE_FAIL_SOURCE"):
         payload["total_count"] = 2
         payload["items"].append(
@@ -129,6 +216,8 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from datetime import datetime
+from urllib.parse import parse_qs, urlsplit
 
 SOURCE_ID = __SOURCE_ID__
 SECOND_SOURCE_ID = __SECOND_SOURCE_ID__
@@ -145,7 +234,7 @@ elif arguments == [
 ]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            body = json.dumps([
+            sessions = [
                 {
                     "id": SOURCE_ID,
                     "title": SOURCE_RESPONSE_MARKER,
@@ -157,7 +246,21 @@ elif arguments == [
                     "title": SOURCE_RESPONSE_MARKER + "-second",
                     "time": {"created": 1767225900000, "updated": 1767226200000},
                 }
-            ] if os.environ.get("TRACEBASE_FAIL_SOURCE") else [])).encode()
+            ] if os.environ.get("TRACEBASE_FAIL_SOURCE") else [])
+            if os.environ.get("TRACEBASE_CANDIDATE_UPDATED"):
+                timestamp = os.environ["TRACEBASE_CANDIDATE_UPDATED"]
+                updated = int(datetime.fromisoformat(timestamp).timestamp() * 1000)
+                params = parse_qs(urlsplit(self.path).query)
+                for session in sessions:
+                    session["time"]["updated"] = updated
+                    time = session["time"]
+                    time["created"] = min(time["created"], updated)
+                sessions = [
+                    session for session in sessions
+                    if int(params["start"][0]) <= updated
+                    and ("cursor" not in params or updated < int(params["cursor"][0]))
+                ]
+            body = json.dumps(sessions).encode()
             self.send_response(200)
             self.end_headers()
             self.wfile.write(body)

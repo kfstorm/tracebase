@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from stat import S_IMODE
@@ -25,6 +26,7 @@ from tracebase.archive import (
     load_published_archive,
     uuid7,
 )
+from tracebase.collector import DiscoverySince
 from tracebase.github import (
     _Candidate,
     _discover,
@@ -576,13 +578,14 @@ def test_github_discovery_uses_one_updated_range_qualifier() -> None:
         "2026-09-06T00:00:00+08:00", "2026-09-07T00:00:00+08:00"
     )
 
-    queries = _discovery_queries("actor", collection_range)
+    queries = _discovery_queries(
+        "actor", DiscoverySince.for_collection(collection_range)
+    )
 
     assert len(queries) == 3
     assert all(query.count("updated:") == 1 for _reason, query in queries)
     assert all(
-        "updated:2026-09-06T00:00:00+08:00..2026-09-06T23:59:59+08:00" in query
-        for _reason, query in queries
+        "updated:>=2026-09-06T00:00:00+08:00" in query for _reason, query in queries
     )
 
 
@@ -1255,7 +1258,7 @@ def test_github_collect_hydrates_paginated_pr_with_source_native_bytes(
             entry["partition"]
             == {
                 "from": "2026-01-01T00:00:00Z",
-                "to": "2026-01-02T00:00:00Z",
+                "to": None,
             }
             for entry in manifest["selection_provenance"][0]["discovery_query_entries"]
         )
@@ -1844,7 +1847,16 @@ def test_github_cli_source_failures_keep_staging_unpublished(
     assert len(list((archive / ".staging").iterdir())) == 1
 
 
-def test_github_discovery_partitions_over_limit_results() -> None:
+def test_github_discovery_partitions_over_limit_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat("2026-01-01T00:00:02+00:00").astimezone(tz)
+
+    monkeypatch.setattr("tracebase.github.datetime", Clock)
+
     class SearchFixture(_GitHub):
         def __init__(self) -> None:
             self.calls = 0
@@ -1869,7 +1881,11 @@ def test_github_discovery_partitions_over_limit_results() -> None:
     candidates, coverage = _discover(
         fixture,
         "actor",
-        CollectionRange.parse("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:02+00:00"),
+        DiscoverySince.for_collection(
+            CollectionRange.parse(
+                "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:02+00:00"
+            )
+        ),
         reporter,
     )
     reporter.emit(ProgressEvent(kind="finish", task_id="github.discover"))
@@ -1889,11 +1905,11 @@ def test_github_discovery_partitions_over_limit_results() -> None:
     ]
     assert [entry["partition"] for entry in authorship_leaves] == [
         {"from": "2026-01-01T00:00:00Z", "to": "2026-01-01T00:00:01Z"},
-        {"from": "2026-01-01T00:00:01Z", "to": "2026-01-01T00:00:02Z"},
+        {"from": "2026-01-01T00:00:01Z", "to": None},
     ]
     assert [entry["query"] for entry in authorship_leaves] == [
         "author:actor updated:2026-01-01T00:00:00Z..2026-01-01T00:00:00Z",
-        "author:actor updated:2026-01-01T00:00:01Z..2026-01-01T00:00:01Z",
+        "author:actor updated:>=2026-01-01T00:00:01Z",
     ]
 
 
@@ -1923,8 +1939,10 @@ def test_github_discovery_rejects_incomplete_later_page() -> None:
         _discover(
             IncompleteFixture(),
             "actor",
-            CollectionRange.parse(
-                "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"
+            DiscoverySince.for_collection(
+                CollectionRange.parse(
+                    "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"
+                )
             ),
             reporter,
         )

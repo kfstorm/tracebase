@@ -32,7 +32,7 @@ from tracebase.chatgpt import (
     status,
 )
 from tracebase.cli import _parser, main
-from tracebase.collector import CollectionResult
+from tracebase.collector import CollectionResult, DiscoverySince
 from tracebase.progress import LineProgressSink, ProgressEvent, ProgressReporter
 
 RANGE = CollectionRange.parse("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")
@@ -167,12 +167,15 @@ def test_discovery_covers_four_partitions_and_stabilizes() -> None:
     api = DiscoveryAPI()
     progress = reporter()
     progress.emit(ProgressEvent(kind="start", task_id="chatgpt.discover"))
-    candidates, coverage, passes = _discover(api, RANGE, progress)
+    candidates, coverage, passes = _discover(
+        api, DiscoverySince.for_collection(RANGE), progress
+    )
 
     assert set(candidates) == {
         "active-conversation",
         "at-start",
         "archived-conversation",
+        "at-end",
     }
     assert not {
         "automation",
@@ -224,7 +227,7 @@ def test_discovery_stops_when_first_page_is_older_than_range() -> None:
     )
 
     candidates, coverage = _discover_partition(
-        api, RANGE, False, False, 1, discovery_reporter()
+        api, DiscoverySince.for_collection(RANGE), False, False, 1, discovery_reporter()
     )
 
     assert candidates == {}
@@ -261,7 +264,7 @@ def test_discovery_stops_after_range_page_enters_old_region() -> None:
     )
 
     candidates, coverage = _discover_partition(
-        api, RANGE, False, False, 1, discovery_reporter()
+        api, DiscoverySince.for_collection(RANGE), False, False, 1, discovery_reporter()
     )
 
     assert set(candidates) == {"in-range", "at-start"}
@@ -312,7 +315,7 @@ def test_discovery_keeps_scanning_when_ordering_is_invalid() -> None:
     )
 
     candidates, coverage = _discover_partition(
-        api, RANGE, False, False, 1, discovery_reporter()
+        api, DiscoverySince.for_collection(RANGE), False, False, 1, discovery_reporter()
     )
 
     assert set(candidates) == {"in-range", "in-range-2", "later-in-range"}
@@ -343,7 +346,9 @@ def test_stabilization_finds_new_in_range_id_on_later_pass() -> None:
 
     api = AppearingAPI()
 
-    candidates, _coverage, passes = _discover(api, RANGE, discovery_reporter())
+    candidates, _coverage, passes = _discover(
+        api, DiscoverySince.for_collection(RANGE), discovery_reporter()
+    )
 
     assert "appeared-later" in candidates
     assert passes == 3
@@ -558,20 +563,7 @@ def session_response(
     return ProbeResponse(200, {"accessToken": "must-not-leak", "account": account})
 
 
-@pytest.mark.parametrize("missing_automation_flag", [False, True])
-def test_collect_hydrates_ordinary_conversations_with_optional_automation_flag(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    missing_automation_flag: bool,
-) -> None:
-    discovery = DiscoveryAPI()
-    hydration = HydrationAPI()
-    if missing_automation_flag:
-        for partition in discovery.pages.values():
-            for entry in partition:
-                if entry["is_automation_conversation"] is False:
-                    del entry["is_automation_conversation"]
-
+def collection_browser(discovery: DiscoveryAPI, hydration: HydrationAPI) -> AuthBrowser:
     class CollectionPage(AuthPage):
         def evaluate(self, _expression: str, _arg: object) -> dict[str, object]:
             assert isinstance(_arg, dict)
@@ -591,7 +583,30 @@ def test_collect_hydrates_ordinary_conversations_with_optional_automation_flag(
                 "body": result.body.decode(),
             }
 
-    browser = AuthBrowser(ProbeContext(ProbeRequest([])), CollectionPage())
+    return AuthBrowser(ProbeContext(ProbeRequest([])), CollectionPage())
+
+
+@pytest.mark.parametrize("missing_automation_flag", [False, True])
+@pytest.mark.parametrize("updated", ["2026-01-01T01:00:00Z", "2026-01-02T12:00:00Z"])
+def test_collect_hydrates_ordinary_conversations_with_optional_automation_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_automation_flag: bool,
+    updated: str,
+) -> None:
+    discovery = DiscoveryAPI()
+    for partition in discovery.pages.values():
+        for entry in partition:
+            if entry["id"] == "active-conversation":
+                entry["update_time"] = updated
+    hydration = HydrationAPI()
+    if missing_automation_flag:
+        for partition in discovery.pages.values():
+            for entry in partition:
+                if entry["is_automation_conversation"] is False:
+                    del entry["is_automation_conversation"]
+
+    browser = collection_browser(discovery, hydration)
     monkeypatch.setattr("tracebase.chatgpt._Browser", lambda *_args, **_kwargs: browser)
     run = CollectionRun(
         Archive(tmp_path / "archive"),
@@ -605,8 +620,8 @@ def test_collect_hydrates_ordinary_conversations_with_optional_automation_flag(
     result = collect(run, reporter())
     published = run.publish(result.coverage)
 
-    assert result.coverage["selected_conversations"] == 3
-    assert run.snapshot_count == 3
+    assert result.coverage["selected_conversations"] == 4
+    assert run.snapshot_count == 4
     for snapshot in (published / "snapshots/conversation").iterdir():
         assert json.loads((snapshot / "conversation.json").read_text())["messages"] == [
             {"id": "current"}
@@ -619,6 +634,7 @@ def test_collect_hydrates_ordinary_conversations_with_optional_automation_flag(
         "/backend-api/conversations/active-conversation",
         "/backend-api/conversations/at-start",
         "/backend-api/conversations/archived-conversation",
+        "/backend-api/conversations/at-end",
     }
 
 

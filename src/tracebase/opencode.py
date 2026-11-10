@@ -19,7 +19,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .archive import ArchiveError, CollectionRun, Snapshot
-from .collector import CollectionContext, CollectionResult
+from .collector import CollectionContext, CollectionResult, DiscoverySince
 from .progress import ProgressEvent, ProgressReporter
 
 _SERVER_URL_PATTERN = re.compile(r"http://127\.0\.0\.1:\d+")
@@ -114,12 +114,11 @@ def _stop_server(process: subprocess.Popen[str]) -> None:
 
 
 def _discover_sessions(
-    server_url: str, password: str, run: CollectionRun
+    server_url: str, password: str, discovery: DiscoverySince
 ) -> list[dict[str, Any]]:
     query = urlencode(
         {
-            "start": int(run.collection_range.start.timestamp() * 1000),
-            "cursor": int(run.collection_range.end.timestamp() * 1000),
+            "start": int(discovery.start.timestamp() * 1000),
             "archived": "true",
             "limit": _DISCOVERY_LIMIT,
         }
@@ -230,7 +229,7 @@ def collect(  # noqa: PLR0915
     run: CollectionRun,
     reporter: ProgressReporter,
 ) -> CollectionResult:
-    """Export complete evidence for sessions updated within the Collection Range."""
+    """Export sessions that may contain activity within the Collection Range."""
 
     reporter.emit(
         ProgressEvent(
@@ -241,9 +240,10 @@ def collect(  # noqa: PLR0915
     )
     opencode_version = _run_opencode(["--version"]).decode("utf-8", "replace").strip()
     list_started_at = _observation_time()
+    discovery = DiscoverySince.for_collection(run.collection_range)
     server, server_url, password = _start_server()
     try:
-        sessions = _discover_sessions(server_url, password, run)
+        sessions = _discover_sessions(server_url, password, discovery)
         projects, project_lookup_gap = _discover_projects(server_url, password)
     finally:
         _stop_server(server)
@@ -251,9 +251,8 @@ def collect(  # noqa: PLR0915
     selected: list[dict[str, Any]] = []
     for session in sessions:
         _, updated = _session_interval(session)
-        # The API bounds updated timestamps with start/cursor. Keep this
-        # predicate defensive in case a server does not honor those filters.
-        if run.collection_range.start <= updated < run.collection_range.end:
+        # Defend against servers that do not honor the discovery lower bound.
+        if discovery.includes(updated):
             selected.append(session)
 
     reporter.emit(
@@ -395,8 +394,7 @@ def collect(  # noqa: PLR0915
         coverage={
             "session_discovery_endpoint": "/experimental/session",
             "session_discovery_options": {
-                "start": int(run.collection_range.start.timestamp() * 1000),
-                "cursor": int(run.collection_range.end.timestamp() * 1000),
+                "start": int(discovery.start.timestamp() * 1000),
                 "archived": True,
                 "limit": _DISCOVERY_LIMIT,
             },

@@ -15,12 +15,11 @@ from urllib.parse import urlencode
 
 from .archive import (
     ArchiveError,
-    CollectionRange,
     CollectionRun,
     Snapshot,
     load_published_archive,
 )
-from .collector import CollectionContext, CollectionResult
+from .collector import CollectionContext, CollectionResult, DiscoverySince
 from .github_identity import save_github_identity
 from .progress import ProgressEvent, ProgressReporter
 
@@ -66,7 +65,7 @@ class _DiscoveryEntry:
     eligibility: str
     query: str
     partition_from: str
-    partition_to: str
+    partition_to: str | None
 
 
 @dataclass(frozen=True)
@@ -639,10 +638,8 @@ def resolve_context() -> GitHubContext:
     )
 
 
-def _discovery_queries(
-    login: str, collection_range: CollectionRange
-) -> list[tuple[str, str]]:
-    updated = _updated_range(collection_range.start, collection_range.end)
+def _discovery_queries(login: str, discovery: DiscoverySince) -> list[tuple[str, str]]:
+    updated = _updated_range(discovery.start, None)
     return [
         ("authorship", f"author:{login} {updated}"),
         ("ordinary_comment", f"commenter:{login} {updated}"),
@@ -664,21 +661,19 @@ def _search_response(value: dict[str, Any] | list[Any]) -> tuple[int, list[Any]]
 def _discover(  # noqa: PLR0915
     github: _GitHub,
     login: str,
-    collection_range: CollectionRange,
+    discovery: DiscoverySince,
     reporter: ProgressReporter,
 ) -> tuple[dict[str, _Candidate], list[dict[str, Any]]]:
     candidates: dict[str, _Candidate] = {}
     coverage_queries: list[dict[str, Any]] = []
     pages_processed = 0
-    for name, base_query in _discovery_queries(login, collection_range):
-        partitions = [(collection_range.start, collection_range.end)]
+    for name, base_query in _discovery_queries(login, discovery):
+        partitions: list[tuple[datetime, datetime | None]] = [(discovery.start, None)]
         while partitions:
             start, end = partitions.pop(0)
             start_text = _timestamp(start)
-            end_text = _timestamp(end)
-            original_range = _updated_range(
-                collection_range.start, collection_range.end
-            )
+            end_text = _timestamp(end) if end is not None else None
+            original_range = _updated_range(discovery.start, None)
             query = base_query.replace(
                 original_range,
                 _updated_range(start, end),
@@ -690,12 +685,15 @@ def _discover(  # noqa: PLR0915
             response = github.request(_page_endpoint(endpoint, 1))
             total_count, items = _search_response(github.json(response))
             if total_count > _SEARCH_RESULT_LIMIT:
-                if end - start <= _MINIMUM_PARTITION:
+                # Split finite history while retaining an open newest partition,
+                # so updates during discovery cannot move beyond its upper bound.
+                split_end = end or datetime.now(UTC).replace(microsecond=0)
+                if split_end - start <= _MINIMUM_PARTITION:
                     raise ArchiveError(
                         "GitHub discovery exceeded the 1,000 result limit"
                     )
                 midpoint = start + timedelta(
-                    seconds=int((end - start).total_seconds()) // 2
+                    seconds=int((split_end - start).total_seconds()) // 2
                 )
                 coverage_queries.append(
                     {
@@ -820,7 +818,9 @@ def _timestamp(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _updated_range(start: datetime, end: datetime) -> str:
+def _updated_range(start: datetime, end: datetime | None) -> str:
+    if end is None:
+        return f"updated:>={_timestamp(start)}"
     # GitHub Search's `a..b` range is inclusive at both ends, while
     # Tracebase Collection Ranges are half-open [start, end). Since
     # Collection Range endpoints are restricted to whole seconds,
@@ -979,7 +979,9 @@ def collect(
             label="Discovering GitHub artifacts",
         )
     )
-    candidates, discovery = _discover(github, login, run.collection_range, reporter)
+    candidates, discovery = _discover(
+        github, login, DiscoverySince.for_collection(run.collection_range), reporter
+    )
     reporter.emit(
         ProgressEvent(
             kind="finish",
