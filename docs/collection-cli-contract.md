@@ -16,13 +16,33 @@ current preparation, discovery, hydration, or publication task. The traceback
 and progress output are diagnostic operational output, not Source-native
 Evidence.
 
-Tracebacks and progress output must not disclose credentials, authorization
-values, raw request headers, source bodies, OpenCode session exports, or other
-Source-native sensitive content. Exception messages and progress events must
-follow the same boundary.
+Except for GitHub CLI stderr described below, exception messages, tracebacks,
+and progress output must not disclose credentials, authorization values, raw
+request headers, source bodies, OpenCode session exports, or other Source-native
+sensitive content.
 
 Failed Collection Runs remain unpublished. Their existing staging directories
 remain available for inspection and do not enter the overlap registry.
+
+GitHub request failures include the endpoint, attempt count, exit status, HTTP
+status when available, and the GitHub CLI's stderr. Tracebase intentionally
+preserves GitHub CLI stderr verbatim, without redaction or sanitization, in error
+diagnostics. It may contain sensitive information, including in exception
+messages and tracebacks. This is a design choice for a personal, locally operated
+tool; you are responsible for protecting diagnostic logs.
+
+HTTP response bodies remain redacted in diagnostics, which include only their
+byte count and SHA-256 digest prefix. Preserving GitHub CLI stderr does not
+authorize appending raw HTTP response bodies to error messages.
+
+## Unavailable GitHub diffs
+
+When GitHub rejects a Pull Request diff with HTTP 406 because the diff exceeds
+its size limits, collection preserves the provider's error response and continues
+collecting the remaining evidence. Context Output states that the diff is
+unavailable and includes GitHub's reason. It does not emit an empty diff or treat
+the missing diff as evidence of no code changes. Other request failures still
+abort collection.
 
 ## Success Output
 

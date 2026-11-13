@@ -42,6 +42,7 @@ _DIFF_ACCEPT = "application/vnd.github.diff"
 _SUCCESS_STATUS_LOWER = 200
 _SUCCESS_STATUS_UPPER = 300
 _SERVER_ERROR_STATUS_LOWER = 500
+_NOT_ACCEPTABLE_STATUS = 406
 _SEARCH_RESULT_LIMIT = 1000
 _REQUEST_TIMEOUT_SECONDS = 60
 _REQUEST_RETRIES = 2
@@ -59,6 +60,12 @@ class _Response:
     status: int
     headers: dict[str, str]
     observed_at: str = ""
+
+
+class _RequestError(ArchiveError):
+    def __init__(self, message: str, response: _Response | None) -> None:
+        super().__init__(message)
+        self.response = response
 
 
 @dataclass(frozen=True)
@@ -92,16 +99,15 @@ class _GitHub:
         self._supports_allow_escape_sequences: bool | None = None
 
     @staticmethod
-    def _execute(
-        arguments: list[str], failure_message: str, endpoint: str
-    ) -> _Response:
+    def _execute(arguments: list[str], endpoint: str) -> _Response:
         last_returncode: int | str = "unknown"
         last_stderr = ""
         last_body = ""
         last_status: int | None = None
+        last_response: _Response | None = None
 
-        def failure() -> ArchiveError:
-            return ArchiveError(
+        def failure() -> _RequestError:
+            return _RequestError(
                 _request_failure(
                     endpoint,
                     attempt,
@@ -109,12 +115,14 @@ class _GitHub:
                     last_stderr,
                     last_status,
                     last_body,
-                )
+                ),
+                last_response,
             )
 
         for attempt in range(1, _REQUEST_RETRIES + 2):
             last_status = None
             last_body = ""
+            last_response = None
             if attempt > 1:
                 _sleep(_RETRY_DELAYS[attempt - 2])
             try:
@@ -150,15 +158,16 @@ class _GitHub:
                 raise failure() from None
 
             last_status = response.status
+            last_response = response
             last_body = response.body.decode("utf-8", errors="replace")
             if response.status >= _SERVER_ERROR_STATUS_LOWER:
                 if attempt <= _REQUEST_RETRIES:
                     continue
                 raise failure()
             if completed.returncode != 0:
-                raise ArchiveError(failure_message)
+                raise failure()
             if not _SUCCESS_STATUS_LOWER <= response.status < _SUCCESS_STATUS_UPPER:
-                raise ArchiveError("GitHub request failed")
+                raise failure()
             return response
 
         raise AssertionError("GitHub request retry loop did not return")
@@ -199,7 +208,7 @@ class _GitHub:
                 endpoint,
             ]
         )
-        return self._execute(arguments, "GitHub request failed", endpoint)
+        return self._execute(arguments, endpoint)
 
     def graphql(self, query: str) -> _Response:
         arguments = [
@@ -214,7 +223,7 @@ class _GitHub:
             "-f",
             f"query={query}",
         ]
-        return self._execute(arguments, "GitHub GraphQL request failed", "graphql")
+        return self._execute(arguments, "graphql")
 
     @staticmethod
     def _parse_response(raw: bytes, observed_at: str = "") -> _Response:
@@ -257,16 +266,18 @@ def _request_failure(
     status: int | None,
     body: str,
 ) -> str:
-    details = [f"endpoint={endpoint}", f"attempts={attempts}"]
+    details = [
+        f"endpoint={endpoint}",
+        f"attempts={attempts}",
+        f"returncode={returncode}",
+    ]
     if status is not None:
         details.append(f"status={status}")
-    else:
-        details.append(f"returncode={returncode}")
     if stderr:
-        details.append(f"stderr={_diagnostic_text(stderr)}")
+        details.append(f"stderr={stderr.rstrip()}")
     if body:
         details.append(f"body={_diagnostic_text(body)}")
-    return "GitHub request failed after retries: " + ", ".join(details)
+    return "GitHub request failed: " + ", ".join(details)
 
 
 def _diagnostic_text(value: str) -> str:
@@ -833,6 +844,31 @@ def _updated_range(start: datetime, end: datetime) -> str:
     return f"updated:{_timestamp(start)}..{_timestamp(inclusive_end)}"
 
 
+def _diff_limit_response(response: _Response | None) -> bool:
+    if response is None or response.status != _NOT_ACCEPTABLE_STATUS:
+        return False
+    try:
+        value = json.loads(response.body)
+    except ValueError, UnicodeDecodeError:
+        return False
+    message = value.get("message") if isinstance(value, dict) else None
+    return isinstance(message, str) and message.startswith("Sorry, the diff exceeded")
+
+
+def _diff_evidence(github: _GitHub, endpoint: str) -> _Evidence:
+    path = "pull-request.diff"
+    try:
+        response = github.request(endpoint, _DIFF_ACCEPT)
+    except _RequestError as error:
+        if not _diff_limit_response(error.response):
+            raise
+        assert error.response is not None
+        response = error.response
+        # A provider limit is evidence of an unavailable diff, not an empty diff.
+        path = "pull-request.diff-unavailable.json"
+    return _Evidence(path, endpoint, _DIFF_ACCEPT, response)
+
+
 def _hydrate(
     run: CollectionRun,
     github: _GitHub,
@@ -914,10 +950,7 @@ def _hydrate(
             )
         evidence.extend(review_comment_evidence)
         evidence.extend(review_thread_evidence)
-        diff_response = github.request(pull_endpoint, _DIFF_ACCEPT)
-        evidence.append(
-            _Evidence("pull-request.diff", pull_endpoint, _DIFF_ACCEPT, diff_response)
-        )
+        evidence.append(_diff_evidence(github, pull_endpoint))
     selected_entries = list(candidate.discovery_entries)
     selected = sorted({entry.eligibility for entry in selected_entries})
     provenance = (

@@ -927,6 +927,29 @@ def _overview(
         lines.extend(
             ["", "## Code changes", "", "Full diff: [diff.patch](diff.patch)", ""]
         )
+    unavailable = next(
+        (
+            record
+            for record in projection.records
+            if record.get("kind") == "aggregate-diff-unavailable"
+        ),
+        None,
+    )
+    if unavailable is not None:
+        failure = _value(unavailable)
+        assert isinstance(failure, dict)
+        lines.extend(
+            [
+                "",
+                "## Code changes",
+                "",
+                "Diff unavailable (GitHub HTTP 406). No code diff was collected; "
+                "do not infer code changes from this missing evidence.",
+                "",
+                failure["message"],
+                "",
+            ]
+        )
     return lines
 
 
