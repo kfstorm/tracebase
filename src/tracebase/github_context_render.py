@@ -458,6 +458,9 @@ def _thread_comments(
     for node in nodes:
         if not isinstance(node, dict):
             continue
+        # Drafts are not submitted activity, even when they have timestamps.
+        if node.get("state") == "PENDING":
+            continue
         canonical_id = github_inline_comment_canonical_id(node)
         if canonical_id is None:
             continue
