@@ -305,12 +305,12 @@ def test_github_request_reports_http_500_diagnostics_after_retries(
 
     with pytest.raises(
         ArchiveError,
-        match=r"endpoint=/user.*attempts=3.*status=503.*stderr=<redacted bytes=12 sha256=[0-9a-f]+>.*body=<redacted bytes=19 sha256=[0-9a-f]+>",
+        match=r"endpoint=/user.*attempts=3.*status=503.*stderr=server error.*body=<redacted bytes=19 sha256=[0-9a-f]+>",
     ) as error:
         _GitHub().request("/user")
 
     message = str(error.value)
-    assert "server error" not in message
+    assert "server error" in message
     assert "service unavailable" not in message
 
     assert delays == [0.5, 1.0]
@@ -521,7 +521,7 @@ def test_github_request_reports_transport_diagnostics_after_retries(
 
     with pytest.raises(
         ArchiveError,
-        match=r"endpoint=/user.*attempts=3.*returncode=7.*stderr=<redacted bytes=18 sha256=[0-9a-f]+>",
+        match=r"endpoint=/user.*attempts=3.*returncode=7.*stderr=connection refused",
     ):
         _GitHub().request("/user")
 

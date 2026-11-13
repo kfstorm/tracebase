@@ -217,7 +217,12 @@ def github_user_work_record_ids(
                 )
                 for value in values
             )
-        elif kind not in {"aggregate-diff", "review-thread", "ordinary-comment-alias"}:
+        elif kind not in {
+            "aggregate-diff",
+            "aggregate-diff-unavailable",
+            "review-thread",
+            "ordinary-comment-alias",
+        }:
             user_work = any(
                 github_logins_match(github_actor_login(value), projection.tracked_login)
                 and _record_is_in_range(
@@ -577,6 +582,19 @@ def project_github(  # noqa: PLR0915
             parent = inline_nodes_by_rest_id.get(reply_id)
             if parent is not None:
                 relations.add(("inline-reply", parent, node_id))
+        if "pull-request.diff-unavailable.json" in snapshot.evidence:
+            path = "pull-request.diff-unavailable.json"
+            failure = _json(snapshot, path)
+            if not isinstance(failure, dict) or not isinstance(
+                failure.get("message"), str
+            ):
+                raise ArchiveError("GitHub unavailable diff response was invalid")
+            _add_record(
+                records,
+                _record(
+                    "aggregate-diff-unavailable", source_id, failure, path, snapshot
+                ),
+            )
         if "pull-request.diff" in snapshot.evidence:
             _add_record(
                 records,

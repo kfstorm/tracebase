@@ -63,8 +63,9 @@ if endpoint == "--help":
     print("gh api help")
     raise SystemExit(0)
 if os.environ.get("TRACEBASE_FAIL_SOURCE") and endpoint.endswith("/issues/43"):
-    print(AUTHORIZATION_MARKER, file=sys.stderr)
-    print(SOURCE_RESPONSE_MARKER, file=sys.stderr)
+    print(AUTHORIZATION_MARKER)
+    print(SOURCE_RESPONSE_MARKER)
+    print("gh: Not Found (HTTP 404)", file=sys.stderr)
     raise SystemExit(1)
 if endpoint == "/user":
     payload = {"node_id": "synthetic-actor", "login": "synthetic-actor"}

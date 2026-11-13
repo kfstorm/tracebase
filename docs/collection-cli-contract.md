@@ -24,6 +24,19 @@ follow the same boundary.
 Failed Collection Runs remain unpublished. Their existing staging directories
 remain available for inspection and do not enter the overlap registry.
 
+GitHub request failures include the endpoint, attempt count, exit status, HTTP
+status when available, and the GitHub CLI's error output. Response bodies remain
+outside diagnostic output.
+
+## Unavailable GitHub diffs
+
+When GitHub rejects a Pull Request diff with HTTP 406 because the diff exceeds
+its size limits, collection preserves the provider's error response and continues
+collecting the remaining evidence. Context Output states that the diff is
+unavailable and includes GitHub's reason. It does not emit an empty diff or treat
+the missing diff as evidence of no code changes. Other request failures still
+abort collection.
+
 ## Success Output
 
 A successful source command writes exactly one human-readable summary line to
