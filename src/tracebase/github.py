@@ -349,6 +349,7 @@ def _repository_parts(repository: str) -> tuple[str, str]:
 _REVIEW_COMMENT_ID_FIELDS = """
               nodes {
                 id
+                state
               }
               pageInfo {
                 hasNextPage
@@ -444,7 +445,9 @@ def _review_comment_nodes(value: Any) -> list[dict[str, Any]]:
         for comment in value
     ):
         raise ArchiveError("GitHub review-thread comments response was invalid")
-    return value
+    # GraphQL includes the viewer's draft comments, which REST does not publish.
+    # Keep the response unchanged, but join only submitted comments to REST evidence.
+    return [comment for comment in value if comment.get("state") != "PENDING"]
 
 
 def _review_comments_evidence(
