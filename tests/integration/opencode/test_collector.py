@@ -277,6 +277,18 @@ def test_real_collection_and_offline_context(tmp_path):
     assert result.returncode == 0, result.stderr
     runs = load_published_archive(archive)
     snapshots = {item.manifest["source_id"]: item for item in runs[0].snapshots}
+    if major == 2:
+        coverage = runs[0].manifest["coverage"]
+        assert coverage["session_discovery_page_count"] > 1
+        assert (
+            len(coverage["session_discovery_requests"])
+            == coverage["session_discovery_page_count"]
+        )
+        assert coverage["listed_session_count"] >= len(ids)
+        assert (
+            coverage["observation_window"]["from"]
+            <= coverage["observation_window"]["to"]
+        )
     assert set(snapshots) == {
         sid for name, sid in ids.items() if name not in {"at-end", "before-start"}
     }
@@ -350,8 +362,19 @@ def verify_native_evidence(major, snapshots):
             assert payload["messages"]
         else:
             requests = snapshot.manifest["metadata"]["requests"]
-            assert (
-                sum(request["operation"] == "session.list" for request in requests) > 1
+            assert requests[0] == {
+                "path": "session.json",
+                "operation": "session.get",
+                "parameters": {"sessionID": sid},
+            }
+            assert all(
+                request["operation"] in {"session.get", "session.message.list"}
+                for request in requests
+            )
+            assert set(snapshot.evidence) == {request["path"] for request in requests}
+            assert all(
+                path == "session.json" or path.startswith("messages/")
+                for path in snapshot.evidence
             )
             for request in requests:
                 args = ["--standalone", "api", request["operation"]]
@@ -359,19 +382,42 @@ def verify_native_evidence(major, snapshots):
                     args += ["--param", f"{key}={value}"]
                 raw = snapshot.evidence[request["path"]]
                 assert raw == cli(*args)
-                if request["operation"] == "session.list":
-                    directories.update(
-                        item["location"]["directory"]
-                        for item in json.loads(raw)["data"]
-                    )
+                if request["operation"] == "session.get":
+                    directories.add(json.loads(raw)["data"]["location"]["directory"])
             if sid.endswith("0000"):
-                assert (
-                    sum(
-                        request["operation"] == "session.message.list"
-                        for request in requests
-                    )
-                    > 1
+                messages = [
+                    request
+                    for request in requests
+                    if request["operation"] == "session.message.list"
+                ]
+                assert len(messages) > 1
+                expected_cursor = None
+                identifiers = []
+                for request in messages:
+                    assert request["parameters"].get("cursor") == expected_cursor
+                    page = json.loads(snapshot.evidence[request["path"]])
+                    identifiers.extend(item["id"] for item in page["data"])
+                    expected_cursor = page["cursor"].get("next")
+                assert expected_cursor is None
+                assert {
+                    f"msg_0000{suffix}"
+                    for suffix in ("user", "answer", "synthetic", "compact", "tool")
+                } <= set(identifiers)
+                # Compare with a larger independent request. The API can return
+                # a next cursor even on a short page, followed by an empty page.
+                native = api(
+                    "session.message.list", sessionID=sid, limit="200", order="asc"
                 )
+                assert identifiers == [item["id"] for item in native["data"]]
+                if cursor := native["cursor"].get("next"):
+                    terminal = api(
+                        "session.message.list",
+                        sessionID=sid,
+                        limit="200",
+                        cursor=cursor,
+                    )
+                    assert terminal["data"] == []
+                    assert terminal["cursor"].get("next") is None
     assert directories == {"/workspace/example-0", "/workspace/example-1"}
 
 
@@ -434,9 +480,7 @@ def test_native_same_major_credentials_with_synthetic_key(tmp_path):
         auth.parent.mkdir(parents=True, exist_ok=True)
         auth.write_text('{"synthetic":{"type":"api","key":"synthetic-secret"}}')
         state = tmp_path / "state"
-        prepare_state(
-            state, "example/model", HostOpenCode("opencode", version, 1), "unused-image"
-        )
+        prepare_state(state, HostOpenCode("opencode", version, 1), "unused-image")
         assert json.loads(
             (state / "share/opencode/auth.json").read_text()
         ) == json.loads(auth.read_text())

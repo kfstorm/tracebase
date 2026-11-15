@@ -74,58 +74,54 @@ def pages(
         parameters = parameters | {"cursor": next_cursor}
 
 
-def validate_records(
-    responses: list[tuple[bytes, dict[str, Any], dict[str, str]]], *, messages: bool
-) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+def validate_records(records: list[Any], *, messages: bool) -> list[dict[str, Any]]:
     identifiers: set[str] = set()
-    for _, response, _ in responses:
-        for item in response["data"]:
-            identifier, time = item.get("id"), item.get("time")
-            if (
-                not isinstance(identifier, str)
-                or not identifier
-                or identifier in identifiers
-            ):
-                raise ArchiveError("OpenCode V2 record identity is invalid")
-            identifiers.add(identifier)
-            if not isinstance(time, dict):
+    for item in records:
+        if not isinstance(item, dict):
+            raise ArchiveError("OpenCode V2 API record is invalid")
+        identifier, time = item.get("id"), item.get("time")
+        if (
+            not isinstance(identifier, str)
+            or not identifier
+            or identifier in identifiers
+        ):
+            raise ArchiveError("OpenCode V2 record identity is invalid")
+        identifiers.add(identifier)
+        if not isinstance(time, dict):
+            raise ArchiveError("OpenCode V2 record time is invalid")
+        for field in ("created",) if messages else ("created", "updated"):
+            stamp = time.get(field)
+            if isinstance(stamp, bool) or not isinstance(stamp, int):
                 raise ArchiveError("OpenCode V2 record time is invalid")
-            for field in ("created",) if messages else ("created", "updated"):
-                stamp = time.get(field)
-                if isinstance(stamp, bool) or not isinstance(stamp, int):
-                    raise ArchiveError("OpenCode V2 record time is invalid")
-                try:
-                    datetime.fromtimestamp(stamp / 1000, UTC)
-                except OverflowError, OSError, ValueError:
-                    raise ArchiveError("OpenCode V2 record time is invalid") from None
-            if messages:
-                if item.get("type") not in _MESSAGE_TYPES:
-                    raise ArchiveError("Unsupported OpenCode V2 message type")
-                if item["type"] == "user" and not isinstance(item.get("text"), str):
-                    raise ArchiveError("OpenCode V2 user message is invalid")
-                if item["type"] == "assistant":
-                    content = item.get("content")
-                    if not isinstance(content, list) or any(
-                        not isinstance(part, dict)
-                        or part.get("type") not in {"text", "reasoning", "tool"}
-                        or (
-                            part["type"] == "text"
-                            and not isinstance(part.get("text"), str)
-                        )
-                        for part in content
-                    ):
-                        raise ArchiveError("OpenCode V2 assistant message is invalid")
-            else:
-                location = item.get("location")
-                if (
-                    time["updated"] < time["created"]
-                    or not isinstance(location, dict)
-                    or not isinstance(location.get("directory"), str)
-                    or not location["directory"]
+            try:
+                datetime.fromtimestamp(stamp / 1000, UTC)
+            except OverflowError, OSError, ValueError:
+                raise ArchiveError("OpenCode V2 record time is invalid") from None
+        if messages:
+            if item.get("type") not in _MESSAGE_TYPES:
+                raise ArchiveError("Unsupported OpenCode V2 message type")
+            if item["type"] == "user" and not isinstance(item.get("text"), str):
+                raise ArchiveError("OpenCode V2 user message is invalid")
+            if item["type"] == "assistant":
+                content = item.get("content")
+                if not isinstance(content, list) or any(
+                    not isinstance(part, dict)
+                    or part.get("type") not in {"text", "reasoning", "tool"}
+                    or (
+                        part["type"] == "text" and not isinstance(part.get("text"), str)
+                    )
+                    for part in content
                 ):
-                    raise ArchiveError("OpenCode V2 session is invalid")
-            records.append(item)
+                    raise ArchiveError("OpenCode V2 assistant message is invalid")
+        else:
+            location = item.get("location")
+            if (
+                time["updated"] < time["created"]
+                or not isinstance(location, dict)
+                or not isinstance(location.get("directory"), str)
+                or not location["directory"]
+            ):
+                raise ArchiveError("OpenCode V2 session is invalid")
     return records
 
 
@@ -134,7 +130,11 @@ def collect_v2(
 ) -> CollectionResult:
     started = _now()
     discovery = pages("session.list", {})
-    sessions = validate_records(discovery, messages=False)
+    sessions = validate_records(
+        [item for _, response, _ in discovery for item in response["data"]],
+        messages=False,
+    )
+    discovered_at = _now()
     selected = [
         session
         for session in sessions
@@ -152,26 +152,41 @@ def collect_v2(
     hydration = HydrationProgress(reporter, len(selected))
     for completed, session in enumerate(selected, start=1):
         hydration.update(completed - 1, session["id"], "starting")
+        observed_from = _now()
+        parameters = {"sessionID": session["id"]}
+        raw_session, response = api("session.get", parameters)
+        native_session = validate_records([response.get("data")], messages=False)[0]
+        if native_session["id"] != session["id"]:
+            raise ArchiveError("OpenCode V2 evidence identity is invalid")
         message_pages = pages("session.message.list", {"sessionID": session["id"]})
-        validate_records(message_pages, messages=True)
-        evidence: dict[str, bytes] = {}
-        requests = []
-        for prefix, operation, responses in (
-            ("sessions", "session.list", discovery),
-            ("messages", "session.message.list", message_pages),
-        ):
-            for index, (raw, _, parameters) in enumerate(responses):
-                path = f"{prefix}/{index:06d}.json"
-                evidence[path] = raw
-                requests.append(
-                    {"path": path, "operation": operation, "parameters": parameters}
-                )
+        validate_records(
+            [item for _, response, _ in message_pages for item in response["data"]],
+            messages=True,
+        )
+        evidence: dict[str, bytes] = {"session.json": raw_session}
+        requests = [
+            {
+                "path": "session.json",
+                "operation": "session.get",
+                "parameters": parameters,
+            }
+        ]
+        for index, (raw, _, parameters) in enumerate(message_pages):
+            path = f"messages/{index:06d}.json"
+            evidence[path] = raw
+            requests.append(
+                {
+                    "path": path,
+                    "operation": "session.message.list",
+                    "parameters": parameters,
+                }
+            )
         root = run.write_snapshot(
             Snapshot(
                 source_kind="opencode",
                 object_kind="session",
                 source_id=session["id"],
-                observation_window={"from": started, "to": _now()},
+                observation_window={"from": observed_from, "to": _now()},
                 evidence_files=tuple({"path": path} for path in evidence),
                 metadata={
                     "protocol": "opencode-v2",
@@ -192,8 +207,11 @@ def collect_v2(
             "protocol": "opencode-v2",
             "session_discovery_operation": "session.list",
             "session_discovery_page_count": len(discovery),
+            "session_discovery_requests": [
+                parameters for _, _, parameters in discovery
+            ],
             "listed_session_count": len(sessions),
             "selected_session_count": len(selected),
-            "observation_window": {"from": started, "to": _now()},
+            "observation_window": {"from": started, "to": discovered_at},
         }
     )

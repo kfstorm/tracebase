@@ -94,10 +94,15 @@ directories, including archived sessions. Session `time.updated` selects
 candidates within the Collection Range. Context Activity uses message creation
 time, so archiving a session alone cannot select it for Context.
 
-OpenCode V1 Snapshots retain their native session exports. V2 Snapshots retain
-complete public session-list and message-list responses page by page, with
-request provenance and opaque cursors. Context interprets the selected Snapshot
-offline for either protocol. V2 `user.text` and assistant `content` text become
+OpenCode discovery responses select Sessions for Hydration and are not
+Source-native Evidence in individual Snapshots. Collection Run Coverage records
+discovery statistics, request parameters, observation times, and V2 page counts.
+V1 Snapshots retain their native session exports and available Project evidence.
+V2 Snapshots retain the complete native `session.get` response, including its
+`data` wrapper, as `session.json`, and each complete native
+`session.message.list` page under `messages/`, with request provenance and
+opaque cursors. Context interprets the selected Snapshot offline for either
+protocol. V2 `user.text` and assistant `content` text become
 dialogue; synthetic, compaction, shell, tool, and other non-dialogue records
 remain only in Source-native Evidence.
 

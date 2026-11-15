@@ -27,6 +27,22 @@ def make_run(tmp_path):
     )
 
 
+def mock_api_responses(monkeypatch, responses):
+    monkeypatch.setattr("tracebase.opencode._run_opencode", lambda args: b"2.99.0")
+    responses = iter(responses)
+    monkeypatch.setattr(
+        "tracebase.opencode_v2.run_opencode",
+        lambda args: json.dumps(next(responses)).encode(),
+    )
+
+
+def assert_unpublished(run):
+    with pytest.raises(ArchiveError):
+        result = collect(run, ProgressReporter(LineProgressSink(io.StringIO())))
+        run.publish(result.coverage)
+    assert not list((run.archive.root / "runs").glob("*"))
+
+
 @pytest.mark.parametrize("version", [b"3.0.0", b"0.99.0", b"invalid", b"2.3.0-beta"])
 def test_unknown_major_or_nonrelease_fails_before_discovery(
     tmp_path, monkeypatch, version
@@ -49,17 +65,8 @@ def test_unknown_major_or_nonrelease_fails_before_discovery(
     ],
 )
 def test_malformed_discovery_never_publishes(tmp_path, monkeypatch, response):
-    monkeypatch.setattr(
-        "tracebase.opencode._run_opencode", lambda args: b"opencode v2.99.0"
-    )
-    monkeypatch.setattr(
-        "tracebase.opencode_v2.run_opencode", lambda args: json.dumps(response).encode()
-    )
-    run = make_run(tmp_path)
-    with pytest.raises(ArchiveError):
-        result = collect(run, ProgressReporter(LineProgressSink(io.StringIO())))
-        run.publish(result.coverage)
-    assert not list((run.archive.root / "runs").glob("*"))
+    mock_api_responses(monkeypatch, [response])
+    assert_unpublished(make_run(tmp_path))
 
 
 def test_opaque_cursor_is_forwarded_without_order_and_cycles_fail(
@@ -95,6 +102,7 @@ def test_unsupported_message_aborts_collection(tmp_path, monkeypatch, message):
     responses = iter(
         [
             {"data": [SESSION], "cursor": {}},
+            {"data": SESSION},
             {"data": [message], "cursor": {}},
         ]
     )
@@ -106,3 +114,46 @@ def test_unsupported_message_aborts_collection(tmp_path, monkeypatch, message):
     with pytest.raises(ArchiveError):
         collect(run, ProgressReporter(LineProgressSink(io.StringIO())))
     assert run.snapshot_count == 0
+
+
+@pytest.mark.parametrize("metadata", [None, {}, SESSION | {"id": "ses_other"}])
+def test_session_get_must_return_the_selected_session(tmp_path, monkeypatch, metadata):
+    mock_api_responses(
+        monkeypatch, [{"data": [SESSION], "cursor": {}}, {"data": metadata}]
+    )
+    assert_unpublished(make_run(tmp_path))
+
+
+def test_message_page_failure_after_another_snapshot_never_publishes(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("tracebase.opencode._run_opencode", lambda args: b"2.3.0")
+    second = SESSION | {"id": "ses_second"}
+    message = {
+        "id": "msg_example",
+        "type": "user",
+        "text": "Synthetic question",
+        "time": {"created": 1767225600000},
+    }
+    responses = iter(
+        [
+            {"data": [SESSION, second], "cursor": {}},
+            {"data": SESSION},
+            {"data": [], "cursor": {}},
+            {"data": second},
+            {"data": [message], "cursor": {"next": "opaque:+/?=cursor"}},
+        ]
+    )
+
+    def execute(args):
+        if any(arg.startswith("cursor=") for arg in args):
+            raise ArchiveError("OpenCode command failed")
+        return json.dumps(next(responses)).encode()
+
+    monkeypatch.setattr("tracebase.opencode_v2.run_opencode", execute)
+    run = make_run(tmp_path)
+    with pytest.raises(ArchiveError, match="command failed"):
+        result = collect(run, ProgressReporter(LineProgressSink(io.StringIO())))
+        run.publish(result.coverage)
+    assert run.snapshot_count == 1
+    assert not list((run.archive.root / "runs").glob("*"))

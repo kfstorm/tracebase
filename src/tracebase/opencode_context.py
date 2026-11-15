@@ -92,41 +92,50 @@ def _json(snapshot: PublishedSnapshot) -> dict[str, Any]:
 
 
 def _v2_payload(snapshot: PublishedSnapshot) -> dict[str, Any]:
-    """Interpret registered native pages offline; never require an export file."""
+    """Interpret native Session metadata and its complete Message pages offline."""
     requests = snapshot.manifest["metadata"].get("requests")
     if not isinstance(requests, list):
         raise ArchiveError("OpenCode V2 evidence provenance is invalid")
-    groups: dict[str, list[Any]] = {"session.list": [], "session.message.list": []}
+    source_id = snapshot.manifest["source_id"]
+    session = None
+    pages: list[dict[str, Any]] = []
     for request in requests:
-        if not isinstance(request, dict) or request.get("operation") not in groups:
+        if not isinstance(request, dict):
             raise ArchiveError("OpenCode V2 evidence provenance is invalid")
         try:
             raw = snapshot.evidence[request["path"]]
             response = json.loads(raw)
             parameters = request["parameters"]
-            if not isinstance(response, dict) or not isinstance(response["data"], list):
-                raise ValueError
-            cursor = response["cursor"]
-            if not isinstance(cursor, dict) or not isinstance(parameters, dict):
+            if not isinstance(response, dict) or not isinstance(parameters, dict):
                 raise ValueError
         except KeyError, TypeError, ValueError:
             raise ArchiveError("OpenCode V2 evidence page is invalid") from None
-        group = groups[request["operation"]]
-        expected = group[-1][1]["cursor"].get("next") if group else None
-        if parameters.get("cursor") != expected or (group and expected is None):
+        if parameters.get("sessionID") != source_id:
+            raise ArchiveError("OpenCode V2 evidence identity is invalid")
+        if request.get("operation") == "session.get":
+            if session is not None or request["path"] != "session.json":
+                raise ArchiveError("OpenCode V2 evidence provenance is invalid")
+            session = validate_records([response.get("data")], messages=False)[0]
+            if session["id"] != source_id:
+                raise ArchiveError("OpenCode V2 evidence identity is invalid")
+            continue
+        if request.get("operation") != "session.message.list":
+            raise ArchiveError("OpenCode V2 evidence provenance is invalid")
+        if not isinstance(response.get("data"), list) or not isinstance(
+            response.get("cursor"), dict
+        ):
+            raise ArchiveError("OpenCode V2 evidence page is invalid")
+        expected = pages[-1]["cursor"].get("next") if pages else None
+        if parameters.get("cursor") != expected or (pages and expected is None):
             raise ArchiveError("OpenCode V2 evidence pagination is incomplete")
-        group.append((raw, response, parameters))
-    for group in groups.values():
-        if not group or group[-1][1]["cursor"].get("next") is not None:
-            raise ArchiveError("OpenCode V2 evidence pagination is incomplete")
-    sessions = validate_records(groups["session.list"], messages=False)
-    messages = validate_records(groups["session.message.list"], messages=True)
-    source_id = snapshot.manifest["source_id"]
-    session = next((item for item in sessions if item["id"] == source_id), None)
-    if session is None or any(
-        page[2].get("sessionID") != source_id for page in groups["session.message.list"]
-    ):
-        raise ArchiveError("OpenCode V2 evidence identity is invalid")
+        pages.append(response)
+    if not pages or pages[-1]["cursor"].get("next") is not None:
+        raise ArchiveError("OpenCode V2 evidence pagination is incomplete")
+    if session is None:
+        raise ArchiveError("OpenCode V2 Session metadata is missing")
+    messages = validate_records(
+        [item for page in pages for item in page["data"]], messages=True
+    )
     turns = []
     for message in messages:
         if message["type"] not in {"user", "assistant"}:

@@ -44,23 +44,6 @@ def detect_host() -> HostOpenCode:
     return HostOpenCode(executable, version, major)
 
 
-def validate_summary_versions(container_version: str) -> HostOpenCode:
-    host = detect_host()
-    try:
-        major = supported_major(container_version)
-    except ValueError:
-        raise OpenCodeError(
-            "Summary container OpenCode version is invalid or unsupported"
-        ) from None
-    if host.major != major:
-        raise OpenCodeError(
-            "Summary requires matching OpenCode major versions: "
-            f"host={host.version}, container={container_version}. "
-            "Cross-major credential transfer is not supported."
-        )
-    return host
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -76,21 +59,8 @@ def _auth_path() -> Path:
     return Path(data_home or (Path.home() / ".local/share")) / "opencode/auth.json"
 
 
-def prepare_config(stage_model: str) -> str:
-    """Build the OpenCode configuration without reading host state."""
-    config: dict[str, Any] = {
-        "$schema": "https://opencode.ai/config.json",
-        "model": stage_model,
-        "small_model": stage_model,
-        "subagent_depth": 1,
-    }
-    return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
-
-
-def prepare_state(
-    state_dir: Path, stage_model: str, host: HostOpenCode, image: str
-) -> str:
-    """Initialize one Summary's private state after its version check."""
+def prepare_state(state_dir: Path, host: HostOpenCode, image: str) -> None:
+    """Initialize one Summary's private credentials using its host Major."""
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     state_dir.chmod(0o700)
     opencode_data = state_dir / "share/opencode"
@@ -98,7 +68,7 @@ def prepare_state(
     opencode_data.chmod(0o700)
     if host.major == V2_MAJOR:
         _import_v2_state(state_dir, host, image)
-        return prepare_config(stage_model)
+        return
     if host.major != V1_MAJOR:
         raise OpenCodeError("Unsupported OpenCode major version")
     auth_path = _auth_path()
@@ -109,8 +79,6 @@ def prepare_state(
         encoding="utf-8",
     )
     isolated_auth.chmod(0o600)
-
-    return prepare_config(stage_model)
 
 
 def _import_v2_state(state_dir: Path, host: HostOpenCode, image: str) -> None:

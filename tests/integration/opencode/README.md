@@ -7,13 +7,16 @@ From the repository root, run:
 ```
 
 You need Docker and network access during image builds. The script builds and
-tests both versions listed in `versions.env`, reports each result, and returns
-success only when both pass. GitHub Actions invokes this same command. Update
+tests the `summary` and `integration` targets for both versions listed in
+`versions.env`, reports all four results, and returns success only when all
+pass. A failed build or test does not skip the remaining targets or Major.
+GitHub Actions invokes this same command. Update
 the pins in `versions.env` to test newer releases; runtime support does not use
 these pins.
 
 Each test container has its own HOME, XDG directories, and database. Runtime
-networking is disabled. The framework mounts no host directories and passes no
+networking is disabled. Collector containers have no host mounts; Summary smoke
+containers mount only the repository's smoke script, read-only. Neither receives
 host credentials or server configuration. The EXIT trap removes test containers
 and image tags; Docker may retain reusable build layers.
 
@@ -28,11 +31,15 @@ after another Snapshot has been staged.
 
 The suite also checks V1 credential-file initialization and a V2 official
 `auth import` / `auth export` round trip between isolated states using a synthetic
-key. Summary orchestration and cross-Major rejection have separate unit tests.
+key. Summary version selection, credential failures, and orchestration have
+separate unit tests.
 
 V2 runs with a two-record page limit in the test process to exercise real
 session and message pagination without hundreds of fixtures. API responses are
-compared byte for byte with preserved evidence. V1 exercises its full export;
+compared byte for byte with preserved `session.json` and Message pages. Each
+Snapshot contains only its own `session.get` response and Message pages. Global
+discovery statistics, requests, page counts, and observation times are checked in
+Run Coverage. V1 exercises its full export;
 its discovery endpoint does not expose a continuation contract Tracebase can
 safely follow, so a continuation header fails collection. That rejection is
 covered by unit tests, not a claimed real-server pagination test.
@@ -43,6 +50,25 @@ timestamps in the disposable container database before collection. The fixture
 checks the Docker marker and isolated data path before opening SQLite. The
 collector never reads SQLite. A late-hydration failure deletes a fixture Session
 between discovery and its real export/API request.
+
+## Shared Dockerfile and Summary smoke
+
+`src/tracebase/container/Dockerfile` installs the requested official GitHub
+Release binary once for Linux x64 or arm64. Its `summary` target contains
+OpenCode, Node.js/npm, Python 3.14, uv, curl, and CA certificates. The `integration`
+target adds Git, Tracebase, and test dependencies. Summary builds use only the
+packaged `container/` directory as their context; integration builds use the
+repository root. Test versions come from `versions.env`, not the Dockerfile.
+
+The entry point builds each Summary target from the package-sized context and
+runs it with a read-only root filesystem, an unprivileged UID, private tmpfs
+state, dropped capabilities, and no network. The smoke script checks the version,
+CLI arguments, and Root/Recovery session reuse. A scripted HTTP provider on
+container loopback exercises a real Subagent tool call and checks that both Root
+and Subagent requests use the CLI-selected model. The fixture config defines
+only the synthetic provider and two models; it sets no default model,
+`small_model`, agent model, or depth. Production Summary supplies no inline
+OpenCode configuration.
 
 ## Limits
 

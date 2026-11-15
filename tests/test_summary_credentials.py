@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from io import BytesIO
 
 import pytest
 
@@ -51,6 +52,8 @@ def environment(tmp_path, monkeypatch, host_version, *, fail=""):
     [
         (b"1.19.5\n", "1.99.1"),
         (b"opencode v2.3.0\n", "2.99.1"),
+        (b"1.19.5\n", "latest"),
+        (b"opencode v2.3.0\n", "latest"),
     ],
 )
 def test_matching_major_initializes_private_credentials(
@@ -58,17 +61,23 @@ def test_matching_major_initializes_private_credentials(
 ):
     source = context(tmp_path)
     calls, auth = environment(tmp_path, monkeypatch, host_version)
+    monkeypatch.setattr(
+        "tracebase.summary.urlopen",
+        lambda *args, **kwargs: BytesIO(
+            b'[{"tag_name":"v2.99.1","draft":false,"prerelease":false},'
+            b'{"tag_name":"v1.99.1","draft":false,"prerelease":false}]'
+        ),
+    )
     state_seen = []
 
-    def prepare(state, model, host, image):
-        config = prepare_state(state, model, host, image)
+    def prepare(state, host, image):
+        prepare_state(state, host, image)
         state_seen.append(state)
         assert state.stat().st_mode & 0o777 == 0o700
         if host.major == 1:
             isolated = state / "share/opencode/auth.json"
             assert isolated.stat().st_mode & 0o777 == 0o600
             assert json.loads(isolated.read_text()) == json.loads(auth.read_text())
-        return config
 
     monkeypatch.setattr("tracebase.summary.prepare_state", prepare)
     summarize(
@@ -81,7 +90,14 @@ def test_matching_major_initializes_private_credentials(
         )
     )
     assert all(not state.exists() for state in state_seen)
-    if container_version.startswith("2."):
+    expected_major = 2 if host_version.startswith(b"opencode v2.") else 1
+    assert calls[1][0] == [
+        "docker",
+        "image",
+        "inspect",
+        f"tracebase-opencode-summary:{expected_major}.99.1",
+    ]
+    if host_version.startswith(b"opencode v2."):
         export = next(call for call in calls if call[0][-1] == "export")
         assert export[0] == [
             "/synthetic/bin/opencode",
@@ -131,6 +147,8 @@ def test_incompatible_or_invalid_versions_fail_before_credentials_and_docker(
         )
     assert len(calls) == 1
     assert "synthetic-secret" not in str(caught.value)
+    if host_version in {b"1.19.5", b"opencode v2.3.0"}:
+        assert "invalid OpenCode version selection" in str(caught.value)
     assert not list(tmp_path.glob(".summary-run.*"))
 
 
@@ -190,16 +208,3 @@ def test_host_version_detection_failure_is_explicit(tmp_path, monkeypatch, mode)
             )
         )
     assert "synthetic-secret" not in str(caught.value)
-
-
-def test_invalid_resolved_container_version_fails_before_any_credentials(
-    tmp_path, monkeypatch
-):
-    source = context(tmp_path)
-    calls, _ = environment(tmp_path, monkeypatch, b"1.19.5")
-    monkeypatch.setattr(
-        "tracebase.summary.resolve_opencode_version", lambda _: "invalid"
-    )
-    with pytest.raises(SummaryError, match="container OpenCode version is invalid"):
-        summarize(SummaryRequest(source, "model", None, tmp_path / "output"))
-    assert len(calls) == 1

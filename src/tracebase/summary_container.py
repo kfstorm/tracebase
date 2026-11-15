@@ -69,9 +69,7 @@ class ContainerRunner:
         self.mounts = mounts
         self.major = major
 
-    def _command(
-        self, arguments: list[str], config: str, stdout_path: Path
-    ) -> list[str]:
+    def _command(self, arguments: list[str], stdout_path: Path) -> list[str]:
         mounts = self.mounts
         if self.major == V2_MAJOR:
             arguments = _v2_arguments(arguments)
@@ -123,8 +121,6 @@ class ContainerRunner:
                 "XDG_DATA_HOME=/home/eval/.local/share",
                 "--env",
                 "NO_COLOR=1",
-                "--env",
-                f"OPENCODE_CONFIG_CONTENT={config}",
                 self.image,
             ]
         )
@@ -140,7 +136,7 @@ class ContainerRunner:
         return command
 
     def run(
-        self, arguments: list[str], config: str, stdout_path: Path | None = None
+        self, arguments: list[str], stdout_path: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
         try:
             with tempfile.TemporaryDirectory() as temporary_directory:
@@ -148,7 +144,7 @@ class ContainerRunner:
                 capture_path.parent.mkdir(parents=True, exist_ok=True)
                 capture_path.write_text("", encoding="utf-8")
                 result = subprocess.run(
-                    self._command(arguments, config, capture_path),
+                    self._command(arguments, capture_path),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -171,11 +167,6 @@ class ContainerRunner:
 def _v2_arguments(arguments: list[str]) -> list[str]:
     """Keep every invocation, including Recovery, on the shared private state."""
     result = [argument for argument in arguments if argument != "--pure"]
-    if "--dir" in result:
-        index = result.index("--dir")
-        del result[
-            index : index + 2
-        ]  # Docker already sets /work as the working directory.
     if "--variant" in result:
         index = result.index("--variant")
         variant = result[index + 1]
@@ -201,6 +192,8 @@ def ensure_image(image: str, dockerfile: Path, opencode_version: str) -> None:
         [
             "docker",
             "build",
+            "--target",
+            "summary",
             "--tag",
             image,
             "--file",

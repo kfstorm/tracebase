@@ -192,16 +192,15 @@ Use `--language LANGUAGE` to choose the natural language for the Summary text an
 headings. For example, `--language zh-CN` requests Simplified Chinese. Omit the
 option to keep the current language behavior.
 
-By default, Summary resolves the `latest` tag for `opencode-ai` through the npm
-registry before running. Use `--opencode-version VERSION_OR_TAG` to select an
-exact version or an existing dist-tag such as `beta` or `next`. Dist-tags require
-registry access; an exact version can reuse a cached Docker image offline. The
-resolved version determines the Docker image and build version; the manifest
-records the version reported by OpenCode inside the container.
+Summary detects the host OpenCode Major (V1 or V2). By default,
+`--opencode-version latest` selects the latest official GitHub release in that
+Major series. Use `--opencode-version VERSION` to pin an exact version in the
+same series. `latest` requires GitHub API access; an exact version can reuse a
+cached Docker image offline. The manifest records the version reported by
+OpenCode inside the container. Summary does not upgrade your host CLI.
 
-Summary requires the host `opencode` CLI and the resolved container version to
-use the same supported Major (V1 or V2). A mismatch or an unrecognized version
-fails before credential preparation, image construction, or container startup.
+An unsupported host Major or a pin in a different Major fails before credential
+preparation, image construction, or container startup.
 V1 copies your existing `auth.json` with private file permissions. V2 uses the
 official local `auth export` and container `auth import` commands, piping
 credentials through stdin into this Summary's temporary state. Recovery reuses
@@ -287,7 +286,7 @@ uv run pre-commit run --all-files
 
 The lint script checks Python style, types, dead code, dependencies, and domain documentation. Without `--check`, it also fixes and formats Python files. The full pre-commit suite includes tests and `jscpd` duplication detection. Summary integration requires Docker and OpenCode credentials.
 
-Run the isolated OpenCode collection integration suite with Docker:
+Run the isolated OpenCode Collector and Summary image suite with Docker:
 
 ```bash
 ./scripts/test-opencode-integration.sh

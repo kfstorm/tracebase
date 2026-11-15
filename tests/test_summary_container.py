@@ -42,6 +42,8 @@ def test_ensure_image_passes_authoritative_opencode_version_to_build(
     assert calls[1] == [
         "docker",
         "build",
+        "--target",
+        "summary",
         "--tag",
         IMAGE,
         "--file",
@@ -115,7 +117,6 @@ def test_dockerfile_requires_an_explicit_opencode_version() -> None:
 
     assert 'ARG OPENCODE_VERSION\n\nRUN test -n "$OPENCODE_VERSION" \\\n' in dockerfile
     assert "ARG OPENCODE_VERSION=" not in dockerfile
-    assert "https://astral.sh/uv/install.sh" in dockerfile
     assert "uv python install 3.14 --install-dir /opt/tracebase-python" in dockerfile
     assert "name python3.14 -print -quit" in dockerfile
 
@@ -148,7 +149,7 @@ def _container_command(
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
     monkeypatch.setattr("tracebase.summary_container.subprocess.run", run)
-    runner.run(arguments or [], "{}", tmp_path / "stdout")
+    runner.run(arguments or [], tmp_path / "stdout")
     return calls[0]
 
 
@@ -159,6 +160,9 @@ def test_container_mounts_only_model_visible_context(
     command = _container_command(monkeypatch, tmp_path)
 
     assert f"{model_context}:/context:ro" in command
+    assert not any(
+        argument.startswith("OPENCODE_CONFIG_CONTENT=") for argument in command
+    )
 
 
 def test_container_mounts_host_mutable_state_read_only(
@@ -272,7 +276,7 @@ def test_failed_model_run_surfaces_safe_json_error(
     monkeypatch.setattr("tracebase.summary_container.subprocess.run", run)
 
     with pytest.raises(ContainerError) as error:
-        runner.run(["--pure", "run", "--format", "json"], "{}")
+        runner.run(["--pure", "run", "--format", "json"])
 
     assert str(error.value) == f"container command failed with exit code 1; {expected}"
     assert "private evidence" not in str(error.value)
@@ -298,23 +302,22 @@ def test_failed_container_without_json_error_reports_exit_code(
     with pytest.raises(
         ContainerError, match="container command failed with exit code 125"
     ):
-        runner.run(["--pure", "run", "--format", "json"], "{}")
+        runner.run(["--pure", "run", "--format", "json"])
 
 
-def test_v2_run_and_recovery_reuse_private_state_and_current_cli_flags(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("major", [1, 2])
+def test_run_and_recovery_reuse_private_state_and_current_cli_flags(
+    tmp_path, monkeypatch, major
 ):
     state = tmp_path / "state"
     for suffix in ([], ["--session", "ses_synthetic"]):
         command = _container_command(
             monkeypatch,
             tmp_path,
-            major=2,
+            major=major,
             arguments=[
                 "--pure",
                 "run",
-                "--dir",
-                "/work",
                 "--model",
                 "example/model",
                 "--variant",
@@ -324,8 +327,13 @@ def test_v2_run_and_recovery_reuse_private_state_and_current_cli_flags(
             ],
         )
         assert f"{state}:/home/eval/.local:rw" in command
-        assert "--standalone" in command
-        assert "--pure" not in command
         assert "--dir" not in command
-        assert "example/model#high" in command
-        assert "models --refresh" not in command[command.index("-c") + 1]
+        if major == 2:
+            assert "--standalone" in command
+            assert "--pure" not in command
+            assert "example/model#high" in command
+            assert "models --refresh" not in command[command.index("-c") + 1]
+        else:
+            assert "--pure" in command
+            assert "--standalone" not in command
+            assert "--variant" in command and "high" in command
