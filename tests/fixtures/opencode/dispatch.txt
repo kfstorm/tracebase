@@ -1,0 +1,6 @@
+arguments = sys.argv[1:]
+if arguments == ["--version"]:
+    print("1.99.0")
+elif arguments == [
+    "serve", "--hostname", "127.0.0.1", "--port", "0", "--log-level", "ERROR"
+]:

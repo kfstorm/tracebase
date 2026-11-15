@@ -110,12 +110,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
-arguments = sys.argv[1:]
-if arguments == ["--version"]:
-    print("test-host-version")
-elif arguments == [
-    "serve", "--hostname", "127.0.0.1", "--port", "0", "--log-level", "ERROR"
-]:
+__OPENCODE_DISPATCH__
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urlparse(self.path)
@@ -197,7 +192,7 @@ elif len(arguments) == 2 and arguments[0] == "export":
     sys.stdout.buffer.write(content)
 else:
     sys.exit(2)
-""",
+""".replace("__OPENCODE_DISPATCH__", (FIXTURES / "dispatch.txt").read_text()),
             encoding="utf-8",
         )
         executable.chmod(0o755)
@@ -243,7 +238,7 @@ else:
             ).read_bytes()
             metadata = json.loads((snapshot / "snapshot.json").read_text())["metadata"]
             assert metadata["export_command"] == ["opencode", "export", source_id]
-            assert metadata["opencode_version"] == "test-host-version"
+            assert metadata["opencode_version"] == "1.99.0"
             assert metadata["effective_options"] == {
                 "instance_id": "opaque-global-instance"
             }
@@ -462,7 +457,7 @@ else:
     ) -> None:
         monkeypatch.setattr(
             "tracebase.opencode._run_opencode",
-            lambda arguments: b"test-host-version",
+            lambda arguments: b"1.99.0",
         )
         monkeypatch.setattr(
             "tracebase.opencode._run_opencode_to_file",

@@ -126,6 +126,7 @@ def _container_command(
     *,
     mutable_state: Path | None = None,
     arguments: list[str] | None = None,
+    major: int = 1,
 ) -> list[str]:
     runner = ContainerRunner(
         "image",
@@ -136,6 +137,7 @@ def _container_command(
             tmp_path / "state",
             mutable_state=mutable_state,
         ),
+        major=major,
     )
     calls: list[list[str]] = []
 
@@ -297,3 +299,33 @@ def test_failed_container_without_json_error_reports_exit_code(
         ContainerError, match="container command failed with exit code 125"
     ):
         runner.run(["--pure", "run", "--format", "json"], "{}")
+
+
+def test_v2_run_and_recovery_reuse_private_state_and_current_cli_flags(
+    tmp_path, monkeypatch
+):
+    state = tmp_path / "state"
+    for suffix in ([], ["--session", "ses_synthetic"]):
+        command = _container_command(
+            monkeypatch,
+            tmp_path,
+            major=2,
+            arguments=[
+                "--pure",
+                "run",
+                "--dir",
+                "/work",
+                "--model",
+                "example/model",
+                "--variant",
+                "high",
+                *suffix,
+                "Synthetic task",
+            ],
+        )
+        assert f"{state}:/home/eval/.local:rw" in command
+        assert "--standalone" in command
+        assert "--pure" not in command
+        assert "--dir" not in command
+        assert "example/model#high" in command
+        assert "models --refresh" not in command[command.index("-c") + 1]

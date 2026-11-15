@@ -28,13 +28,19 @@ from .mutable_state import (
     reconcile_mutable_state,
     render_mutable_state,
 )
+from .opencode_version import VERSION as _EXACT_VERSION
 from .summary_container import (
     ContainerError,
     ContainerMounts,
     ContainerRunner,
     ensure_image,
 )
-from .summary_opencode import prepare_config, prepare_state
+from .summary_opencode import (
+    OpenCodeError,
+    prepare_config,
+    prepare_state,
+    validate_summary_versions,
+)
 from .summary_planner import (
     PlannedShard,
     append_user_instructions,
@@ -43,12 +49,6 @@ from .summary_planner import (
 )
 from .summary_shards import inspect_shard_plan, inspect_shards
 
-_EXACT_VERSION = re.compile(
-    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
-    r"(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
-    r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?"
-    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
-)
 _MAX_DOCKER_TAG_LENGTH = 128
 _MAX_OUTPUT_LANGUAGE_LENGTH = 35
 # Keep the primary subtag short enough to reject language names without a registry.
@@ -455,6 +455,10 @@ def summarize(
             raise SummaryError("debug output must not overlap other outputs")
     fingerprint_context(request.context)
     resolved_version = resolve_opencode_version(request.opencode_version)
+    try:
+        host = validate_summary_versions(resolved_version)
+    except OpenCodeError as error:
+        raise SummaryError(str(error)) from None
     target.parent.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix=".summary-run.", dir=target.parent))
     provenance: dict[str, Any] = {
@@ -548,12 +552,12 @@ def summarize(
         dockerfile = Path(__file__).parent / "container/Dockerfile"
         runner: Runner
         if runner_factory is None:
-            config = prepare_state(state, request.model)
             image = _image_tag_for_version(resolved_version)
             try:
                 ensure_image(image, dockerfile, resolved_version)
             except ContainerError as error:
                 raise SummaryError(str(error)) from error
+            config = prepare_state(state, request.model, host, image)
             runner = ContainerRunner(
                 image,
                 ContainerMounts(
@@ -564,6 +568,7 @@ def summarize(
                     task=task,
                     mutable_state=work / "MUTABLE_STATE.md",
                 ),
+                major=host.major,
             )
         else:
             runner = runner_factory(work, results)
@@ -625,7 +630,7 @@ def summarize(
     except (SummaryError, OSError, TypeError, ValueError, RuntimeError) as error:
         if isinstance(error, SummaryError):
             summary_error = error
-        elif isinstance(error, ContainerError):
+        elif isinstance(error, (ContainerError, OpenCodeError)):
             summary_error = SummaryError(str(error))
         else:
             summary_error = SummaryError("summary operation failed")

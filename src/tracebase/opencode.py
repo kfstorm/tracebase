@@ -20,6 +20,9 @@ from urllib.request import Request, urlopen
 
 from .archive import ArchiveError, CollectionRun, Snapshot
 from .collector import CollectionContext, CollectionResult
+from .opencode_cli import HydrationProgress
+from .opencode_cli import run_opencode as _run_opencode
+from .opencode_v2 import collect_v2
 from .progress import ProgressEvent, ProgressReporter
 
 _SERVER_URL_PATTERN = re.compile(r"http://127\.0\.0\.1:\d+")
@@ -30,18 +33,6 @@ _SERVER_USERNAME = "tracebase"
 
 def _observation_time() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _run_opencode(arguments: list[str]) -> bytes:
-    try:
-        result = subprocess.run(
-            ["opencode", *arguments], capture_output=True, check=False
-        )
-    except OSError:
-        raise ArchiveError("OpenCode CLI is unavailable") from None
-    if result.returncode != 0:
-        raise ArchiveError("OpenCode CLI operation failed")
-    return result.stdout
 
 
 def _run_opencode_to_file(arguments: list[str], output: BinaryIO) -> None:
@@ -240,6 +231,11 @@ def collect(  # noqa: PLR0915
         )
     )
     opencode_version = _run_opencode(["--version"]).decode("utf-8", "replace").strip()
+    version = re.fullmatch(r"(?:opencode v)?(\d+)\.\d+\.\d+", opencode_version)
+    if version is None or version[1] not in {"1", "2"}:
+        raise ArchiveError("Unsupported OpenCode major version")
+    if version[1] == "2":
+        return collect_v2(run, reporter, opencode_version)
     list_started_at = _observation_time()
     server, server_url, password = _start_server()
     try:
@@ -271,28 +267,12 @@ def collect(  # noqa: PLR0915
             message=f"{len(selected)} sessions selected from {len(sessions)}",
         )
     )
-    reporter.emit(
-        ProgressEvent(
-            kind="start",
-            task_id="opencode.hydrate",
-            label="Hydrating OpenCode sessions",
-            total=len(selected),
-        )
-    )
+    hydration = HydrationProgress(reporter, len(selected))
     project_gaps: list[dict[str, str]] = []
     if project_lookup_gap is not None:
         project_gaps.append(project_lookup_gap)
     for completed, session in enumerate(selected, start=1):
-        reporter.emit(
-            ProgressEvent(
-                kind="update",
-                task_id="opencode.hydrate",
-                completed=completed - 1,
-                total=len(selected),
-                phase="starting",
-                current=session["id"],
-            )
-        )
+        hydration.update(completed - 1, session["id"], "starting")
         observation_started_at = _observation_time()
         export_command = ["opencode", "export", session["id"]]
         temporary_fd, temporary_name = tempfile.mkstemp(
@@ -372,25 +352,9 @@ def collect(  # noqa: PLR0915
                 )
         finally:
             temporary_path.unlink(missing_ok=True)
-        reporter.emit(
-            ProgressEvent(
-                kind="update",
-                task_id="opencode.hydrate",
-                completed=completed,
-                total=len(selected),
-                phase="completed",
-                current=session["id"],
-            )
-        )
+        hydration.update(completed, session["id"], "completed")
 
-    reporter.emit(
-        ProgressEvent(
-            kind="finish",
-            task_id="opencode.hydrate",
-            completed=len(selected),
-            message=f"{len(selected)} sessions",
-        )
-    )
+    hydration.finish()
     return CollectionResult(
         coverage={
             "session_discovery_endpoint": "/experimental/session",

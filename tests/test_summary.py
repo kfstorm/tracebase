@@ -27,6 +27,7 @@ from tracebase.summary import (
     summarize_archive,
 )
 from tracebase.summary_container import ContainerError
+from tracebase.summary_opencode import HostOpenCode
 from tracebase.summary_planner import (
     SHARD_POLICY,
     PlannedShard,
@@ -41,6 +42,10 @@ LONG_VERSION = "1.2.3+" + "a" * 130
 @pytest.fixture(autouse=True)
 def mock_registry_for_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("tracebase.summary.resolve_opencode_version", lambda _: "1.2.3")
+    monkeypatch.setattr(
+        "tracebase.summary_opencode.detect_host",
+        lambda: HostOpenCode("/synthetic/bin/opencode", "1.99.0", 1),
+    )
 
 
 class FakeRunner:
@@ -1816,9 +1821,9 @@ def test_summary_build_uses_resolved_version(
     )
     monkeypatch.setattr(
         "tracebase.summary.ContainerRunner",
-        lambda _image, mounts: FakeRunner(mounts.work, mounts.results),
+        lambda _image, mounts, **_kwargs: FakeRunner(mounts.work, mounts.results),
     )
-    monkeypatch.setattr("tracebase.summary.prepare_state", lambda _state, _model: "{}")
+    monkeypatch.setattr("tracebase.summary.prepare_state", lambda *_args: "{}")
 
     summarize(
         SummaryRequest(
@@ -1856,10 +1861,10 @@ def test_exact_version_reuses_cached_image_without_registry(
         "tracebase.summary.urlopen",
         lambda *args, **kwargs: pytest.fail("registry queried"),
     )
-    monkeypatch.setattr("tracebase.summary.prepare_state", lambda _state, _model: "{}")
+    monkeypatch.setattr("tracebase.summary.prepare_state", lambda *_args: "{}")
     monkeypatch.setattr(
         "tracebase.summary.ContainerRunner",
-        lambda _image, mounts: FakeRunner(mounts.work, mounts.results),
+        lambda _image, mounts, **_kwargs: FakeRunner(mounts.work, mounts.results),
     )
     monkeypatch.setattr("tracebase.summary_container.subprocess.run", docker_run)
 

@@ -89,6 +89,18 @@ regenerations, or edits. ChatGPT `create_time` is the placement timestamp;
 `update_time` and edit mutations are not v1 activity semantics. Canvas/textdocs
 and attachment binaries remain unsupported.
 
+OpenCode collection discovers root and child sessions across all projects and
+directories, including archived sessions. Session `time.updated` selects
+candidates within the Collection Range. Context Activity uses message creation
+time, so archiving a session alone cannot select it for Context.
+
+OpenCode V1 Snapshots retain their native session exports. V2 Snapshots retain
+complete public session-list and message-list responses page by page, with
+request provenance and opaque cursors. Context interprets the selected Snapshot
+offline for either protocol. V2 `user.text` and assistant `content` text become
+dialogue; synthetic, compaction, shell, tool, and other non-dialogue records
+remain only in Source-native Evidence.
+
 ChatGPT omits messages with a non-empty, whitespace-trimmed string
 `metadata.automation_id` from both Activity and Background. Filtering applies
 only to the marked message; ordinary messages in the same conversation remain

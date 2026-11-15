@@ -27,6 +27,7 @@ from .dialogue import (
     dialogue_sort_key,
     project_dialogue,
 )
+from .opencode_v2 import validate_records
 
 if TYPE_CHECKING:
     from .context import ContextExtractionResult, ContextItem
@@ -78,6 +79,9 @@ def _timestamp(value: Any) -> datetime:
 
 
 def _json(snapshot: PublishedSnapshot) -> dict[str, Any]:
+    metadata = snapshot.manifest.get("metadata", {})
+    if metadata.get("protocol") == "opencode-v2":
+        return _v2_payload(snapshot)
     try:
         value = json.loads(snapshot.evidence["session.json"])
     except KeyError, UnicodeDecodeError, json.JSONDecodeError:
@@ -85,6 +89,58 @@ def _json(snapshot: PublishedSnapshot) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ArchiveError("OpenCode session payload is invalid")
     return value
+
+
+def _v2_payload(snapshot: PublishedSnapshot) -> dict[str, Any]:
+    """Interpret registered native pages offline; never require an export file."""
+    requests = snapshot.manifest["metadata"].get("requests")
+    if not isinstance(requests, list):
+        raise ArchiveError("OpenCode V2 evidence provenance is invalid")
+    groups: dict[str, list[Any]] = {"session.list": [], "session.message.list": []}
+    for request in requests:
+        if not isinstance(request, dict) or request.get("operation") not in groups:
+            raise ArchiveError("OpenCode V2 evidence provenance is invalid")
+        try:
+            raw = snapshot.evidence[request["path"]]
+            response = json.loads(raw)
+            parameters = request["parameters"]
+            if not isinstance(response, dict) or not isinstance(response["data"], list):
+                raise ValueError
+            cursor = response["cursor"]
+            if not isinstance(cursor, dict) or not isinstance(parameters, dict):
+                raise ValueError
+        except KeyError, TypeError, ValueError:
+            raise ArchiveError("OpenCode V2 evidence page is invalid") from None
+        group = groups[request["operation"]]
+        expected = group[-1][1]["cursor"].get("next") if group else None
+        if parameters.get("cursor") != expected or (group and expected is None):
+            raise ArchiveError("OpenCode V2 evidence pagination is incomplete")
+        group.append((raw, response, parameters))
+    for group in groups.values():
+        if not group or group[-1][1]["cursor"].get("next") is not None:
+            raise ArchiveError("OpenCode V2 evidence pagination is incomplete")
+    sessions = validate_records(groups["session.list"], messages=False)
+    messages = validate_records(groups["session.message.list"], messages=True)
+    source_id = snapshot.manifest["source_id"]
+    session = next((item for item in sessions if item["id"] == source_id), None)
+    if session is None or any(
+        page[2].get("sessionID") != source_id for page in groups["session.message.list"]
+    ):
+        raise ArchiveError("OpenCode V2 evidence identity is invalid")
+    turns = []
+    for message in messages:
+        if message["type"] not in {"user", "assistant"}:
+            continue
+        parts = (
+            [{"type": "text", "text": message["text"]}]
+            if message["type"] == "user"
+            else message["content"]
+        )
+        turns.append({"role": message["type"], "time": message["time"], "parts": parts})
+    return {
+        "info": session | {"directory": session["location"]["directory"]},
+        "messages": turns,
+    }
 
 
 def _session_header(value: dict[str, Any]) -> dict[str, Any]:
