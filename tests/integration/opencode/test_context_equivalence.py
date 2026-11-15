@@ -8,18 +8,19 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from test_scripted_provider import SELECTED_MODEL, ScriptedProvider, cli, run_provider
 
 from tracebase.archive import load_published_archive
-from tracebase.context import ContextRequest, generate_context
+from tracebase.context import ContextRequest, extract_context, generate_context
 from tracebase.context_inventory import load_context_inventory
 from tracebase.mutable_state import load_mutable_state
+from tracebase.opencode_context import OpenCodeProjection
 
 DIRECTORY = "/workspace/context-equivalence"
 TITLE = "Synthetic context equivalence"
-ROOT = "opencode/workspace/context-equivalence/session/01"
 FROM = "2000-01-01T00:00:00Z"
 TO = "2099-01-01T00:00:00Z"
 PROMPTS = (
@@ -49,7 +50,7 @@ class ConversationProvider(ScriptedProvider):
         return {"content": ANSWERS[matches[0]]}, "stop"
 
 
-def difference(actual, expected, path, regions):
+def difference(actual, expected, path):
     offset = next(
         (
             index
@@ -58,33 +59,21 @@ def difference(actual, expected, path, regions):
         ),
         min(len(actual), len(expected)),
     )
-    lines = actual[:offset].split(b"\n")
-    current = actual.split(b"\n")[len(lines) - 1]
-    if path.endswith("overview.md") and current.startswith(b"Project directory:"):
-        category = "directory"
-    elif path.endswith("overview.md") and len(lines) == 1:
-        category = "title"
-    else:
-        category = "body/structure"
-    for start, end, label in regions:
-        if start <= offset < end:
-            category = label
-            break
     diff = difflib.unified_diff(
-        expected.decode().splitlines(),
-        actual.decode().splitlines(),
+        expected.decode(errors="replace").splitlines(),
+        actual.decode(errors="replace").splitlines(),
         fromfile="expected/V1",
         tofile="actual/V2",
         n=2,
         lineterm="",
     )
     limited = "\n".join(line[:240] for line in itertools.islice(diff, 40))
-    return f"{path}: first differing byte {offset}; category={category}\n{limited}"
+    return f"{path}: first differing byte {offset}\n{limited}"
 
 
-def require_bytes(actual, expected, path, regions=()):
+def require_bytes(actual, expected, path):
     if actual != expected:
-        raise AssertionError(difference(actual, expected, path, regions))
+        raise AssertionError(difference(actual, expected, path))
 
 
 def native_turns(archive, major, session_id, rounds):
@@ -138,45 +127,15 @@ def native_turns(archive, major, session_id, rounds):
     return turns
 
 
-def normalize_dialogue(raw, bucket, turns, path):
-    """Validate every byte before replacing only known message-header spans."""
-    expected = [f"# {bucket.capitalize()}\n\n".encode()]
-    normalized = expected.copy()
-    regions = []
-    offset = len(expected[0])
-    for position, (role, timestamp, text) in enumerate(turns, 1):
-        prefix = f"**{role.capitalize()} · ".encode()
-        suffix = b"**\n\n"
-        header = prefix + timestamp.strftime("%Y-%m-%d %H:%M").encode() + suffix
-        expected.append(header)
-        regions.append((offset, offset + len(prefix), "role/header"))
-        regions.append((offset + len(prefix), offset + len(header), "timestamp/header"))
-        offset += len(header)
-        normalized.append(prefix + f"<TIMESTAMP_{position}>".encode() + suffix)
-        body = text.encode() + (b"\n" if position == len(turns) else b"\n\n")
-        expected.append(body)
-        normalized.append(body)
-        regions.append((offset, offset + len(body), "body"))
-        offset += len(body)
-    require_bytes(raw, b"".join(expected), path, regions)
-    return b"".join(normalized)
-
-
-def verify_output(output, turns, start):
+def verify_output(output, start):
     inventory = load_context_inventory(output)
     state = load_mutable_state(output, inventory)
     assert len(inventory.items) == len(state) == 1
     item = inventory.items[0]
-    assert item.root == ROOT and state[0].observations == ()
+    assert state[0].observations == ()
     request = ContextRequest.parse(*inventory.requested_interval)
     assert request.start == start and request.to_text == TO
-    activity = [turn for turn in turns if request.start <= turn[1] < request.end]
-    background = [turn for turn in turns if turn[1] < request.start]
-    files = {"overview.md", "activity.md"}
-    if background:
-        files.add("background.md")
-    assert set(item.files) == files
-    declared = {f"{ROOT}/{file}" for file in files}
+    declared = {f"{item.root}/{file}" for file in item.files}
     actual = set()
     for path in output.rglob("*"):
         assert not path.is_symlink()
@@ -184,20 +143,13 @@ def verify_output(output, turns, start):
         if path.is_file():
             actual.add(path.relative_to(output).as_posix())
     assert actual == declared | {"index.json", "mutable-state.json"}, sorted(actual)
-    normalized = {}
-    for relative in sorted(declared):
-        raw = (output / relative).read_bytes()
-        if relative.endswith("overview.md"):
-            lines = raw.decode().splitlines()
-            assert lines[0] == f"# {TITLE}"
-            assert lines.count(f"Project directory: `{DIRECTORY}`") == 1
-            assert not any(line.startswith("Working directory:") for line in lines)
-            normalized[relative] = raw
-        else:
-            bucket = Path(relative).stem
-            selected = activity if bucket == "activity" else background
-            normalized[relative] = normalize_dialogue(raw, bucket, selected, relative)
-    return normalized
+    markdown = {
+        relative: (output / relative).read_bytes()
+        for relative in sorted(actual)
+        if Path(relative).suffix == ".md"
+    }
+    assert markdown and all(markdown.values()), "Missing or empty Markdown output"
+    return markdown
 
 
 def verify_results(results):
@@ -210,12 +162,40 @@ def verify_results(results):
     # Use the actual second user creation instant, not wall-clock guesses/sleeps.
     assert multi[1][1] < multi[2][1], "No separable native round boundary"
     boundary = multi[2][1]
-    normalized = {}
+    outputs = {}
     for scenario in SCENARIOS:
         turns = ordinary if scenario == "ordinary" else multi
         start = boundary if scenario == "background" else datetime.fromisoformat(FROM)
-        normalized[scenario] = verify_output(results / scenario, turns, start)
-    return normalized
+        archive = (
+            results / f"{'ordinary' if scenario == 'ordinary' else 'multi'}-archive"
+        )
+        # Check temporal classification on structured data, without parsing Markdown.
+        request = ContextRequest.parse(start.isoformat(), TO)
+        extraction = extract_context(request, load_published_archive(archive))
+        assert len(extraction.items) == 1
+        projection = extraction.items[0].projection
+        assert isinstance(projection, OpenCodeProjection)
+        for bucket, expected in (
+            (
+                projection.dialogue.activity,
+                [turn for turn in turns if start <= turn[1] < request.end],
+            ),
+            (
+                projection.dialogue.background,
+                [turn for turn in turns if turn[1] < start],
+            ),
+        ):
+            assert [
+                (turn.role, turn.timestamp, turn.text) for turn in bucket
+            ] == expected
+        outputs[scenario] = verify_output(results / scenario, start)
+    return outputs
+
+
+def generate_output(archive, request, output):
+    # Only presentation is fixed: collection, projection, and sorting keep native time.
+    with patch("tracebase.dialogue.format_timestamp", return_value="2000-01-01 00:00"):
+        generate_context(archive, request, output)
 
 
 def collect(archive):
@@ -269,7 +249,7 @@ def run_conversations(results, major):
         assert session is None or current == session
         session = current
         collect(results / f"{scenario}-archive")
-        generate_context(
+        generate_output(
             results / f"{scenario}-archive",
             ContextRequest.parse(FROM, TO),
             results / scenario,
@@ -289,7 +269,7 @@ def generate(results):
         session = run_conversations(results, major)
     turns = native_turns(results / "multi-archive", major, session, 2)
     assert turns[1][1] < turns[2][1]
-    generate_context(
+    generate_output(
         results / "multi-archive",
         ContextRequest.parse(turns[2][1].isoformat(), TO),
         results / "background",
@@ -314,60 +294,63 @@ def compare(left, right):
         for path in a:
             require_bytes(b[path], a[path], f"{scenario}/{path}")
             total += 1
-    print(
-        f"Context V1/V2: all {total} Markdown files byte-identical after header-only "
-        "timestamp normalization PASS"
+    print(f"Context V1/V2: all {total} Markdown files directly byte-identical PASS")
+
+
+@pytest.fixture
+def context_output(tmp_path):
+    root = "synthetic/renamed-item"
+    files = {"renamed.md": b"Synthetic content\n", "nested/extra.md": b"More content\n"}
+    for name, content in files.items():
+        path = tmp_path / root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (tmp_path / "index.json").write_text(
+        json.dumps(
+            {
+                "requested_interval": {"from": FROM, "to": TO},
+                "items": [{"root": root, "files": list(files)}],
+            }
+        )
     )
+    (tmp_path / "mutable-state.json").write_text(
+        json.dumps({"items": [{"root": root, "observations": []}]})
+    )
+    return tmp_path, {f"{root}/{name}": content for name, content in files.items()}
+
+
+def test_verify_output_reads_all_markdown_as_opaque_bytes(context_output):
+    output, files = context_output
+    assert verify_output(output, datetime.fromisoformat(FROM)) == files
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "empty"])
+def test_verify_output_rejects_incomplete_tree(context_output, mutation):
+    output, files = context_output
+    path = output / next(iter(files))
+    if mutation == "missing":
+        path.unlink()
+    elif mutation == "extra":
+        (output / "undeclared.md").write_bytes(b"Synthetic extra content")
+    else:
+        for relative in files:
+            (output / relative).write_bytes(b"")
+    with pytest.raises((AssertionError, ValueError)):
+        verify_output(output, datetime.fromisoformat(FROM))
 
 
 @pytest.mark.parametrize(
-    "mutation", ["timestamp", "role", "missing", "duplicate", "order", "body"]
+    "changed", [b"Synthetic content", b"Synthetic content\n\n", b"Changed\n"]
 )
-def test_strict_normalization_rejects_changed_dialogue(mutation):
-    turns = [
-        ("user", datetime(2026, 1, 1, tzinfo=UTC), "Question"),
-        ("assistant", datetime(2026, 1, 1, tzinfo=UTC), "Answer"),
-    ]
-    original = (
-        b"# Activity\n\n**User \xc2\xb7 2026-01-01 00:00**\n\nQuestion\n\n"
-        b"**Assistant \xc2\xb7 2026-01-01 00:00**\n\nAnswer\n"
-    )
-    mutations = {
-        "timestamp": original.replace(b"00:00", b"00:01", 1),
-        "role": original.replace(b"User", b"Assistant", 1),
-        "missing": original[: original.index(b"**Assistant")],
-        "duplicate": original + original,
-        "order": original.replace(b"Question", b"PLACEHOLDER")
-        .replace(b"Answer", b"Question")
-        .replace(b"PLACEHOLDER", b"Answer"),
-        "body": original.replace(b"Question", b"Changed"),
-    }
+def test_byte_comparison_rejects_any_content_difference(changed):
     with pytest.raises(AssertionError, match="first differing byte"):
-        normalize_dialogue(mutations[mutation], "activity", turns, "activity.md")
-
-
-def test_strict_normalization_preserves_heading_like_body_timestamp():
-    time = datetime(2026, 1, 1, tzinfo=UTC)
-    text = ANSWERS[0]
-    raw = f"# Activity\n\n**Assistant · 2026-01-01 00:00**\n\n{text}\n".encode()
-    normalized = normalize_dialogue(
-        raw, "activity", [("assistant", time, text)], "activity.md"
-    )
-    assert (
-        normalized
-        == f"# Activity\n\n**Assistant · <TIMESTAMP_1>**\n\n{text}\n".encode()
-    )
-    changed_body = raw.replace(b"12:34", b"12:35")
-    with pytest.raises(AssertionError, match="category=body"):
-        normalize_dialogue(
-            changed_body, "activity", [("assistant", time, text)], "activity.md"
-        )
+        require_bytes(changed, b"Synthetic content\n", "synthetic.md")
 
 
 def test_difference_limits_diagnostic_output():
     expected = b"original line\n" * 1000
     actual = (b"changed " + b"x" * 1000 + b"\n") * 1000
-    diagnostic = difference(actual, expected, "activity.md", ())
+    diagnostic = difference(actual, expected, "synthetic.md")
     assert "first differing byte 0" in diagnostic
     lines = diagnostic.splitlines()
     assert len(lines) <= 41 and all(len(line) <= 240 for line in lines)

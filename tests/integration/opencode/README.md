@@ -76,27 +76,32 @@ sleep to guess a boundary.
 
 Each output independently passes the production inventory and mutable-state
 validators. Additional assertions check the complete file inventory, containment,
-title and directory, unique native Message IDs, exact role/text sequence, and
-preservation of the first round after resume. The source timestamps come directly
-from V1 exports or V2 Message pages, independently of the Context projection.
+and nonempty Markdown output. Raw Archive checks validate title and directory,
+unique native Message IDs, exact role/text sequence, and preservation of the first
+round after resume. The source timestamps come directly from V1 exports or V2
+Message pages, independently of the Context projection. Structured extraction
+results must retain those same turns and real timestamps in the correct Activity
+and Background groups.
 
-The comparator verifies every dialogue file against its complete expected bytes,
-including native UTC message-header timestamps, before replacing only those
-header timestamp spans with per-file positional placeholders. Literal body
-timestamps, including a heading-like timestamp in the Assistant reply, stay
-unchanged. Missing, repeated, reordered, or edited dialogue fails validation.
-No other content or path normalization is allowed. Session IDs do not appear in
-these Markdown files; explicit titles and identical directories remove the need
-to normalize other metadata.
+Only during each production `generate_context()` call, the test temporarily
+patches `tracebase.dialogue.format_timestamp()` to return `2000-01-01 00:00`.
+This fixes the final time display; collection, classification, and ordering still
+use real timestamps. The production Markdown renderer runs unchanged, and the
+test never rewrites its output. Explicit titles and identical directories keep
+other inputs consistent.
 
 The entry point copies the synthetic Archives and Context directories from both
 stopped containers with `docker cp` into a temporary host directory. A fresh
 networkless comparator container receives a copy, revalidates both results, and
-compares all seven Markdown files byte for byte: `overview.md` and `activity.md`
-for each scenario, plus `background.md` for the Background scenario. It also
-checks every `index.json` file reference and rejects undeclared output files.
-On failure it reports the relative path, first differing byte, difference
-category, and a diff limited to 40 lines of 240 characters each.
+enumerates every Markdown file under each Context Output root. It compares the
+complete relative-path sets and each file's unmodified `read_bytes()` value.
+It derives item roots and file lists from `index.json`, checks every reference,
+and rejects undeclared output files. No expected Markdown template, fixed
+Markdown filename, syntax assertion, or output normalization participates in the
+comparison. Shared renderer changes therefore need no corresponding test changes
+when both versions still produce identical output. On failure it reports the
+relative path, first differing byte, and a diff limited to 40 lines of 240
+characters each.
 
 ## Shared Dockerfile and Summary smoke
 
