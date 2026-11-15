@@ -27,7 +27,7 @@ from .dialogue import (
     dialogue_sort_key,
     project_dialogue,
 )
-from .opencode_v2 import validate_records
+from .opencode_v2 import project_canonical, validate_records
 
 if TYPE_CHECKING:
     from .context import ContextExtractionResult, ContextItem
@@ -145,6 +145,8 @@ def _v2_payload(snapshot: PublishedSnapshot) -> dict[str, Any]:
             if message["type"] == "user"
             else message["content"]
         )
+        # V2 metadata is an open hook/event dictionary, not legacy V1 hidden flags.
+        # Auxiliary messages have distinct types and never become dialogue here.
         turns.append({"role": message["type"], "time": message["time"], "parts": parts})
     return {
         "info": session | {"directory": session["location"]["directory"]},
@@ -175,7 +177,27 @@ def _project_worktree(snapshot: PublishedSnapshot) -> str | None:
     try:
         project = json.loads(raw_project)
     except UnicodeDecodeError, json.JSONDecodeError:
+        if snapshot.manifest.get("metadata", {}).get("protocol") == "opencode-v2":
+            raise ArchiveError("OpenCode V2 Project evidence is invalid") from None
         return None
+    if snapshot.manifest.get("metadata", {}).get("protocol") == "opencode-v2":
+        if (
+            not isinstance(project, dict)
+            or not isinstance(project.get("id"), str)
+            or not project["id"]
+        ):
+            raise ArchiveError("OpenCode V2 Project evidence is invalid")
+        session = json.loads(snapshot.evidence["session.json"])["data"]
+        if project.get("id") != session.get("projectID"):
+            raise ArchiveError("OpenCode V2 Project evidence identity is invalid")
+        provenance = snapshot.manifest["metadata"].get("project_lookup")
+        if provenance != {
+            "operation": "project.list",
+            "parameters": {"archived": "true"},
+            "selection": {"id": project["id"]},
+        }:
+            raise ArchiveError("OpenCode V2 Project evidence provenance is invalid")
+        return project_canonical(project)
     if not isinstance(project, dict) or project.get("id") == "global":
         return None
     worktree = project.get("worktree")

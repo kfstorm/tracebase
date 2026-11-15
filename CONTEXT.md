@@ -106,6 +106,27 @@ protocol. V2 `user.text` and assistant `content` text become
 dialogue; synthetic, compaction, shell, tool, and other non-dialogue records
 remain only in Source-native Evidence.
 
+Tracebase honors `hidden`, `info.hidden`, and `metadata.hidden` for V1 legacy
+compatibility. In V2, message-level `metadata` is an open event/hook dictionary;
+Tracebase does not
+assign hiding semantics to arbitrary keys such as `metadata.hidden`. V2 message
+type and content type determine dialogue eligibility.
+
+OpenCode Project Directory uses archived V1 `project.worktree` or V2
+`project.canonical`, while Working Directory retains the Session directory
+(`location.directory` in V2). V2 `subpath` describes the path inside the current
+checkout and cannot identify the original project's canonical directory.
+Collection fetches the unpaginated V2 `project.list` with `archived=true` once
+when Sessions are selected. Each related `project.json` preserves the complete
+selected native object's JSON bytes, with operation, parameters, and record
+selection provenance; it is not a complete Project-list response. Unrelated
+Projects are not retained in Session Snapshots. Project lookup failure or an
+invalid list aborts publication. Missing Project IDs, absent matching Projects,
+or invalid canonical directories record Acquisition Gaps and fall back to the
+Session directory; global Projects also use the Session directory. Older V2
+Snapshots without Project evidence retain that fallback. Offline Context checks
+Project identity and provenance and never consults Git or a live service.
+
 ChatGPT omits messages with a non-empty, whitespace-trimmed string
 `metadata.automation_id` from both Activity and Background. Filtering applies
 only to the marked message; ordinary messages in the same conversation remain

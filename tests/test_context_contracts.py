@@ -90,6 +90,38 @@ def message(
     }
 
 
+@pytest.mark.parametrize("marker", ["hidden", "info.hidden", "metadata.hidden"])
+@pytest.mark.parametrize("hidden", [True, False, None])
+def test_legacy_opencode_hidden_markers_filter_both_temporal_groups(
+    tmp_path, marker, hidden
+):
+    archive = Archive(tmp_path / "archive")
+    messages = []
+    for day in ("2025-12-31", "2026-01-01"):
+        for role in ("user", "assistant"):
+            marked = message(f"marked-{day}-{role}", f"{day}T01:00:00Z", role=role)
+            if hidden is not None:
+                parent, _, key = marker.rpartition(".")
+                if parent:
+                    marked[parent] = {key: hidden}
+                else:
+                    marked[key] = hidden
+            messages.append(marked)
+            messages.append(
+                message(f"ordinary-{day}-{role}", f"{day}T02:00:00Z", role=role)
+            )
+    publish_opencode(archive, session("synthetic-session", messages=messages), "run-1")
+    context = extract_context(request(), load_archive(archive.root))
+    assert len(context.items) == 1
+    dialogue = context.items[0].projection.dialogue
+    for bucket in (dialogue.activity, dialogue.background):
+        assert len(bucket) == (2 if hidden is True else 4)
+        if hidden is True:
+            assert all(not turn.text.startswith("marked-") for turn in bucket)
+        else:
+            assert any(turn.text.startswith("marked-") for turn in bucket)
+
+
 def bash_tool(end: str | None = None) -> dict[str, object]:
     time_data: dict[str, str] = {"start": "2026-01-01T01:00:00Z"}
     if end is not None:

@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .archive import ArchiveError, CollectionRun, Snapshot
@@ -125,6 +126,57 @@ def validate_records(records: list[Any], *, messages: bool) -> list[dict[str, An
     return records
 
 
+def project_canonical(project: dict[str, Any]) -> str | None:
+    """Accept a source-native absolute directory without consulting the host FS."""
+    value = project.get("canonical")
+    if project.get("id") == "global" or not isinstance(value, str) or "\x00" in value:
+        return None
+    for path in (PurePosixPath(value), PureWindowsPath(value)):
+        if (
+            path.is_absolute()
+            and path != type(path)(path.anchor)
+            and ".." not in path.parts
+        ):
+            return value
+    return None
+
+
+def _projects() -> dict[str, tuple[dict[str, Any], bytes]]:
+    # project.list is unpaginated; archived=true includes inactive project owners.
+    # A lookup failure aborts publication instead of silently changing attribution.
+    raw = run_opencode(
+        ["--standalone", "api", "project.list", "--param", "archived=true"]
+    )
+    try:
+        records = json.loads(raw)
+    except UnicodeDecodeError, json.JSONDecodeError:
+        raise ArchiveError("OpenCode V2 Project response is invalid") from None
+    if not isinstance(records, list) or any(
+        not isinstance(item, dict) for item in records
+    ):
+        raise ArchiveError("OpenCode V2 Project response is invalid")
+    identifiers = [item.get("id") for item in records]
+    if any(not isinstance(value, str) or not value for value in identifiers) or len(
+        set(identifiers)
+    ) != len(identifiers):
+        raise ArchiveError("OpenCode V2 Project identity is invalid")
+
+    # Retain only related native objects, like V1 project.json, but preserve their
+    # exact JSON bytes. Provenance identifies a selected record, not a full response.
+    text = raw.decode()
+    decoder = json.JSONDecoder()
+    position = len(text) - len(text.lstrip()) + 1
+    result = {}
+    for record in records:
+        position += len(text[position:]) - len(text[position:].lstrip())
+        begin = position
+        _, position = decoder.raw_decode(text, position)
+        result[record["id"]] = (record, text[begin:position].encode())
+        position += len(text[position:]) - len(text[position:].lstrip())
+        position += 1  # Comma or closing bracket; neither belongs to the object.
+    return result
+
+
 def collect_v2(
     run: CollectionRun, reporter: ProgressReporter, version: str
 ) -> CollectionResult:
@@ -150,9 +202,12 @@ def collect_v2(
         )
     )
     hydration = HydrationProgress(reporter, len(selected))
+    project_started = _now()
+    projects = _projects() if selected else {}
+    project_gaps = []
     for completed, session in enumerate(selected, start=1):
         hydration.update(completed - 1, session["id"], "starting")
-        observed_from = _now()
+        observed_from = project_started
         parameters = {"sessionID": session["id"]}
         raw_session, response = api("session.get", parameters)
         native_session = validate_records([response.get("data")], messages=False)[0]
@@ -181,6 +236,30 @@ def collect_v2(
                     "parameters": parameters,
                 }
             )
+        project_id = native_session.get("projectID")
+        related = projects.get(project_id) if isinstance(project_id, str) else None
+        gaps = []
+        if not isinstance(project_id, str) or not project_id:
+            gaps.append({"kind": "missing-project-id"})
+        elif related is None:
+            gaps.append({"kind": "missing-project", "project_id": project_id})
+        else:
+            evidence["project.json"] = related[1]
+            if project_id != "global" and project_canonical(related[0]) is None:
+                gaps.append(
+                    {"kind": "invalid-project-directory", "project_id": project_id}
+                )
+        gaps = [gap | {"session_id": session["id"]} for gap in gaps]
+        project_gaps.extend(gaps)
+        project_metadata: dict[str, Any] = {}
+        if related is not None:
+            project_metadata["project_lookup"] = {
+                "operation": "project.list",
+                "parameters": {"archived": "true"},
+                "selection": {"id": project_id},
+            }
+        if gaps:
+            project_metadata["acquisition_gaps"] = gaps
         root = run.write_snapshot(
             Snapshot(
                 source_kind="opencode",
@@ -189,6 +268,7 @@ def collect_v2(
                 observation_window={"from": observed_from, "to": _now()},
                 evidence_files=tuple({"path": path} for path in evidence),
                 metadata={
+                    **project_metadata,
                     "protocol": "opencode-v2",
                     "opencode_version": version,
                     "source_instance_id": run.scope_id,
@@ -212,6 +292,12 @@ def collect_v2(
             ],
             "listed_session_count": len(sessions),
             "selected_session_count": len(selected),
+            "project_lookup": {
+                "operation": "project.list",
+                "parameters": {"archived": "true"},
+                "request_count": int(bool(selected)),
+                "gaps": project_gaps,
+            },
             "observation_window": {"from": started, "to": discovered_at},
         }
     )

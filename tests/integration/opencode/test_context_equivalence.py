@@ -33,6 +33,11 @@ ANSWERS = (
     "Synthetic answer two. Both turns are complete.",
 )
 SCENARIOS = ("ordinary", "multi", "background")
+LAYOUTS = (
+    ("standard", DIRECTORY, DIRECTORY),
+    ("git-subdirectory", "/repo/packages/api", "/repo"),
+    ("git-worktree", "/repo-feature", "/repo"),
+)
 
 
 class ConversationProvider(ScriptedProvider):
@@ -76,7 +81,7 @@ def require_bytes(actual, expected, path):
         raise AssertionError(difference(actual, expected, path))
 
 
-def native_turns(archive, major, session_id, rounds):
+def native_turns(archive, major, session_id, rounds, directory, project_directory):
     """Read source bytes independently of the production projection/renderer."""
     runs = load_published_archive(archive)
     assert len(runs) == 1 and len(runs[0].snapshots) == 1
@@ -96,8 +101,23 @@ def native_turns(archive, major, session_id, rounds):
         ]
     assert info["id"] == session_id and info["title"] == TITLE
     assert not info.get("parentID")
-    directory = info["directory"] if major == 1 else info["location"]["directory"]
-    assert directory == DIRECTORY, repr(directory)
+    working = info["directory"] if major == 1 else info["location"]["directory"]
+    assert working == directory, repr(working)
+    project = json.loads(snapshot.evidence["project.json"])
+    assert project["id"] == info["projectID"]
+    if project["id"] != "global":
+        assert project["worktree" if major == 1 else "canonical"] == project_directory
+    else:
+        assert directory == project_directory
+    if major == 2:
+        assert snapshot.manifest["metadata"]["project_lookup"] == {
+            "operation": "project.list",
+            "parameters": {"archived": "true"},
+            "selection": {"id": info["projectID"]},
+        }
+        assert info.get("subpath", "") == (
+            "packages/api" if directory.endswith("/packages/api") else ""
+        )
     turns = []
     identifiers = []
     for message in messages:
@@ -124,7 +144,7 @@ def native_turns(archive, major, session_id, rounds):
     ]
     assert [(role, text) for role, _, text in turns] == expected, repr(turns)[:4000]
     assert [time for _, time, _ in turns] == sorted(time for _, time, _ in turns)
-    return turns
+    return turns, info["projectID"]
 
 
 def verify_output(output, start):
@@ -152,12 +172,17 @@ def verify_output(output, start):
     return markdown
 
 
-def verify_results(results):
+def verify_conversation(results, directory, project_directory):
     execution = json.loads((results / "execution.json").read_text())
     major, session = execution["major"], execution["session"]
     assert major in {1, 2} and isinstance(session, str) and session
-    ordinary = native_turns(results / "ordinary-archive", major, session, 1)
-    multi = native_turns(results / "multi-archive", major, session, 2)
+    ordinary, project_id = native_turns(
+        results / "ordinary-archive", major, session, 1, directory, project_directory
+    )
+    multi, resumed_project = native_turns(
+        results / "multi-archive", major, session, 2, directory, project_directory
+    )
+    assert project_id == resumed_project
     assert ordinary == multi[:2], "First-round messages changed after --session resume"
     # Use the actual second user creation instant, not wall-clock guesses/sleeps.
     assert multi[1][1] < multi[2][1], "No separable native round boundary"
@@ -175,6 +200,8 @@ def verify_results(results):
         assert len(extraction.items) == 1
         projection = extraction.items[0].projection
         assert isinstance(projection, OpenCodeProjection)
+        assert projection.session["project_directory"] == project_directory
+        assert projection.session["working_directory"] == directory
         for bucket, expected in (
             (
                 projection.dialogue.activity,
@@ -189,6 +216,20 @@ def verify_results(results):
                 (turn.role, turn.timestamp, turn.text) for turn in bucket
             ] == expected
         outputs[scenario] = verify_output(results / scenario, start)
+    return outputs, project_id
+
+
+def verify_results(results):
+    outputs, projects = {}, {}
+    for layout, directory, project_directory in LAYOUTS:
+        scenarios, projects[layout] = verify_conversation(
+            results / layout, directory, project_directory
+        )
+        outputs.update(
+            {f"{layout}/{scenario}": files for scenario, files in scenarios.items()}
+        )
+    assert projects["git-subdirectory"] == projects["git-worktree"]
+    assert projects["git-subdirectory"] != "global"
     return outputs
 
 
@@ -198,7 +239,7 @@ def generate_output(archive, request, output):
         generate_context(archive, request, output)
 
 
-def collect(archive):
+def collect(archive, directory):
     result = subprocess.run(
         [
             "tracebase",
@@ -213,7 +254,7 @@ def collect(archive):
             "--to",
             TO,
         ],
-        cwd=DIRECTORY,
+        cwd=directory,
         capture_output=True,
         text=True,
         timeout=120,
@@ -222,7 +263,7 @@ def collect(archive):
     assert result.returncode == 0, result.stderr[-4000:]
 
 
-def run_conversations(results, major):
+def run_conversations(results, major, directory):
     command = [
         "--pure" if major == 1 else "--standalone",
         "run",
@@ -239,7 +280,7 @@ def run_conversations(results, major):
         arguments = [] if session is None else ["--session", session]
         # V1 quotes space-containing positional arguments. Stdin gives both
         # versions exactly the same original prompt without editing stored text.
-        output = cli(*command, *arguments, cwd=DIRECTORY, input_text=PROMPTS[index])
+        output = cli(*command, *arguments, cwd=directory, input_text=PROMPTS[index])
         events = [
             json.loads(line) for line in output.splitlines() if line.startswith("{")
         ]
@@ -248,7 +289,7 @@ def run_conversations(results, major):
         current = identifiers.pop()
         assert session is None or current == session
         session = current
-        collect(results / f"{scenario}-archive")
+        collect(results / f"{scenario}-archive", directory)
         generate_output(
             results / f"{scenario}-archive",
             ContextRequest.parse(FROM, TO),
@@ -264,19 +305,81 @@ def generate(results):
     major = int(cli("--version").strip().removeprefix("opencode v").split(".")[0])
     Path(DIRECTORY).mkdir()
     subprocess.run(["git", "init", DIRECTORY], capture_output=True, check=True)
+    Path("/repo/packages/api").mkdir(parents=True)
+    subprocess.run(["git", "init", "/repo"], capture_output=True, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            "/repo",
+            "-c",
+            "user.name=Synthetic User",
+            "-c",
+            "user.email=user@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Synthetic root",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            "/repo",
+            "worktree",
+            "add",
+            "-b",
+            "synthetic-feature",
+            "/repo-feature",
+        ],
+        capture_output=True,
+        check=True,
+    )
     results.mkdir()
     with run_provider(ConversationProvider):
-        session = run_conversations(results, major)
-    turns = native_turns(results / "multi-archive", major, session, 2)
-    assert turns[1][1] < turns[2][1]
-    generate_output(
-        results / "multi-archive",
-        ContextRequest.parse(turns[2][1].isoformat(), TO),
-        results / "background",
-    )
-    (results / "execution.json").write_text(
-        json.dumps({"major": major, "session": session})
-    )
+        for layout, directory, project_directory in LAYOUTS:
+            target = results / layout
+            target.mkdir()
+            session = run_conversations(target, major, directory)
+            turns, _ = native_turns(
+                target / "multi-archive",
+                major,
+                session,
+                2,
+                directory,
+                project_directory,
+            )
+            assert turns[1][1] < turns[2][1]
+            generate_output(
+                target / "multi-archive",
+                ContextRequest.parse(turns[2][1].isoformat(), TO),
+                target / "background",
+            )
+            (target / "execution.json").write_text(
+                json.dumps({"major": major, "session": session})
+            )
+            verify_conversation(target, directory, project_directory)
+            # Only disposable, scripted sessions are removed. Keep Project state:
+            # the next linked worktree must resolve to the same existing owner.
+            if major == 1:
+                cli("session", "delete", session, cwd=directory)
+            else:
+                cli(
+                    "--standalone",
+                    "api",
+                    "session.remove",
+                    "--param",
+                    f"sessionID={session}",
+                    cwd=directory,
+                )
+            print(
+                f"Context V{major} {layout}: real run/resume, "
+                "native Project/Working Directory, A/B/C integrity PASS"
+            )
+    (results / "execution.json").write_text(json.dumps({"major": major}))
     verify_results(results)
     print(f"Context V{major}: real run/resume, native timestamps, A/B/C integrity PASS")
 
@@ -286,7 +389,8 @@ def compare(left, right):
     assert json.loads((right / "execution.json").read_text())["major"] == 2
     first, second = verify_results(left), verify_results(right)
     total = 0
-    for scenario in SCENARIOS:
+    assert first.keys() == second.keys()
+    for scenario in first:
         a, b = first[scenario], second[scenario]
         assert set(a) == set(b), (
             f"{scenario}: Markdown path mismatch {sorted(a)} {sorted(b)}"

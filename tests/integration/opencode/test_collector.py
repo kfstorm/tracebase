@@ -353,6 +353,7 @@ def collect_cli(
 
 def verify_native_evidence(major, snapshots):
     directories = set()
+    native_projects = api("project.list", archived="true") if major == 2 else []
     for sid, snapshot in snapshots.items():
         if major == 1:
             raw = snapshot.evidence["session.json"]
@@ -371,9 +372,11 @@ def verify_native_evidence(major, snapshots):
                 request["operation"] in {"session.get", "session.message.list"}
                 for request in requests
             )
-            assert set(snapshot.evidence) == {request["path"] for request in requests}
+            assert set(snapshot.evidence) == {
+                request["path"] for request in requests
+            } | {"project.json"}
             assert all(
-                path == "session.json" or path.startswith("messages/")
+                path in {"session.json", "project.json"} or path.startswith("messages/")
                 for path in snapshot.evidence
             )
             for request in requests:
@@ -384,6 +387,10 @@ def verify_native_evidence(major, snapshots):
                 assert raw == cli(*args)
                 if request["operation"] == "session.get":
                     directories.add(json.loads(raw)["data"]["location"]["directory"])
+            project = json.loads(snapshot.evidence["project.json"])
+            session = json.loads(snapshot.evidence["session.json"])["data"]
+            assert project["id"] == session["projectID"]
+            assert project in native_projects
             if sid.endswith("0000"):
                 messages = [
                     request

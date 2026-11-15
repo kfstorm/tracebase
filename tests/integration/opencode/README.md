@@ -41,7 +41,10 @@ separate unit tests.
 V2 runs with a two-record page limit in the test process to exercise real
 session and message pagination without hundreds of fixtures. API responses are
 compared byte for byte with preserved `session.json` and Message pages. Each
-Snapshot contains only its own `session.get` response and Message pages. Global
+Snapshot contains its own `session.get` response, Message pages, and the related
+native Project object from the unpaginated `project.list(archived=true)` response.
+The Project object retains all its original JSON bytes and selection provenance;
+it is checked against an independent native list. Global
 discovery statistics, requests, page counts, and observation times are checked in
 Run Coverage. V1 exercises its full export;
 its discovery endpoint does not expose a continuation contract Tracebase can
@@ -65,6 +68,15 @@ positional arguments. The fixture sets the same explicit title, working
 directory, and `PWD` for both versions. OpenCode creates every Session and
 Message; this test neither imports sessions nor opens or edits the database.
 Its HOME/XDG state is separate from the imported-fixture tests.
+
+The same conversation checks run from a standard directory, a committed Git
+repository's `packages/api` subdirectory, and a linked Git worktree created by
+`git worktree add`. The subdirectory runs before the linked worktree, so both
+versions already know the original project. Between layouts, the fixture deletes
+only its scripted Session through the real CLI/API and keeps Project state.
+Raw evidence and structured Context must identify the same Project owner, use
+the original repository as Project Directory, and retain each distinct Working
+Directory. No assertion depends on how Markdown displays those directories.
 
 After each round, the test runs `tracebase collect opencode` into a separate
 synthetic Archive and calls production `generate_context()`. It checks three
