@@ -129,7 +129,10 @@ def _parser() -> argparse.ArgumentParser:
         help="UTF-8 plain-text summary preferences",
     )
     summary.add_argument(
-        "--opencode-version", default="latest", metavar="VERSION_OR_TAG"
+        "--opencode-version",
+        default="latest",
+        metavar="VERSION",
+        help="latest official release in the host OpenCode Major, or an exact version",
     )
     summary.add_argument("--output", required=True)
     summary.add_argument("--context-output")

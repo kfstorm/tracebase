@@ -1,0 +1,17 @@
+name: OpenCode integration
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test both OpenCode majors in Docker
+        run: ./scripts/test-opencode-integration.sh

@@ -28,13 +28,18 @@ from .mutable_state import (
     reconcile_mutable_state,
     render_mutable_state,
 )
+from .opencode_version import VERSION as _EXACT_VERSION
 from .summary_container import (
     ContainerError,
     ContainerMounts,
     ContainerRunner,
     ensure_image,
 )
-from .summary_opencode import prepare_config, prepare_state
+from .summary_opencode import (
+    OpenCodeError,
+    detect_host,
+    prepare_state,
+)
 from .summary_planner import (
     PlannedShard,
     append_user_instructions,
@@ -43,12 +48,6 @@ from .summary_planner import (
 )
 from .summary_shards import inspect_shard_plan, inspect_shards
 
-_EXACT_VERSION = re.compile(
-    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
-    r"(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
-    r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?"
-    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
-)
 _MAX_DOCKER_TAG_LENGTH = 128
 _MAX_OUTPUT_LANGUAGE_LENGTH = 35
 # Keep the primary subtag short enough to reject language names without a registry.
@@ -126,35 +125,44 @@ def _normalize_summary_language(value: str | None) -> str | None:
         raise SummaryError("invalid output language tag") from error
 
 
-def resolve_opencode_version(requested: str) -> str:
-    """Use an exact version directly or resolve an opencode-ai npm dist-tag."""
+def resolve_opencode_version(requested: str, major: int) -> str:
+    """Select a pin or the latest official release in the host's Major series."""
     if _EXACT_VERSION.fullmatch(requested):
+        if int(requested.partition(".")[0]) != major:
+            raise SummaryError("invalid OpenCode version selection for host Major")
         return requested
-    try:
-        request = Request(
-            "https://registry.npmjs.org/opencode-ai",
-            headers={"Accept": "application/vnd.npm.install-v1+json"},
-        )
-        with urlopen(request, timeout=15) as response:
-            metadata = json.load(response)
-    except (OSError, URLError, TimeoutError) as error:
-        raise SummaryError("could not query npm registry for opencode-ai") from error
-    except (ValueError, UnicodeError) as error:
-        raise SummaryError("invalid opencode-ai response from npm registry") from error
-
-    if not isinstance(metadata, dict):
-        raise SummaryError("invalid opencode-ai response from npm registry")
-    tags = metadata.get("dist-tags")
-    if not isinstance(tags, dict):
-        raise SummaryError("invalid opencode-ai response from npm registry")
-    if requested not in tags:
-        raise SummaryError(
-            f"invalid OpenCode version or unknown opencode-ai dist-tag {requested!r}"
-        )
-    resolved = tags[requested]
-    if not isinstance(resolved, str) or _EXACT_VERSION.fullmatch(resolved) is None:
-        raise SummaryError("invalid opencode-ai response from npm registry")
-    return resolved
+    if requested != "latest":
+        raise SummaryError("invalid OpenCode version selection; use latest or a pin")
+    page = 1
+    while True:
+        try:
+            request = Request(
+                "https://api.github.com/repos/anomalyco/opencode/releases"
+                f"?per_page=100&page={page}",
+                headers={"Accept": "application/vnd.github+json"},
+            )
+            with urlopen(request, timeout=15) as response:
+                releases = json.load(response)
+        except (OSError, URLError, TimeoutError) as error:
+            raise SummaryError("could not query OpenCode GitHub releases") from error
+        except (ValueError, UnicodeError) as error:
+            raise SummaryError("invalid OpenCode GitHub releases response") from error
+        if not isinstance(releases, list) or any(
+            not isinstance(release, dict) for release in releases
+        ):
+            raise SummaryError("invalid OpenCode GitHub releases response")
+        for release in releases:
+            tag = release.get("tag_name", "")
+            if (
+                release.get("draft") is False
+                and release.get("prerelease") is False
+                and isinstance(tag, str)
+                and re.fullmatch(rf"v{major}\.\d+\.\d+", tag)
+            ):
+                return tag[1:]
+        if not releases:
+            raise SummaryError(f"no official OpenCode V{major} release found")
+        page += 1
 
 
 def _image_tag_for_version(version: str) -> str:
@@ -162,14 +170,13 @@ def _image_tag_for_version(version: str) -> str:
     tag = version.replace("+", "_")
     if len(tag) > _MAX_DOCKER_TAG_LENGTH:
         tag = "sha256-" + hashlib.sha256(version.encode("utf-8")).hexdigest()
-    return f"tracebase-opencode:{tag}"
+    return f"tracebase-opencode-summary:{tag}"
 
 
 class Runner(Protocol):
     def run(
         self,
         arguments: list[str],
-        config: str,
         stdout_path: Path | None = None,
     ) -> Any: ...
 
@@ -299,7 +306,6 @@ def _root_session_id(output: str) -> str:
 def _run_stage(
     runtime: Path,
     runner: Runner,
-    config: str,
     model: str,
     variant: str | None,
 ) -> tuple[str, list[str]]:
@@ -310,14 +316,12 @@ def _run_stage(
         "json",
         "--model",
         model,
-        "--dir",
-        "/work",
         "--auto",
     ]
     if variant:
         command.extend(["--variant", variant])
     command.append("Read /work/TASK.md and complete the task described there.")
-    initial = runner.run(command, config)
+    initial = runner.run(command)
     (runtime / "stdout.jsonl").write_text(initial.stdout, encoding="utf-8")
     (runtime / "stderr.log").write_text(initial.stderr, encoding="utf-8")
     return _root_session_id(initial.stdout), command
@@ -335,7 +339,6 @@ def _recovery_prompt(errors: tuple[str, ...], result_missing: bool) -> str:
 def _run_recovery(
     runtime: Path,
     runner: Runner,
-    config: str,
     command: list[str],
     root_id: str,
     errors: tuple[str, ...],
@@ -352,7 +355,7 @@ def _run_recovery(
         root_id,
         _recovery_prompt(errors, result_missing),
     ]
-    resumed = runner.run(recovery, config)
+    resumed = runner.run(recovery)
     (runtime / "root-recovery.stdout.jsonl").write_text(
         resumed.stdout, encoding="utf-8"
     )
@@ -454,7 +457,13 @@ def summarize(
         ):
             raise SummaryError("debug output must not overlap other outputs")
     fingerprint_context(request.context)
-    resolved_version = resolve_opencode_version(request.opencode_version)
+    try:
+        host = detect_host()
+        resolved_version = resolve_opencode_version(
+            request.opencode_version, host.major
+        )
+    except OpenCodeError as error:
+        raise SummaryError(str(error)) from None
     target.parent.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix=".summary-run.", dir=target.parent))
     provenance: dict[str, Any] = {
@@ -548,12 +557,12 @@ def summarize(
         dockerfile = Path(__file__).parent / "container/Dockerfile"
         runner: Runner
         if runner_factory is None:
-            config = prepare_state(state, request.model)
             image = _image_tag_for_version(resolved_version)
             try:
                 ensure_image(image, dockerfile, resolved_version)
             except ContainerError as error:
                 raise SummaryError(str(error)) from error
+            prepare_state(state, host, image)
             runner = ContainerRunner(
                 image,
                 ContainerMounts(
@@ -564,16 +573,14 @@ def summarize(
                     task=task,
                     mutable_state=work / "MUTABLE_STATE.md",
                 ),
+                major=host.major,
             )
         else:
             runner = runner_factory(work, results)
-            config = prepare_config(request.model)
         provenance["opencode_version"] = runner.run(
-            ["--pure", "--version"], config
+            ["--pure", "--version"]
         ).stdout.strip()
-        root_id, command = _run_stage(
-            runtime, runner, config, request.model, request.variant
-        )
+        root_id, command = _run_stage(runtime, runner, request.model, request.variant)
         validation_errors = inspect_shards(
             work,
             context_host,
@@ -585,7 +592,6 @@ def summarize(
             validation_errors, result_present = _run_recovery(
                 runtime,
                 runner,
-                config,
                 command,
                 root_id,
                 validation_errors,
@@ -625,7 +631,7 @@ def summarize(
     except (SummaryError, OSError, TypeError, ValueError, RuntimeError) as error:
         if isinstance(error, SummaryError):
             summary_error = error
-        elif isinstance(error, ContainerError):
+        elif isinstance(error, (ContainerError, OpenCodeError)):
             summary_error = SummaryError(str(error))
         else:
             summary_error = SummaryError("summary operation failed")

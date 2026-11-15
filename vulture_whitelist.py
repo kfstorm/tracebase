@@ -4,3 +4,5 @@ _.write_snapshot  # Used by source collectors as they are implemented.
 _.write_evidence  # Used by source collectors as they are implemented.
 _.publish  # Used by source collectors as they are implemented.
 mock_registry_for_summaries  # Autouse pytest fixture for offline Summary tests.
+_.do_POST  # BaseHTTPRequestHandler dispatches the synthetic integration provider.
+_.log_message  # BaseHTTPRequestHandler logging override for the smoke provider.

@@ -10,6 +10,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .opencode_version import V1_MAJOR, V2_MAJOR
+
 
 class ContainerError(RuntimeError):
     """Raised when the evaluation container cannot run a command."""
@@ -62,14 +64,15 @@ class ContainerMounts:
 
 
 class ContainerRunner:
-    def __init__(self, image: str, mounts: ContainerMounts):
+    def __init__(self, image: str, mounts: ContainerMounts, *, major: int = 1):
         self.image = image
         self.mounts = mounts
+        self.major = major
 
-    def _command(
-        self, arguments: list[str], config: str, stdout_path: Path
-    ) -> list[str]:
+    def _command(self, arguments: list[str], stdout_path: Path) -> list[str]:
         mounts = self.mounts
+        if self.major == V2_MAJOR:
+            arguments = _v2_arguments(arguments)
         command = [
             "docker",
             "run",
@@ -118,22 +121,22 @@ class ContainerRunner:
                 "XDG_DATA_HOME=/home/eval/.local/share",
                 "--env",
                 "NO_COLOR=1",
-                "--env",
-                f"OPENCODE_CONFIG_CONTENT={config}",
                 self.image,
             ]
         )
         # The pinned image can contain an older model catalog than the host.
         # Refresh it in the same container before resolving the requested model.
         shell_command = 'exec opencode "$@" > /export.stdout'
-        if arguments[:2] == ["--pure", "run"] or arguments[:1] == ["run"]:
+        if self.major == V1_MAJOR and (
+            arguments[:2] == ["--pure", "run"] or arguments[:1] == ["run"]
+        ):
             shell_command = "opencode models --refresh >/dev/null && " + shell_command
         command.extend(["-c", shell_command, "opencode"])
         command.extend(arguments)
         return command
 
     def run(
-        self, arguments: list[str], config: str, stdout_path: Path | None = None
+        self, arguments: list[str], stdout_path: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
         try:
             with tempfile.TemporaryDirectory() as temporary_directory:
@@ -141,7 +144,7 @@ class ContainerRunner:
                 capture_path.parent.mkdir(parents=True, exist_ok=True)
                 capture_path.write_text("", encoding="utf-8")
                 result = subprocess.run(
-                    self._command(arguments, config, capture_path),
+                    self._command(arguments, capture_path),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -161,6 +164,18 @@ class ContainerRunner:
         )
 
 
+def _v2_arguments(arguments: list[str]) -> list[str]:
+    """Keep every invocation, including Recovery, on the shared private state."""
+    result = [argument for argument in arguments if argument != "--pure"]
+    if "--variant" in result:
+        index = result.index("--variant")
+        variant = result[index + 1]
+        del result[index : index + 2]
+        model_index = result.index("--model") + 1
+        result[model_index] += f"#{variant}"
+    return ["--standalone", *result]
+
+
 def ensure_image(image: str, dockerfile: Path, opencode_version: str) -> None:
     """Build the pinned local image once when it is not already available."""
     try:
@@ -177,6 +192,8 @@ def ensure_image(image: str, dockerfile: Path, opencode_version: str) -> None:
         [
             "docker",
             "build",
+            "--target",
+            "summary",
             "--tag",
             image,
             "--file",

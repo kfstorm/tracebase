@@ -77,6 +77,10 @@ email addresses, and Context Output does not redact them.
 
 ### Collect OpenCode Sessions
 
+Collection supports the latest stable OpenCode V1 and V2 releases. Tracebase
+selects the protocol by Major version, without a Minor/Patch version ceiling.
+Previously collected V1 archives remain readable for offline Context generation.
+
 Choose any instance ID that is unique across machines and stays the same for every collection on the same machine. Tracebase uses it to detect overlapping Collection Ranges and prevent duplicate collection. A machine name is valid if it meets both conditions; if the machine is renamed, keep using the original ID.
 
 The following command prompts for your chosen ID:
@@ -182,18 +186,27 @@ For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebas
 
 ### Generate a Work Summary
 
-The `summary` command runs the production Summarizer in a pinned Docker image. It requires Docker and a configured OpenCode authentication file so the selected model can run. The archive mode creates Context Output from the requested range, then publishes `summary.md` and `manifest.json`:
+The `summary` command runs the production Summarizer in a pinned Docker image. It requires Docker and an authenticated host OpenCode CLI so the selected model can run. The archive mode creates Context Output from the requested range, then publishes `summary.md` and `manifest.json`:
 
 Use `--language LANGUAGE` to choose the natural language for the Summary text and
 headings. For example, `--language zh-CN` requests Simplified Chinese. Omit the
 option to keep the current language behavior.
 
-By default, Summary resolves the `latest` tag for `opencode-ai` through the npm
-registry before running. Use `--opencode-version VERSION_OR_TAG` to select an
-exact version or an existing dist-tag such as `beta` or `next`. Dist-tags require
-registry access; an exact version can reuse a cached Docker image offline. The
-resolved version determines the Docker image and build version; the manifest
-records the version reported by OpenCode inside the container.
+Summary detects the host OpenCode Major (V1 or V2). By default,
+`--opencode-version latest` selects the latest official GitHub release in that
+Major series. Use `--opencode-version VERSION` to pin an exact version in the
+same series. `latest` requires GitHub API access; an exact version can reuse a
+cached Docker image offline. The manifest records the version reported by
+OpenCode inside the container. Summary does not upgrade your host CLI.
+
+An unsupported host Major or a pin in a different Major fails before credential
+preparation, image construction, or container startup.
+V1 copies your existing `auth.json` with private file permissions. V2 uses the
+official local `auth export` and container `auth import` commands, piping
+credentials through stdin into this Summary's temporary state. Recovery reuses
+that state, which is removed when Summary finishes. Cross-Major credential
+transfer is unsupported. This restriction does not affect collection or offline
+Context generation from V1 or V2 archives.
 
 ```bash
 uv run tracebase summary \
@@ -272,6 +285,16 @@ uv run pre-commit run --all-files
 ```
 
 The lint script checks Python style, types, dead code, dependencies, and domain documentation. Without `--check`, it also fixes and formats Python files. The full pre-commit suite includes tests and `jscpd` duplication detection. Summary integration requires Docker and OpenCode credentials.
+
+Run the isolated OpenCode Collector and Summary image suite with Docker:
+
+```bash
+./scripts/test-opencode-integration.sh
+```
+
+Every invocation tests both V1 and V2 with synthetic data and no credentials.
+CI uses the same entry point. See the [integration test guide](tests/integration/opencode/README.md)
+for version pins, coverage, and fixture initialization.
 
 See [AGENTS.md](AGENTS.md) for contributor guardrails, [CONTEXT.md](CONTEXT.md) for domain terminology, and [GitHub issue conventions](docs/agents/issue-tracker.md) for planning work.
 

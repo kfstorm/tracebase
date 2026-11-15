@@ -138,12 +138,7 @@ SOURCE_RESPONSE_MARKER = "__SOURCE_RESPONSE_MARKER__"
 SESSION_EXPORT_MARKER = "__SESSION_EXPORT_MARKER__"
 SESSION_EXPORT = __SESSION_EXPORT__
 
-arguments = sys.argv[1:]
-if arguments == ["--version"]:
-    print("synthetic-opencode-18")
-elif arguments == [
-    "serve", "--hostname", "127.0.0.1", "--port", "0", "--log-level", "ERROR"
-]:
+__OPENCODE_DISPATCH__
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             body = json.dumps([
@@ -197,6 +192,9 @@ else:
                 "__SOURCE_RESPONSE_MARKER__": SOURCE_RESPONSE_MARKER,
                 "__SESSION_EXPORT_MARKER__": SESSION_EXPORT_MARKER,
                 "__SESSION_EXPORT__": repr(OPENCODE_SESSION_EXPORT),
+                "__OPENCODE_DISPATCH__": (
+                    Path(__file__).parent / "fixtures/opencode/dispatch.txt"
+                ).read_text(),
             },
         ),
     )
