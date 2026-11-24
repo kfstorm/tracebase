@@ -247,6 +247,10 @@ def verify_results(results):
         )
     assert projects["git-subdirectory"] == projects["git-worktree"]
     assert projects["git-subdirectory"] != "global"
+    execution = json.loads((results / "execution.json").read_text())
+    outputs["standard/fork"] = verify_fork(
+        results, execution["major"], execution["fork_session"]
+    )
     return outputs
 
 
@@ -316,7 +320,7 @@ def delete_session(major, directory, session):
         )
 
 
-def verify_fork(results, major, directory):
+def generate_fork(results, major, directory):
     source = run_turn(major, directory, FORK_EXCHANGES[0][0])
     for prompt, _ in FORK_EXCHANGES[1:4]:
         assert run_turn(major, directory, prompt, "--session", source) == source
@@ -328,25 +332,44 @@ def verify_fork(results, major, directory):
 
     archive = results / "fork-archive"
     collect(archive, directory)
-    _, _, native_messages = native_session(archive, major, fork)
-    # Prove the provider actually copied the oldest exchange that Context drops.
+    generate_output(archive, ContextRequest.parse(FROM, TO), results / "fork")
+    return fork
+
+
+def verify_fork(results, major, fork):
+    archive = results / "fork-archive"
+    _, info, native_messages = native_session(archive, major, fork)
+    assert info["id"] == fork
+    turns = native_dialogue(major, native_messages)
+    # The archive must include the oldest exchange even though Context drops it.
     messages = list(itertools.chain.from_iterable(FORK_EXCHANGES))
-    assert [text for _, _, text in native_dialogue(major, native_messages)] == messages
+    assert [(role, text) for role, _, text in turns] == [
+        turn
+        for prompt, answer in FORK_EXCHANGES
+        for turn in (("user", prompt), ("assistant", answer))
+    ]
 
     # The request covers every exchange; ordinary time filtering cannot put
-    # inherited messages in Background. The oldest exchange must be dropped.
-    output = results / "fork"
-    generate_context(archive, ContextRequest.parse(FROM, TO), output)
-    files = verify_output(output, datetime.fromisoformat(FROM))
-    for filename, expected in (
-        ("activity.md", list(FORK_EXCHANGES[4])),
-        ("background.md", list(itertools.chain.from_iterable(FORK_EXCHANGES[1:4]))),
+    # inherited messages in Background.
+    request = ContextRequest.parse(FROM, TO)
+    assert all(request.start <= time < request.end for _, time, _ in turns)
+    (item,) = extract_context(request, load_published_archive(archive)).items
+    projection = item.projection
+    assert isinstance(projection, OpenCodeProjection)
+    files = verify_output(results / "fork", request.start)
+    for name, bucket, expected in (
+        ("activity", projection.dialogue.activity, turns[8:]),
+        ("background", projection.dialogue.background, turns[2:8]),
     ):
-        (body,) = (data for path, data in files.items() if Path(path).name == filename)
+        assert [(turn.role, turn.timestamp, turn.text) for turn in bucket] == expected
+        (body,) = (
+            data for path, data in files.items() if Path(path).name == f"{name}.md"
+        )
         assert [line for line in body.decode().splitlines() if line in messages] == (
-            expected
+            [text for _, _, text in expected]
         ), body.decode()
     print(f"Context V{major}: native fork without source, Background limit PASS")
+    return files
 
 
 def run_conversations(results, major, directory):
@@ -436,8 +459,10 @@ def generate(results):
                 f"Context V{major} {layout}: real run/resume, "
                 "native Project/Working Directory, A/B/C integrity PASS"
             )
-        verify_fork(results, major, DIRECTORY)
-    (results / "execution.json").write_text(json.dumps({"major": major}))
+        fork = generate_fork(results, major, DIRECTORY)
+    (results / "execution.json").write_text(
+        json.dumps({"major": major, "fork_session": fork})
+    )
     verify_results(results)
     print(f"Context V{major}: real run/resume, native timestamps, A/B/C integrity PASS")
 
