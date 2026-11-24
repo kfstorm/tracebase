@@ -78,6 +78,13 @@ Raw evidence and structured Context must identify the same Project owner, use
 the original repository as Project Directory, and retain each distinct Working
 Directory. No assertion depends on how Markdown displays those directories.
 
+For both Majors, the suite also creates a real fork from a four-exchange
+conversation, removes the synthetic source Session, and collects the fork alone.
+It verifies the native fork still contains all exchanges, while Context keeps
+only the newest three inherited user turns in Background and leaves the new fork
+turn in Activity. The request covers every exchange so the assertion exercises
+fork classification rather than ordinary time-range filtering.
+
 After each round, the test runs `tracebase collect opencode` into a separate
 synthetic Archive and calls production `generate_context()`. It checks three
 outputs: the first round alone, both rounds as Activity, and the first round as
