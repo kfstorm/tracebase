@@ -217,6 +217,15 @@ def _created(value: dict[str, Any]) -> datetime:
     raise ArchiveError("OpenCode message payload is invalid")
 
 
+def _session_created(value: dict[str, Any]) -> datetime | None:
+    info = value.get("info")
+    info = info if isinstance(info, dict) else value
+    time_data = info.get("time", value.get("time"))
+    if not isinstance(time_data, dict) or time_data.get("created") is None:
+        return None
+    return _timestamp(time_data["created"])
+
+
 def _hidden(value: dict[str, Any]) -> bool:
     info = value.get("info")
     metadata = value.get("metadata")
@@ -276,6 +285,7 @@ def project_opencode(
     """Project only user/assistant text using message creation time."""
     source_id = snapshot.manifest["source_id"]
     payload = _json(snapshot)
+    session_created = _session_created(payload)
     info = payload.get("info")
     info = info if isinstance(info, dict) else {}
     payload_id = payload.get("id")
@@ -306,7 +316,7 @@ def project_opencode(
             continue
         turns.append(DialogueTurn(role, _created(message), text))
 
-    dialogue = project_dialogue(turns, start, end)
+    dialogue = project_dialogue(turns, start, end, background_before=session_created)
     if dialogue is None:
         return None
 

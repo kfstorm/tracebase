@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -106,16 +106,81 @@ def chat_snapshot(
     )
 
 
-def opencode_snapshot(messages: list[dict[str, object]]) -> PublishedSnapshot:
+def opencode_snapshot(
+    messages: list[dict[str, object]], *, created: int | None = None
+) -> PublishedSnapshot:
+    info: dict[str, object] = {"id": "session-1", "title": "Synthetic session"}
+    if created is not None:
+        info["time"] = {"created": created}
     payload = {
         "id": "session-1",
-        "info": {"id": "session-1", "title": "Synthetic session"},
+        "info": info,
         "messages": messages,
     }
     return PublishedSnapshot(
         {},
         {"source_id": "session-1"},
         {"session.json": json.dumps(payload).encode()},
+        Path("/synthetic/snapshot"),
+    )
+
+
+def opencode_v2_snapshot(
+    messages: list[dict[str, object]], *, created: int
+) -> PublishedSnapshot:
+    session = {
+        "id": "session-1",
+        "projectID": "global",
+        "location": {"directory": "/workspace/example"},
+        "time": {"created": created, "updated": created + 1000},
+    }
+    native_messages = []
+    for message in messages:
+        timestamp = datetime.fromisoformat(
+            str(message["created"]).replace("Z", "+00:00")
+        )
+        created_ms = int(timestamp.timestamp() * 1000)
+        role = str(message["role"])
+        text = str(message["parts"][0]["text"])
+        native = {
+            "id": message["id"],
+            "type": role,
+            "time": {"created": created_ms},
+        }
+        if role == "user":
+            native["text"] = text
+        else:
+            native["content"] = [{"type": "text", "text": text}]
+        native_messages.append(native)
+
+    requests = [
+        {
+            "path": "session.json",
+            "operation": "session.get",
+            "parameters": {"sessionID": "session-1"},
+        },
+        {
+            "path": "messages/000000.json",
+            "operation": "session.message.list",
+            "parameters": {
+                "sessionID": "session-1",
+                "limit": "200",
+                "order": "asc",
+            },
+        },
+    ]
+    return PublishedSnapshot(
+        {},
+        {
+            "source_id": "session-1",
+            "metadata": {"protocol": "opencode-v2", "requests": requests},
+        },
+        {
+            "session.json": json.dumps({"data": session}).encode(),
+            "messages/000000.json": json.dumps(
+                {"data": native_messages, "cursor": {"next": None, "previous": None}}
+            ).encode(),
+        },
         Path("/synthetic/snapshot"),
     )
 
@@ -198,6 +263,82 @@ def test_opencode_projects_text_only_and_uses_message_created_time() -> None:
     assert projection is not None
     assert [turn.text for turn in projection.dialogue.activity] == ["visible"]
     assert [turn.text for turn in projection.dialogue.background] == ["background"]
+
+
+@pytest.mark.parametrize("protocol", ["v1", "v2"])
+def test_opencode_fork_history_is_background_and_uses_existing_limit(
+    protocol: str,
+) -> None:
+    def at(minutes: int) -> str:
+        return (START + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+    messages = [
+        {
+            "id": f"inherited-user-{index}",
+            "role": "user",
+            "created": at(index * 2 + 1),
+            "parts": [{"type": "text", "text": f"inherited user {index}"}],
+        }
+        for index in range(4)
+    ]
+    messages = [
+        message
+        for index, user_message in enumerate(messages)
+        for message in (
+            user_message,
+            {
+                "id": f"inherited-assistant-{index}",
+                "role": "assistant",
+                "created": at(index * 2 + 2),
+                "parts": [{"type": "text", "text": f"inherited assistant {index}"}],
+            },
+        )
+    ]
+    messages.extend(
+        [
+            {
+                "id": "last-inherited",
+                "role": "assistant",
+                "created": at(9),
+                "parts": [{"type": "text", "text": "last inherited turn"}],
+            },
+            {
+                "id": "first-new-user",
+                "role": "user",
+                "created": at(10),
+                "parts": [{"type": "text", "text": "first new turn"}],
+            },
+            {
+                "id": "first-new-assistant",
+                "role": "assistant",
+                "created": at(11),
+                "parts": [{"type": "text", "text": "new response"}],
+            },
+        ]
+    )
+    session_created = int((START.timestamp() + 10 * 60) * 1000)
+    snapshot = (
+        opencode_snapshot(messages, created=session_created)
+        if protocol == "v1"
+        else opencode_v2_snapshot(messages, created=session_created)
+    )
+
+    projection = project_opencode(snapshot, START, END)
+
+    assert projection is not None
+    assert [turn.text for turn in projection.dialogue.activity] == [
+        "first new turn",
+        "new response",
+    ]
+    assert [turn.text for turn in projection.dialogue.background] == [
+        "inherited user 1",
+        "inherited assistant 1",
+        "inherited user 2",
+        "inherited assistant 2",
+        "inherited user 3",
+        "inherited assistant 3",
+        "last inherited turn",
+    ]
 
 
 def test_opencode_multiple_text_parts_preserve_boundaries_in_markdown(
