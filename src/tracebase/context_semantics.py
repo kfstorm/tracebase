@@ -26,8 +26,10 @@ CONVERSATIONAL_ATTRIBUTION_POLICY = AttributionPolicy(
 
 CONVERSATIONAL_EVIDENCE_POLICY = EvidencePolicy(
     "Only retained text turns are present. Activity records are eligible to "
-    "establish work in the requested interval; background records are earlier "
-    "supporting context only, and later turns are not included. This item can "
+    "establish work in the requested interval. Background records provide "
+    "supporting context only; this includes fork-inherited messages created "
+    "before the fork session, even when their message times fall within the "
+    "requested interval. Later turns are not included. This item can "
     "establish reported work, analysis, decisions, implementation, commands, "
     "tests, or validation, but assistant output alone does not prove an external "
     "side effect. Point-in-time observations about mutable external state remain "
@@ -36,8 +38,10 @@ CONVERSATIONAL_EVIDENCE_POLICY = EvidencePolicy(
 
 CHATGPT_EVIDENCE_POLICY = EvidencePolicy(
     "Only retained text turns are present. Activity records are eligible to "
-    "establish work in the requested interval; background records are earlier "
-    "supporting context only, and later turns are not included. This item is the "
+    "establish work in the requested interval. Background records provide "
+    "supporting context only; this includes the inherited prefix through a "
+    "fork-marked message, even when its message times fall within the requested "
+    "interval. Later turns are not included. This item is the "
     "observed conversation stream; historical branches, regenerations, and edits "
     "are not reconstructed. It can establish reported work, analysis, decisions, "
     "implementation, commands, tests, or validation, but assistant output alone "

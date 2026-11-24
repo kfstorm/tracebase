@@ -32,6 +32,10 @@ ANSWERS = (
     "This heading-like timestamp is literal message body.",
     "Synthetic answer two. Both turns are complete.",
 )
+FORK_EXCHANGES = tuple(
+    (f"Synthetic fork question {number}.", f"Synthetic fork answer {number}.")
+    for number in range(1, 6)
+)
 SCENARIOS = ("ordinary", "multi", "background")
 LAYOUTS = (
     ("standard", DIRECTORY, DIRECTORY),
@@ -49,10 +53,11 @@ class ConversationProvider(ScriptedProvider):
             if message["role"] == "user"
         )
         content = json.dumps(last_user["content"], ensure_ascii=False)
-        matches = [index for index, prompt in enumerate(PROMPTS) if prompt in content]
+        exchanges = (*zip(PROMPTS, ANSWERS, strict=True), *FORK_EXCHANGES)
+        matches = [answer for prompt, answer in exchanges if prompt in content]
         assert len(matches) == 1, content[:1000]
         assert body["model"] == SELECTED_MODEL
-        return {"content": ANSWERS[matches[0]]}, "stop"
+        return {"content": matches[0]}, "stop"
 
 
 def difference(actual, expected, path):
@@ -81,12 +86,13 @@ def require_bytes(actual, expected, path):
         raise AssertionError(difference(actual, expected, path))
 
 
-def native_turns(archive, major, session_id, rounds, directory, project_directory):
-    """Read source bytes independently of the production projection/renderer."""
+def native_session(archive, major, session_id):
     runs = load_published_archive(archive)
-    assert len(runs) == 1 and len(runs[0].snapshots) == 1
-    snapshot = runs[0].snapshots[0]
-    assert snapshot.manifest["source_id"] == session_id
+    assert len(runs) == 1
+    assert [snapshot.manifest["source_id"] for snapshot in runs[0].snapshots] == [
+        session_id
+    ]
+    (snapshot,) = runs[0].snapshots
     payload = json.loads(snapshot.evidence["session.json"])
     if major == 1:
         info = payload["info"]
@@ -99,6 +105,12 @@ def native_turns(archive, major, session_id, rounds, directory, project_director
             if request["operation"] == "session.message.list"
             for message in json.loads(snapshot.evidence[request["path"]])["data"]
         ]
+    return snapshot, info, messages
+
+
+def native_turns(archive, major, session_id, rounds, directory, project_directory):
+    """Read source bytes independently of the production projection/renderer."""
+    snapshot, info, messages = native_session(archive, major, session_id)
     assert info["id"] == session_id and info["title"] == TITLE
     assert not info.get("parentID")
     working = info["directory"] if major == 1 else info["location"]["directory"]
@@ -118,6 +130,18 @@ def native_turns(archive, major, session_id, rounds, directory, project_director
         assert info.get("subpath", "") == (
             "packages/api" if directory.endswith("/packages/api") else ""
         )
+    turns = native_dialogue(major, messages)
+    expected = [
+        turn
+        for index in range(rounds)
+        for turn in (("user", PROMPTS[index]), ("assistant", ANSWERS[index]))
+    ]
+    assert [(role, text) for role, _, text in turns] == expected, repr(turns)[:4000]
+    assert [time for _, time, _ in turns] == sorted(time for _, time, _ in turns)
+    return turns, info["projectID"]
+
+
+def native_dialogue(major, messages):
     turns = []
     identifiers = []
     for message in messages:
@@ -125,8 +149,8 @@ def native_turns(archive, major, session_id, rounds, directory, project_director
         role = metadata["role"] if major == 1 else metadata["type"]
         identifiers.append(metadata["id"])
         if role not in {"user", "assistant"}:
-            # V2 also stores lifecycle records (for example idle) in this stream.
-            assert major == 2 and role == "idle", role
+            # V2 lifecycle and synthetic records are not dialogue turns.
+            assert major == 2 and role in {"idle", "synthetic"}, role
             continue
         if major == 2 and role == "user":
             text = message["text"]
@@ -137,14 +161,7 @@ def native_turns(archive, major, session_id, rounds, directory, project_director
         assert isinstance(created, (int, float)) and not isinstance(created, bool)
         turns.append((role, datetime.fromtimestamp(created / 1000, UTC), text))
     assert len(identifiers) == len(set(identifiers))
-    expected = [
-        turn
-        for index in range(rounds)
-        for turn in (("user", PROMPTS[index]), ("assistant", ANSWERS[index]))
-    ]
-    assert [(role, text) for role, _, text in turns] == expected, repr(turns)[:4000]
-    assert [time for _, time, _ in turns] == sorted(time for _, time, _ in turns)
-    return turns, info["projectID"]
+    return turns
 
 
 def verify_output(output, start):
@@ -230,6 +247,10 @@ def verify_results(results):
         )
     assert projects["git-subdirectory"] == projects["git-worktree"]
     assert projects["git-subdirectory"] != "global"
+    execution = json.loads((results / "execution.json").read_text())
+    outputs["standard/fork"] = verify_fork(
+        results, execution["major"], execution["fork_session"]
+    )
     return outputs
 
 
@@ -263,8 +284,9 @@ def collect(archive, directory):
     assert result.returncode == 0, result.stderr[-4000:]
 
 
-def run_conversations(results, major, directory):
-    command = [
+def run_turn(major, directory, prompt, *arguments):
+    # Stdin avoids V1 quoting space-containing positional arguments.
+    output = cli(
         "--pure" if major == 1 else "--standalone",
         "run",
         "--format",
@@ -274,19 +296,87 @@ def run_conversations(results, major, directory):
         "--auto",
         "--title",
         TITLE,
+        *arguments,
+        cwd=directory,
+        input_text=prompt,
+    )
+    events = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+    identifiers = {event["sessionID"] for event in events if "sessionID" in event}
+    assert len(identifiers) == 1
+    return identifiers.pop()
+
+
+def delete_session(major, directory, session):
+    if major == 1:
+        cli("session", "delete", session, cwd=directory)
+    else:
+        cli(
+            "--standalone",
+            "api",
+            "session.remove",
+            "--param",
+            f"sessionID={session}",
+            cwd=directory,
+        )
+
+
+def generate_fork(results, major, directory):
+    source = run_turn(major, directory, FORK_EXCHANGES[0][0])
+    for prompt, _ in FORK_EXCHANGES[1:4]:
+        assert run_turn(major, directory, prompt, "--session", source) == source
+    fork = run_turn(
+        major, directory, FORK_EXCHANGES[4][0], "--session", source, "--fork"
+    )
+    assert fork != source
+    delete_session(major, directory, source)
+
+    archive = results / "fork-archive"
+    collect(archive, directory)
+    generate_output(archive, ContextRequest.parse(FROM, TO), results / "fork")
+    return fork
+
+
+def verify_fork(results, major, fork):
+    archive = results / "fork-archive"
+    _, info, native_messages = native_session(archive, major, fork)
+    assert info["id"] == fork
+    turns = native_dialogue(major, native_messages)
+    # The archive must include the oldest exchange even though Context drops it.
+    messages = list(itertools.chain.from_iterable(FORK_EXCHANGES))
+    assert [(role, text) for role, _, text in turns] == [
+        turn
+        for prompt, answer in FORK_EXCHANGES
+        for turn in (("user", prompt), ("assistant", answer))
     ]
+
+    # The request covers every exchange; ordinary time filtering cannot put
+    # inherited messages in Background.
+    request = ContextRequest.parse(FROM, TO)
+    assert all(request.start <= time < request.end for _, time, _ in turns)
+    (item,) = extract_context(request, load_published_archive(archive)).items
+    projection = item.projection
+    assert isinstance(projection, OpenCodeProjection)
+    files = verify_output(results / "fork", request.start)
+    for name, bucket, expected in (
+        ("activity", projection.dialogue.activity, turns[8:]),
+        ("background", projection.dialogue.background, turns[2:8]),
+    ):
+        assert [(turn.role, turn.timestamp, turn.text) for turn in bucket] == expected
+        (body,) = (
+            data for path, data in files.items() if Path(path).name == f"{name}.md"
+        )
+        assert [line for line in body.decode().splitlines() if line in messages] == (
+            [text for _, _, text in expected]
+        ), body.decode()
+    print(f"Context V{major}: native fork without source, Background limit PASS")
+    return files
+
+
+def run_conversations(results, major, directory):
     session = None
     for index, scenario in enumerate(("ordinary", "multi")):
         arguments = [] if session is None else ["--session", session]
-        # V1 quotes space-containing positional arguments. Stdin gives both
-        # versions exactly the same original prompt without editing stored text.
-        output = cli(*command, *arguments, cwd=directory, input_text=PROMPTS[index])
-        events = [
-            json.loads(line) for line in output.splitlines() if line.startswith("{")
-        ]
-        identifiers = {event["sessionID"] for event in events if "sessionID" in event}
-        assert len(identifiers) == 1
-        current = identifiers.pop()
+        current = run_turn(major, directory, PROMPTS[index], *arguments)
         assert session is None or current == session
         session = current
         collect(results / f"{scenario}-archive", directory)
@@ -364,22 +454,15 @@ def generate(results):
             verify_conversation(target, directory, project_directory)
             # Only disposable, scripted sessions are removed. Keep Project state:
             # the next linked worktree must resolve to the same existing owner.
-            if major == 1:
-                cli("session", "delete", session, cwd=directory)
-            else:
-                cli(
-                    "--standalone",
-                    "api",
-                    "session.remove",
-                    "--param",
-                    f"sessionID={session}",
-                    cwd=directory,
-                )
+            delete_session(major, directory, session)
             print(
                 f"Context V{major} {layout}: real run/resume, "
                 "native Project/Working Directory, A/B/C integrity PASS"
             )
-    (results / "execution.json").write_text(json.dumps({"major": major}))
+        fork = generate_fork(results, major, DIRECTORY)
+    (results / "execution.json").write_text(
+        json.dumps({"major": major, "fork_session": fork})
+    )
     verify_results(results)
     print(f"Context V{major}: real run/resume, native timestamps, A/B/C integrity PASS")
 

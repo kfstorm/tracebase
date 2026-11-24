@@ -78,6 +78,16 @@ Raw evidence and structured Context must identify the same Project owner, use
 the original repository as Project Directory, and retain each distinct Working
 Directory. No assertion depends on how Markdown displays those directories.
 
+For both Majors, the suite also creates a real fork from a four-exchange
+conversation, removes the synthetic source Session, and collects the fork alone.
+It verifies the native fork still contains all exchanges, while Context keeps
+only the newest three inherited user turns in Background and leaves the new fork
+turn in Activity. The request covers every exchange so the assertion exercises
+fork classification rather than ordinary time-range filtering. The offline
+comparator repeats these checks against the copied Archive, structured
+extraction, and Markdown, then compares the fork's full Markdown output along
+with the ordinary, multi, and background scenarios.
+
 After each round, the test runs `tracebase collect opencode` into a separate
 synthetic Archive and calls production `generate_context()`. It checks three
 outputs: the first round alone, both rounds as Activity, and the first round as
@@ -95,7 +105,7 @@ Message pages, independently of the Context projection. Structured extraction
 results must retain those same turns and real timestamps in the correct Activity
 and Background groups.
 
-Only during each production `generate_context()` call, the test temporarily
+For all four scenarios, only during `generate_context()`, the test temporarily
 patches `tracebase.dialogue.format_timestamp()` to return `2000-01-01 00:00`.
 This fixes the final time display; collection, classification, and ordering still
 use real timestamps. The production Markdown renderer runs unchanged, and the
@@ -108,12 +118,11 @@ networkless comparator container receives a copy, revalidates both results, and
 enumerates every Markdown file under each Context Output root. It compares the
 complete relative-path sets and each file's unmodified `read_bytes()` value.
 It derives item roots and file lists from `index.json`, checks every reference,
-and rejects undeclared output files. No expected Markdown template, fixed
-Markdown filename, syntax assertion, or output normalization participates in the
-comparison. Shared renderer changes therefore need no corresponding test changes
-when both versions still produce identical output. On failure it reports the
-relative path, first differing byte, and a diff limited to 40 lines of 240
-characters each.
+and rejects undeclared output files. The fork audit checks that Activity and
+Background contain the expected messages. The byte comparison itself treats
+all Markdown files as opaque bytes and does not normalize them. On failure it
+reports the relative path, first differing byte, and a diff limited to 40 lines
+of 240 characters each.
 
 ## Shared Dockerfile and Summary smoke
 
