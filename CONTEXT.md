@@ -89,6 +89,11 @@ regenerations, or edits. ChatGPT `create_time` is the placement timestamp;
 `update_time` and edit mutations are not v1 activity semantics. Canvas/textdocs
 and attachment binaries remain unsupported.
 
+For ChatGPT conversations with a non-empty
+`metadata.branching_from_conversation_id`, Context places the observed text
+prefix through the marked message in Background, even when those message times
+fall within the requested range. This does not require the source conversation.
+
 OpenCode collection discovers root and child sessions across all projects and
 directories, including archived sessions. Session `time.updated` selects
 candidates within the Collection Range. Context Activity uses message creation

@@ -106,6 +106,20 @@ def chat_snapshot(
     )
 
 
+def paged_chat_snapshot(
+    detail_messages: list[dict[str, object]],
+    inherited_messages: list[dict[str, object]],
+) -> PublishedSnapshot:
+    return chat_snapshot(
+        detail_messages,
+        [inherited_messages],
+        descriptors=[
+            ("messages.001.json", "older-messages", 2, "hydration-1"),
+            ("conversation.json", "detail", 1, "hydration-1"),
+        ],
+    )
+
+
 def opencode_snapshot(
     messages: list[dict[str, object]], *, created: int | None = None
 ) -> PublishedSnapshot:
@@ -201,6 +215,16 @@ def assert_activity_output(
     assert [turn.text for turn in transcript.activity] == [expected_text]
     write_activity(path, transcript)
     assert_activity_markdown(path, expected_text)
+
+
+def assert_dialogue_buckets(
+    transcript: DialogueTranscript,
+    *,
+    activity: list[str],
+    background: list[str],
+) -> None:
+    assert [turn.text for turn in transcript.activity] == activity
+    assert [turn.text for turn in transcript.background] == background
 
 
 def test_shared_dialogue_has_half_open_buckets_and_bounded_background() -> None:
@@ -326,19 +350,19 @@ def test_opencode_fork_history_is_background_and_uses_existing_limit(
     projection = project_opencode(snapshot, START, END)
 
     assert projection is not None
-    assert [turn.text for turn in projection.dialogue.activity] == [
-        "first new turn",
-        "new response",
-    ]
-    assert [turn.text for turn in projection.dialogue.background] == [
-        "inherited user 1",
-        "inherited assistant 1",
-        "inherited user 2",
-        "inherited assistant 2",
-        "inherited user 3",
-        "inherited assistant 3",
-        "last inherited turn",
-    ]
+    assert_dialogue_buckets(
+        projection.dialogue,
+        activity=["first new turn", "new response"],
+        background=[
+            "inherited user 1",
+            "inherited assistant 1",
+            "inherited user 2",
+            "inherited assistant 2",
+            "inherited user 3",
+            "inherited assistant 3",
+            "last inherited turn",
+        ],
+    )
 
 
 def test_opencode_multiple_text_parts_preserve_boundaries_in_markdown(
@@ -423,14 +447,7 @@ def test_chatgpt_reconstructs_oldest_to_detail_without_timestamp_sort() -> None:
     middle_b = chat_message("middle-b", 1767225600, text="middle-b")
     latest = chat_message("latest", 1767229260, role="assistant", text="latest")
     latest["parent_id"] = "unavailable-branch-record"
-    snapshot = chat_snapshot(
-        [middle_a, middle_b, latest],
-        [[old]],
-        descriptors=[
-            ("messages.001.json", "older-messages", 2, "hydration-1"),
-            ("conversation.json", "detail", 1, "hydration-1"),
-        ],
-    )
+    snapshot = paged_chat_snapshot([middle_a, middle_b, latest], [old])
 
     projection = project_chatgpt(snapshot, START, END)
 
@@ -441,6 +458,56 @@ def test_chatgpt_reconstructs_oldest_to_detail_without_timestamp_sort() -> None:
         "latest",
     ]
     assert [turn.text for turn in projection.dialogue.background] == ["old"]
+
+
+def test_chatgpt_fork_history_is_background_across_pages_and_keeps_limit() -> None:
+    inherited = []
+    for index in range(4):
+        inherited.extend(
+            [
+                chat_message(
+                    f"inherited-user-{index}",
+                    1767225610 + index * 60,
+                    text=f"inherited user {index}",
+                ),
+                chat_message(
+                    f"inherited-assistant-{index}",
+                    1767225630 + index * 60,
+                    role="assistant",
+                    text=f"inherited assistant {index}",
+                    metadata=(
+                        {"branching_from_conversation_id": "source-conversation"}
+                        if index == 3
+                        else None
+                    ),
+                ),
+            ]
+        )
+    snapshot = paged_chat_snapshot(
+        [
+            chat_message("new-user", 1767225850, text="first new turn"),
+            chat_message(
+                "new-assistant", 1767225900, role="assistant", text="new response"
+            ),
+        ],
+        inherited,
+    )
+
+    projection = project_chatgpt(snapshot, START, END)
+
+    assert projection is not None
+    assert_dialogue_buckets(
+        projection.dialogue,
+        activity=["first new turn", "new response"],
+        background=[
+            "inherited user 1",
+            "inherited assistant 1",
+            "inherited user 2",
+            "inherited assistant 2",
+            "inherited user 3",
+            "inherited assistant 3",
+        ],
+    )
 
 
 def test_chatgpt_multiple_string_parts_preserve_boundaries_in_activity(

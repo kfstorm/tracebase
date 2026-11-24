@@ -199,13 +199,21 @@ def project_chatgpt(
     """Project the provider-returned current stream without branch recovery."""
     detail, messages = _reconstruct_messages(snapshot)
     turns: list[DialogueTurn] = []
+    background_prefix = 0
     for message in messages:
         turn = _text(message)
-        if turn is None:
-            continue
-        role, text, timestamp = turn
-        turns.append(DialogueTurn(role, timestamp, text))
-    dialogue = project_dialogue(turns, start, end)
+        if turn is not None:
+            role, text, timestamp = turn
+            turns.append(DialogueTurn(role, timestamp, text))
+        metadata = message.get("metadata")
+        branch_source = (
+            metadata.get("branching_from_conversation_id")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if isinstance(branch_source, str) and branch_source:
+            background_prefix = len(turns)
+    dialogue = project_dialogue(turns, start, end, background_prefix=background_prefix)
     if dialogue is None:
         return None
     title = detail.get("title")

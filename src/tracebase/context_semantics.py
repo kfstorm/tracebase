@@ -38,8 +38,10 @@ CONVERSATIONAL_EVIDENCE_POLICY = EvidencePolicy(
 
 CHATGPT_EVIDENCE_POLICY = EvidencePolicy(
     "Only retained text turns are present. Activity records are eligible to "
-    "establish work in the requested interval; background records are earlier "
-    "supporting context only, and later turns are not included. This item is the "
+    "establish work in the requested interval. Background records provide "
+    "supporting context only; this includes the inherited prefix through a "
+    "fork-marked message, even when its message times fall within the requested "
+    "interval. Later turns are not included. This item is the "
     "observed conversation stream; historical branches, regenerations, and edits "
     "are not reconstructed. It can establish reported work, analysis, decisions, "
     "implementation, commands, tests, or validation, but assistant output alone "

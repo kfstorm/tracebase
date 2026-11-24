@@ -36,6 +36,7 @@ def project_dialogue(
     end: datetime,
     *,
     background_before: datetime | None = None,
+    background_prefix: int = 0,
 ) -> DialogueTranscript | None:
     """Classify text turns and retain bounded earlier background.
 
@@ -45,10 +46,12 @@ def project_dialogue(
     """
     activity: list[DialogueTurn] = []
     background: list[DialogueTurn] = []
-    for turn in turns:
+    for index, turn in enumerate(turns):
         if turn.timestamp >= end:
             continue
-        if background_before is not None and turn.timestamp < background_before:
+        if index < background_prefix or (
+            background_before is not None and turn.timestamp < background_before
+        ):
             background.append(turn)
         elif start <= turn.timestamp:
             activity.append(turn)
