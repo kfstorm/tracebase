@@ -1,6 +1,6 @@
 # Agent Guide
 
-Tracebase collects private work evidence, derives offline Context Output, and produces Summary Output. GitHub, OpenCode, and ordinary personal ChatGPT conversations are the currently supported sources; additional sources may be added. See [README.md](README.md) for setup and CLI usage.
+Tracebase collects private work evidence, derives offline Context Output, and produces Summary Output. GitHub, OpenCode, and personal ChatGPT conversations, including owned ChatGPT Projects, are the currently supported sources; additional sources may be added. See [README.md](README.md) for setup and CLI usage.
 
 ## Task Context
 

@@ -32,11 +32,20 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatGPTProject:
+    """Source-native project membership recorded with a conversation Snapshot."""
+
+    source_id: str
+    name: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ChatGPTProjection:
     """ChatGPT display metadata plus the observed current text stream."""
 
     title: str
     dialogue: DialogueTranscript
+    project: ChatGPTProject | None = None
 
 
 def _json_object(raw: bytes, label: str) -> dict[str, Any]:
@@ -193,6 +202,26 @@ def _text(message: dict[str, Any]) -> tuple[str, str, datetime] | None:
     return role, text, _timestamp(message.get("create_time"))
 
 
+def _project(snapshot: PublishedSnapshot) -> ChatGPTProject | None:
+    metadata = snapshot.manifest.get("metadata")
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise ArchiveError("ChatGPT Snapshot metadata is invalid")
+    value = metadata.get("project")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ArchiveError("ChatGPT Snapshot project metadata is invalid")
+    source_id = value.get("source_id")
+    if not isinstance(source_id, str) or not source_id:
+        raise ArchiveError("ChatGPT Snapshot project metadata is invalid")
+    name = value.get("name")
+    if name is not None and (not isinstance(name, str) or not name):
+        raise ArchiveError("ChatGPT Snapshot project metadata is invalid")
+    return ChatGPTProject(source_id, name)
+
+
 def project_chatgpt(
     snapshot: PublishedSnapshot, start: datetime, end: datetime
 ) -> ChatGPTProjection | None:
@@ -220,6 +249,7 @@ def project_chatgpt(
     return ChatGPTProjection(
         title if isinstance(title, str) and title else "Untitled conversation",
         dialogue,
+        _project(snapshot),
     )
 
 
@@ -287,4 +317,4 @@ class ChatGPTContextAdapter:
 CHATGPT_CONTEXT_ADAPTER = ChatGPTContextAdapter()
 
 
-__all__ = ["ChatGPTProjection", "project_chatgpt"]
+__all__ = ["ChatGPTProject", "ChatGPTProjection", "project_chatgpt"]
