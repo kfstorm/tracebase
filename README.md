@@ -1,6 +1,6 @@
 # Tracebase
 
-Tracebase preserves private work evidence in a replayable local archive, generates offline context, and produces work summaries. GitHub, OpenCode, and ordinary personal ChatGPT conversations are the currently supported sources; additional sources may be added.
+Tracebase preserves private work evidence in a replayable local archive, generates offline context, and produces work summaries. GitHub, OpenCode, and personal ChatGPT conversations, including ChatGPT Projects, are the currently supported sources; additional sources may be added.
 
 ## Contents
 
@@ -15,7 +15,7 @@ Tracebase preserves private work evidence in a replayable local archive, generat
 
 - **GitHub collection:** Archive Issues and Pull Requests you authored, commented on, or submitted reviews for, including collaboration context and raw PR diffs.
 - **OpenCode collection:** Archive OpenCode sessions for offline Context generation.
-- **ChatGPT collection:** Archive ordinary personal conversations from an authenticated ChatGPT web session.
+- **ChatGPT collection:** Archive personal conversations, including owned ChatGPT Projects, from an authenticated ChatGPT web session.
 - **Explicit coverage:** Record time ranges and source boundaries, retain successful empty runs, and reject overlapping published ranges for the same logical source.
 - **Offline context:** Generate a disposable, browsable directory from archived evidence without querying the sources again.
 - **Explicit attribution:** Context explains how conversational work is attributed and marks applicable records as `[User work]` or `[Context only]`.
@@ -135,7 +135,7 @@ verification flows to you. It does not automate or bypass them. Headless mode
 may fail when ChatGPT requires browser verification; use headed mode when an
 interactive browser is appropriate.
 
-Collect ordinary personal ChatGPT conversations with an explicit browser mode:
+Collect personal ChatGPT conversations, including owned Projects, with an explicit browser mode:
 
 ```bash
 uv run tracebase collect chatgpt \
@@ -147,10 +147,13 @@ uv run tracebase collect chatgpt \
 
 `--browser-mode` accepts `headless` (the default) or `headed`. Authentication
 failures, browser verification, rate limits, or unavailable provider data can
-prevent a successful run from being published. Project and Custom GPT
-conversations are currently excluded. Conversations that have already been
-deleted or are no longer available from the provider cannot be recovered
-retrospectively.
+prevent a successful run from being published. Tracebase discovers owned
+personal Projects and includes eligible project conversations by default.
+Custom GPT conversations, project instructions, and project files remain
+excluded. Project conversation listing has no separate archived or starred
+partition, so Tracebase archives what the provider returns for each Project.
+Conversations that have already been deleted or are no longer available from
+the provider cannot be recovered retrospectively.
 
 ### Generate Context Offline
 
@@ -179,8 +182,9 @@ sanitization decision.
 
 Conversational Context contains retained `user` and `assistant` dialogue for
 the requested interval and bounded earlier background that may help explain it.
-Later dialogue is not included. See [CONTEXT.md](CONTEXT.md) for the
-authoritative source and archive semantics.
+Later dialogue is not included. When archived ChatGPT evidence records Project
+membership, the conversation overview also identifies its Project. See
+[CONTEXT.md](CONTEXT.md) for the authoritative source and archive semantics.
 
 For all options, run `uv run tracebase collect chatgpt --help`, `uv run tracebase collect github --help`, `uv run tracebase collect opencode --help`, `uv run tracebase identity github sync --help`, or `uv run tracebase context --help`.
 

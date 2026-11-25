@@ -18,6 +18,10 @@ def render_chatgpt(
     timezone = result.request.start.tzinfo
     assert timezone is not None
     overview = [f"# {projection.title}", ""]
+    if projection.project is not None:
+        overview.extend(
+            [f"Project: {projection.project.name or projection.project.source_id}", ""]
+        )
     overview.extend(context_semantics_lines(item.adapter))
     files = render_dialogue_files(
         projection.dialogue,

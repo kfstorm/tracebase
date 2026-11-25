@@ -5,7 +5,7 @@ This context defines the evidence and observation language for a historical, rep
 ## Language
 
 **Source Item**:
-A source-specific top-level unit that is independently discovered and represented by a Snapshot. A GitHub Item is an Issue or Pull Request that passed Eligibility; an OpenCode Item is a session; a ChatGPT Item is an ordinary personal conversation. An Item does not include its related-object graph, and the shared term does not erase source-specific semantics.
+A source-specific top-level unit that is independently discovered and represented by a Snapshot. A GitHub Item is an Issue or Pull Request that passed Eligibility; an OpenCode Item is a session; a ChatGPT Item is a personal conversation, including one inside an owned Project. An Item does not include its related-object graph, and the shared term does not erase source-specific semantics.
 _Avoid_: Artifact, universal entity
 
 **Explicit Reference**:
@@ -93,6 +93,24 @@ For ChatGPT conversations with a non-empty
 `metadata.branching_from_conversation_id`, Context places the observed text
 prefix through the marked message in Background, even when those message times
 fall within the requested range. This does not require the source conversation.
+
+ChatGPT collection discovers ordinary personal history and owned personal
+Projects. Project discovery uses the provider's cursor-paginated owned-project
+index, and each Project's conversations are enumerated with cursor pagination.
+Project identity is the provider's project identity, and a Project name is
+retained when the provider supplies one. A conversation belongs to a Project
+only when provider discovery associates it with a discovered owned Project;
+conversations associated with other gizmo identities, including Custom GPTs,
+remain out of scope. Discovery deduplicates by conversation identity across
+ordinary history and Project discovery. Project conversation listing exposes no
+archived or starred partition, so archived or starred project conversation
+visibility depends on the provider response. Project instructions, project
+files, shared projects, and Custom GPT conversations are not collected.
+
+ChatGPT Context identifies the selected conversation's recorded Project
+membership by Project name, or by provider project identity when no name was
+available. Project membership does not alter dialogue attribution, ordering,
+deduplication, or offline generation.
 
 OpenCode collection discovers root and child sessions across all projects and
 directories, including archived sessions. Session `time.updated` selects

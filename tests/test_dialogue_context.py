@@ -12,7 +12,11 @@ from tracebase.archive import (
     PublishedSnapshot,
     Snapshot,
 )
-from tracebase.chatgpt_context import ChatGPTProjection, project_chatgpt
+from tracebase.chatgpt_context import (
+    ChatGPTProject,
+    ChatGPTProjection,
+    project_chatgpt,
+)
 from tracebase.context import (
     ContextRequest,
     extract_context,
@@ -66,6 +70,7 @@ def chat_snapshot(
     *,
     descriptors: list[tuple[str, str, int, str]] | None = None,
     current_node: str | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> PublishedSnapshot:
     older_pages = older_pages or []
     page_values: dict[str, dict[str, object]] = {
@@ -92,12 +97,15 @@ def chat_snapshot(
         }
         for path, kind, order, hydration_id in page_descriptors
     ]
+    manifest: dict[str, object] = {
+        "source_id": "conversation-1",
+        "evidence_files": manifest_descriptors,
+    }
+    if metadata is not None:
+        manifest["metadata"] = metadata
     return PublishedSnapshot(
         {},
-        {
-            "source_id": "conversation-1",
-            "evidence_files": manifest_descriptors,
-        },
+        manifest,
         {
             path: json.dumps(page_values[path]).encode()
             for path, _kind, _order, _hydration in page_descriptors
@@ -458,6 +466,35 @@ def test_chatgpt_reconstructs_oldest_to_detail_without_timestamp_sort() -> None:
         "latest",
     ]
     assert [turn.text for turn in projection.dialogue.background] == ["old"]
+
+
+def test_chatgpt_projection_reads_project_membership_from_snapshot() -> None:
+    snapshot = chat_snapshot(
+        [chat_message("current", 1767229200, text="current")],
+        metadata={
+            "project": {
+                "source_id": "g-p-synthetic-project",
+                "name": "Synthetic project",
+            }
+        },
+    )
+
+    projection = project_chatgpt(snapshot, START, END)
+
+    assert projection is not None
+    assert projection.project == ChatGPTProject(
+        "g-p-synthetic-project", "Synthetic project"
+    )
+
+
+def test_chatgpt_projection_rejects_malformed_project_metadata() -> None:
+    snapshot = chat_snapshot(
+        [chat_message("current", 1767229200, text="current")],
+        metadata={"project": {"name": "Synthetic project"}},
+    )
+
+    with pytest.raises(ArchiveError, match="project metadata is invalid"):
+        project_chatgpt(snapshot, START, END)
 
 
 def test_chatgpt_fork_history_is_background_across_pages_and_keeps_limit() -> None:

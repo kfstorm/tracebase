@@ -53,6 +53,7 @@ def reporter() -> ProgressReporter:
 
 def discovery_reporter() -> ProgressReporter:
     progress = reporter()
+    progress.emit(ProgressEvent(kind="start", task_id="chatgpt.projects"))
     progress.emit(ProgressEvent(kind="start", task_id="chatgpt.discover"))
     return progress
 
@@ -78,11 +79,25 @@ def item(
     }
 
 
+def project_item(project_id: str, name: str) -> dict[str, object]:
+    return {
+        "gizmo": {
+            "gizmo": {
+                "id": project_id,
+                "display": {"name": name},
+            }
+        },
+        "conversations": {"items": []},
+    }
+
+
 class DiscoveryAPI:
     account_id = "account-1"
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, str]]] = []
+        self.project_sidebar_pages: list[list[dict[str, object]]] = [[]]
+        self.project_conversation_pages: dict[str, list[list[dict[str, object]]]] = {}
         self.pages = {
             (False, False): [
                 item(
@@ -153,10 +168,31 @@ class DiscoveryAPI:
 
     def request(self, endpoint: str, params: dict[str, str]) -> _Response:
         self.calls.append((endpoint, params))
+        if endpoint == "/backend-api/gizmos/snorlax/sidebar":
+            return response(
+                self._cursor_page(self.project_sidebar_pages, params.get("cursor"))
+            )
+        if endpoint.startswith("/backend-api/gizmos/"):
+            project_id = endpoint.split("/")[3]
+            return response(
+                self._cursor_page(
+                    self.project_conversation_pages.get(project_id, [[]]),
+                    params.get("cursor"),
+                )
+            )
         key = (params["is_archived"] == "true", params["is_starred"] == "true")
         offset = int(params["offset"])
         page = self.pages[key] if offset == 0 else []
         return response({"items": page, "limit": 2, "total": 999_999})
+
+    @staticmethod
+    def _cursor_page(
+        pages: list[list[dict[str, object]]], cursor: str | None
+    ) -> dict[str, object]:
+        index = int(cursor) if cursor is not None else 0
+        items = pages[index] if index < len(pages) else []
+        next_cursor = str(index + 1) if index + 1 < len(pages) else None
+        return {"items": items, "cursor": next_cursor}
 
     @staticmethod
     def json(value: _Response) -> dict[str, object] | list[object]:
@@ -166,8 +202,9 @@ class DiscoveryAPI:
 def test_discovery_covers_four_partitions_and_stabilizes() -> None:
     api = DiscoveryAPI()
     progress = reporter()
+    progress.emit(ProgressEvent(kind="start", task_id="chatgpt.projects"))
     progress.emit(ProgressEvent(kind="start", task_id="chatgpt.discover"))
-    candidates, coverage, passes = _discover(api, RANGE, progress)
+    candidates, coverage, passes, project_coverage = _discover(api, RANGE, progress)
 
     assert set(candidates) == {
         "active-conversation",
@@ -185,9 +222,15 @@ def test_discovery_covers_four_partitions_and_stabilizes() -> None:
     assert {
         (call[1]["is_archived"], call[1]["is_starred"])
         for call in api.calls
-        if call[1]["offset"] == "0"
+        if call[0] == "/backend-api/conversations" and call[1]["offset"] == "0"
     } == {("false", "false"), ("false", "true"), ("true", "false"), ("true", "true")}
-    assert all(call[1]["offset"] in {"0", "2"} for call in api.calls)
+    assert all(
+        call[1]["offset"] in {"0", "2"}
+        for call in api.calls
+        if call[0] == "/backend-api/conversations"
+    )
+    assert project_coverage["listed_projects"] == 0
+    assert project_coverage["projects"] == []
 
 
 class PartitionAPI(DiscoveryAPI):
@@ -196,6 +239,8 @@ class PartitionAPI(DiscoveryAPI):
         self.calls: list[int] = []
 
     def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+        if endpoint == "/backend-api/gizmos/snorlax/sidebar":
+            return response({"items": [], "cursor": None})
         assert endpoint == "/backend-api/conversations"
         offset = int(params["offset"])
         self.calls.append(offset)
@@ -328,7 +373,11 @@ def test_stabilization_finds_new_in_range_id_on_later_pass() -> None:
             self.pass_calls = 0
 
         def request(self, endpoint: str, params: dict[str, str]) -> _Response:
-            if params["is_archived"] == "false" and params["is_starred"] == "false":
+            if (
+                endpoint == "/backend-api/conversations"
+                and params["is_archived"] == "false"
+                and params["is_starred"] == "false"
+            ):
                 self.pass_calls += 1
                 if self.pass_calls == 2:
                     self.pages[(False, False)].append(
@@ -343,10 +392,225 @@ def test_stabilization_finds_new_in_range_id_on_later_pass() -> None:
 
     api = AppearingAPI()
 
-    candidates, _coverage, passes = _discover(api, RANGE, discovery_reporter())
+    candidates, _coverage, passes, _project_coverage = _discover(
+        api, RANGE, discovery_reporter()
+    )
 
     assert "appeared-later" in candidates
     assert passes == 3
+
+
+class ProjectDiscoveryAPI(DiscoveryAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.project_sidebar_pages = [
+            [
+                project_item("g-p-project-one", "Synthetic project"),
+                project_item("g-p-project-two", "Second project"),
+            ]
+        ]
+        self.project_conversation_pages = {
+            "g-p-project-one": [
+                [
+                    item(
+                        "project-only",
+                        "2026-01-01T00:20:00Z",
+                        archived=False,
+                        starred=False,
+                        gizmo_id="g-p-project-one",
+                    ),
+                    item(
+                        "active-conversation",
+                        "2026-01-01T00:30:00Z",
+                        archived=False,
+                        starred=False,
+                        gizmo_id="g-p-project-one",
+                    ),
+                ]
+            ],
+            "g-p-project-two": [
+                [
+                    item(
+                        "second-project-conversation",
+                        "2026-01-01T00:10:00Z",
+                        archived=False,
+                        starred=False,
+                        gizmo_id="g-p-project-two",
+                    ),
+                    item(
+                        "project-at-start",
+                        "2026-01-01T00:00:00Z",
+                        archived=False,
+                        starred=False,
+                        gizmo_id="g-p-project-two",
+                    ),
+                    item(
+                        "project-at-end",
+                        "2026-01-01T01:00:00Z",
+                        archived=False,
+                        starred=False,
+                        gizmo_id="g-p-project-two",
+                    ),
+                ]
+            ],
+        }
+        for entry in self.pages[(False, True)]:
+            if entry["id"] == "project-conversation":
+                entry["gizmo_id"] = "g-p-project-one"
+
+
+def test_project_discovery_includes_and_deduplicates_project_conversations() -> None:
+    api = ProjectDiscoveryAPI()
+
+    candidates, _coverage, _passes, project_coverage = _discover(
+        api, RANGE, discovery_reporter()
+    )
+
+    assert set(candidates) == {
+        "active-conversation",
+        "at-start",
+        "archived-conversation",
+        "project-only",
+        "project-conversation",
+        "second-project-conversation",
+        "project-at-start",
+    }
+    assert "project-at-end" not in candidates
+    first = candidates["active-conversation"].project
+    assert first is not None
+    assert (first.source_id, first.name) == (
+        "g-p-project-one",
+        "Synthetic project",
+    )
+    assert candidates["project-only"].project == first
+    assert candidates["project-conversation"].project == first
+    second = candidates["second-project-conversation"].project
+    assert second is not None
+    assert (second.source_id, second.name) == (
+        "g-p-project-two",
+        "Second project",
+    )
+    # The conversation was observed in ordinary history and in its project.
+    entries = candidates["active-conversation"].discovery_entries
+    assert {entry.get("kind") for entry in entries} == {None, "project"}
+    assert len(entries) > 2
+    assert project_coverage["listed_projects"] == 2
+    assert project_coverage["pagination_complete"] is True
+    assert [
+        (project["source_id"], project["selected_conversations"])
+        for project in project_coverage["projects"]
+    ] == [("g-p-project-one", 2), ("g-p-project-two", 2)]
+
+
+def test_project_discovery_paginates_index_and_conversations() -> None:
+    api = ProjectDiscoveryAPI()
+    api.project_sidebar_pages = [
+        [project_item("g-p-project-one", "Synthetic project")],
+        [project_item("g-p-project-two", "Second project")],
+    ]
+    api.project_conversation_pages["g-p-project-one"] = [
+        [
+            item(
+                "project-page-one",
+                "2026-01-01T00:20:00Z",
+                archived=False,
+                starred=False,
+                gizmo_id="g-p-project-one",
+            )
+        ],
+        [
+            item(
+                "project-page-two",
+                "2026-01-01T00:10:00Z",
+                archived=False,
+                starred=False,
+                gizmo_id="g-p-project-one",
+            )
+        ],
+    ]
+
+    candidates, _coverage, _passes, project_coverage = _discover(
+        api, RANGE, discovery_reporter()
+    )
+
+    assert "project-page-one" in candidates
+    assert "project-page-two" in candidates
+    assert project_coverage["pages"] == 2
+    assert project_coverage["projects"][0]["conversation_pages"] == 2
+    sidebar_calls = [
+        params
+        for endpoint, params in api.calls
+        if endpoint == "/backend-api/gizmos/snorlax/sidebar"
+    ]
+    assert [params.get("cursor") for params in sidebar_calls] == [None, "1"]
+    project_calls = [
+        params
+        for endpoint, params in api.calls
+        if endpoint == "/backend-api/gizmos/g-p-project-one/conversations"
+    ]
+    assert [params.get("cursor") for params in project_calls] == [None, "1"]
+
+
+def test_project_discovery_rejects_stalled_pagination() -> None:
+    class StalledSidebar(ProjectDiscoveryAPI):
+        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+            if endpoint == "/backend-api/gizmos/snorlax/sidebar":
+                self.calls.append((endpoint, params))
+                return response(
+                    {
+                        "items": [project_item("g-p-project-one", "Synthetic project")],
+                        "cursor": "stalled",
+                    }
+                )
+            return super().request(endpoint, params)
+
+    with pytest.raises(ChatGPTError, match="project discovery did not progress"):
+        _discover(StalledSidebar(), RANGE, discovery_reporter())
+
+    class StalledConversations(ProjectDiscoveryAPI):
+        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+            if endpoint.endswith("/conversations") and endpoint.startswith(
+                "/backend-api/gizmos/"
+            ):
+                self.calls.append((endpoint, params))
+                return response(
+                    {
+                        "items": [
+                            item(
+                                "project-page",
+                                "2026-01-01T00:20:00Z",
+                                archived=False,
+                                starred=False,
+                                gizmo_id="g-p-project-one",
+                            )
+                        ],
+                        "cursor": "stalled",
+                    }
+                )
+            return super().request(endpoint, params)
+
+    with pytest.raises(
+        ChatGPTError, match="project conversation discovery did not progress"
+    ):
+        _discover(StalledConversations(), RANGE, discovery_reporter())
+
+
+def test_project_discovery_rejects_malformed_index_item() -> None:
+    api = ProjectDiscoveryAPI()
+    api.project_sidebar_pages = [[{"gizmo": {}}]]
+
+    with pytest.raises(ChatGPTError, match="project discovery item is invalid"):
+        _discover(api, RANGE, discovery_reporter())
+
+
+def test_project_discovery_rejects_non_project_gizmo_type() -> None:
+    api = ProjectDiscoveryAPI()
+    custom_gpt = project_item("g-synthetic-custom-gpt", "Synthetic custom GPT")
+    custom_gpt["gizmo"]["gizmo"]["gizmo_type"] = "gpt"  # type: ignore[index]
+    api.project_sidebar_pages = [[custom_gpt]]
+
+    with pytest.raises(ChatGPTError, match="not a project"):
+        _discover(api, RANGE, discovery_reporter())
 
 
 class HydrationAPI:
@@ -581,7 +845,9 @@ def test_collect_hydrates_ordinary_conversations_with_optional_automation_flag(
                 result = response(
                     {"accessToken": "synthetic-token", "account": {"id": "account-1"}}
                 )
-            elif url.path == "/backend-api/conversations":
+            elif url.path == "/backend-api/conversations" or url.path.startswith(
+                "/backend-api/gizmos/"
+            ):
                 result = discovery.request(url.path, params)
             else:
                 result = hydration.request(url.path, params)
@@ -620,6 +886,126 @@ def test_collect_hydrates_ordinary_conversations_with_optional_automation_flag(
         "/backend-api/conversations/at-start",
         "/backend-api/conversations/archived-conversation",
     }
+
+
+class ProjectCollectionAPI(ProjectDiscoveryAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hydration = HydrationAPI()
+
+    def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+        if endpoint == "/backend-api/conversations" or endpoint.startswith(
+            "/backend-api/gizmos/"
+        ):
+            return super().request(endpoint, params)
+        return self.hydration.request(endpoint, params)
+
+
+def test_project_collection_records_membership_and_deduplicates(
+    tmp_path: Path,
+) -> None:
+    run = CollectionRun(
+        Archive(tmp_path / "archive"),
+        "chatgpt",
+        "account-1",
+        RANGE,
+        collector_version="test",
+        effective_options={},
+    )
+
+    result = _collect_api(run, reporter(), ProjectCollectionAPI())
+    published = run.publish(result.coverage)
+
+    assert result.coverage["selected_conversations"] == 7
+    assert result.coverage["selected_ordinary_conversations"] == 2
+    assert result.coverage["selected_project_conversations"] == 5
+    assert result.coverage["project_discovery"]["listed_projects"] == 2
+    snapshots = {
+        json.loads((snapshot / "snapshot.json").read_text())["source_id"]: json.loads(
+            (snapshot / "snapshot.json").read_text()
+        )
+        for snapshot in (published / "snapshots/conversation").iterdir()
+    }
+    assert set(snapshots) == {
+        "active-conversation",
+        "at-start",
+        "archived-conversation",
+        "project-only",
+        "project-conversation",
+        "second-project-conversation",
+        "project-at-start",
+    }
+    assert "custom-gpt-conversation" not in snapshots
+
+    project_snapshot = snapshots["project-only"]["metadata"]
+    assert project_snapshot["project"] == {
+        "source_id": "g-p-project-one",
+        "name": "Synthetic project",
+    }
+    provenance = snapshots["project-only"]["selection_provenance"][0]
+    assert provenance["project_membership"] == {
+        "source_id": "g-p-project-one",
+        "name": "Synthetic project",
+    }
+    assert any(
+        entry.get("kind") == "project" for entry in provenance["discovery_entries"]
+    )
+    moved = snapshots["active-conversation"]["selection_provenance"][0]
+    assert moved["project_membership"]["source_id"] == "g-p-project-one"
+    assert {entry.get("kind") for entry in moved["discovery_entries"]} == {
+        None,
+        "project",
+    }
+    assert snapshots["archived-conversation"]["metadata"]["project"] is None
+
+
+def assert_collection_fails(tmp_path: Path, api: object, match: str) -> None:
+    archive = Archive(tmp_path / "archive")
+    run = CollectionRun(
+        archive,
+        "chatgpt",
+        "account-1",
+        RANGE,
+        collector_version="test",
+        effective_options={},
+    )
+
+    with pytest.raises(ChatGPTError, match=match):
+        _collect_api(run, reporter(), api)  # type: ignore[arg-type]
+
+    assert run.staging.exists()
+    assert not (archive.root / "runs").exists()
+
+
+def test_project_failure_leaves_staging_and_never_publishes(tmp_path: Path) -> None:
+    class FailingProjects(ProjectCollectionAPI):
+        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+            if endpoint == "/backend-api/gizmos/snorlax/sidebar":
+                raise ChatGPTError("ChatGPT project index failed")
+            return super().request(endpoint, params)
+
+    assert_collection_fails(tmp_path, FailingProjects(), "project index failed")
+
+
+def test_project_hydration_failure_leaves_staging_and_never_publishes(
+    tmp_path: Path,
+) -> None:
+    class BrokenHydration(ProjectCollectionAPI):
+        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+            if endpoint.startswith("/backend-api/conversations/"):
+                self.hydration.calls.append((endpoint, params))
+                return response(
+                    {
+                        "messages": [{"id": "current"}],
+                        "page_info": {
+                            "start_cursor": None,
+                            "has_previous_page": True,
+                        },
+                    }
+                )
+            return super().request(endpoint, params)
+
+    assert_collection_fails(tmp_path, BrokenHydration(), "pagination did not progress")
 
 
 def test_auth_probe_uses_context_request_and_safe_identity() -> None:

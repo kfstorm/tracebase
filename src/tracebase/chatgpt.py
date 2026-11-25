@@ -27,6 +27,9 @@ from .progress import ProgressEvent, ProgressReporter
 _CHATGPT_URL = "https://chatgpt.com"
 _API_BASE = _CHATGPT_URL
 _DISCOVERY_LIMIT = 100
+_PROJECT_DISCOVERY_ENDPOINT = "/backend-api/gizmos/snorlax/sidebar"
+_PROJECT_DISCOVERY_LIMIT = 20
+_PROJECT_CONVERSATION_LIMIT = 50
 _NUM_TURNS = 100
 _MAX_DISCOVERY_PASSES = 3
 _REQUEST_RETRIES = 2
@@ -123,10 +126,17 @@ class _SessionProbeResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _Project:
+    source_id: str
+    name: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class _Candidate:
     source_id: str
     update_time: datetime
     discovery_entries: tuple[dict[str, Any], ...]
+    project: _Project | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,13 +607,196 @@ def _discovery_page(
     return items, returned_limit
 
 
-def _ordinary(item: dict[str, Any]) -> bool:
-    # Discovery responses may omit the automation flag for ordinary conversations.
-    return (
-        item.get("gizmo_id") is None
-        and item.get("is_temporary_chat") is False
-        and item.get("is_automation_conversation", False) is False
+def _conversation_membership(
+    item: dict[str, Any], projects: dict[str, _Project]
+) -> tuple[bool, _Project | None]:
+    """Select eligible history conversations and resolve Project membership.
+
+    A non-null gizmo identity is either an owned Project discovered from the
+    project index or a Custom GPT, which remains out of scope. Project identity
+    comes from the provider's project index rather than an identifier pattern.
+    """
+    if (
+        item.get("is_temporary_chat") is not False
+        or item.get("is_automation_conversation", False) is not False
+    ):
+        return False, None
+    gizmo_id = item.get("gizmo_id")
+    if gizmo_id is None:
+        return True, None
+    if not isinstance(gizmo_id, str) or not gizmo_id:
+        return False, None
+    project = projects.get(gizmo_id)
+    return (project is not None), project
+
+
+def _project_page(
+    value: dict[str, Any] | list[Any], label: str
+) -> tuple[list[dict[str, Any]], str | None]:
+    if not isinstance(value, dict) or not isinstance(value.get("items"), list):
+        raise ChatGPTError(f"ChatGPT {label} response was invalid")
+    items = value["items"]
+    if not all(isinstance(item, dict) for item in items):
+        raise ChatGPTError(f"ChatGPT {label} response was invalid")
+    cursor = value.get("cursor")
+    if cursor is not None and (not isinstance(cursor, str) or not cursor):
+        raise ChatGPTError(f"ChatGPT {label} pagination response was invalid")
+    return items, cursor
+
+
+def _project_from_item(item: dict[str, Any]) -> _Project:
+    container = item.get("gizmo")
+    if not isinstance(container, dict):
+        raise ChatGPTError("ChatGPT project discovery item is invalid")
+    gizmo = container.get("gizmo")
+    if not isinstance(gizmo, dict):
+        raise ChatGPTError("ChatGPT project discovery item is invalid")
+    source_id = gizmo.get("id")
+    if not isinstance(source_id, str) or not source_id:
+        raise ChatGPTError("ChatGPT project discovery item is invalid")
+    gizmo_type = gizmo.get("gizmo_type")
+    if gizmo_type is not None and gizmo_type != "snorlax":
+        # The project index also backs Custom GPTs in some provider responses.
+        raise ChatGPTError("ChatGPT project discovery item is not a project")
+    display = gizmo.get("display")
+    name = display.get("name") if isinstance(display, dict) else None
+    return _Project(
+        source_id,
+        name if isinstance(name, str) and name.strip() else None,
     )
+
+
+def _discover_projects(
+    api: _ChatGPTAPI, reporter: ProgressReporter
+) -> tuple[dict[str, _Project], dict[str, Any]]:
+    """Enumerate every owned personal project through cursor pagination."""
+    projects: dict[str, _Project] = {}
+    pages = 0
+    listed = 0
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        params = {
+            "conversations_per_gizmo": "0",
+            "owned_only": "true",
+            "limit": str(_PROJECT_DISCOVERY_LIMIT),
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = api.request(_PROJECT_DISCOVERY_ENDPOINT, params)
+        items, cursor = _project_page(api.json(response), "project discovery")
+        pages += 1
+        listed += len(items)
+        for item in items:
+            project = _project_from_item(item)
+            projects[project.source_id] = project
+        reporter.emit(
+            ProgressEvent(
+                kind="update",
+                task_id="chatgpt.projects",
+                completed=pages,
+                message=f"page {pages}, {len(projects)} projects",
+            )
+        )
+        if cursor is None:
+            break
+        if not items or cursor in seen_cursors:
+            raise ChatGPTError("ChatGPT project discovery did not progress")
+        seen_cursors.add(cursor)
+    return projects, {
+        "endpoint": _PROJECT_DISCOVERY_ENDPOINT,
+        "query": {
+            "conversations_per_gizmo": "0",
+            "owned_only": "true",
+            "limit": str(_PROJECT_DISCOVERY_LIMIT),
+        },
+        "pages": pages,
+        "listed_items": listed,
+        "listed_projects": len(projects),
+        "pagination_complete": True,
+        "projects": [],
+    }
+
+
+def _discover_project_conversations(
+    api: _ChatGPTAPI,
+    project: _Project,
+    collection_range: CollectionRange,
+    reporter: ProgressReporter,
+) -> tuple[dict[str, _Candidate], dict[str, Any]]:
+    """Enumerate one project's conversations through cursor pagination."""
+    candidates: dict[str, _Candidate] = {}
+    encoded_id = quote(project.source_id, safe="")
+    endpoint = f"/backend-api/gizmos/{encoded_id}/conversations"
+    cursor: str | None = None
+    pages = 0
+    listed = 0
+    selected = 0
+    archived = 0
+    starred = 0
+    seen_cursors: set[str] = set()
+    while True:
+        params = {"limit": str(_PROJECT_CONVERSATION_LIMIT)}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = api.request(endpoint, params)
+        items, cursor = _project_page(
+            api.json(response), "project conversation discovery"
+        )
+        pages += 1
+        listed += len(items)
+        for item in items:
+            source_id = item.get("id")
+            if not isinstance(source_id, str) or not source_id:
+                raise ChatGPTError("ChatGPT project conversation item is invalid")
+            archived += 1 if item.get("is_archived") is True else 0
+            starred += 1 if item.get("is_starred") is True else 0
+            updated = _parse_timestamp(
+                item.get("update_time"), "project conversation update"
+            )
+            if (
+                item.get("is_temporary_chat") is not False
+                or item.get("is_automation_conversation", False) is not False
+                or not collection_range.start <= updated < collection_range.end
+            ):
+                continue
+            selected += 1
+            entry = {
+                "kind": "project",
+                "project_id": project.source_id,
+                "project_name": project.name,
+                "endpoint": _query_endpoint(endpoint, params),
+            }
+            _record_candidate(candidates, source_id, updated, entry, project)
+        reporter.emit(
+            ProgressEvent(
+                kind="update",
+                task_id="chatgpt.projects",
+                completed=pages,
+                message=(
+                    f"project {project.source_id}, page {pages}, "
+                    f"{len(candidates)} conversations"
+                ),
+            )
+        )
+        if cursor is None:
+            break
+        if not items or cursor in seen_cursors:
+            raise ChatGPTError(
+                "ChatGPT project conversation discovery did not progress"
+            )
+        seen_cursors.add(cursor)
+    return candidates, {
+        "source_id": project.source_id,
+        "name": project.name,
+        "conversation_endpoint": endpoint,
+        "conversation_pages": pages,
+        "listed_conversations": listed,
+        "archived_conversations": archived,
+        "starred_conversations": starred,
+        "selected_conversations": selected,
+        "pagination_complete": True,
+    }
 
 
 def _unique_entries(
@@ -616,6 +809,25 @@ def _unique_entries(
     return tuple(result)
 
 
+def _record_candidate(
+    candidates: dict[str, _Candidate],
+    source_id: str,
+    updated: datetime,
+    entry: dict[str, Any],
+    project: _Project | None,
+) -> None:
+    prior = candidates.get(source_id)
+    if prior is None:
+        candidates[source_id] = _Candidate(source_id, updated, (entry,), project)
+        return
+    candidates[source_id] = _Candidate(
+        source_id,
+        prior.update_time,
+        _unique_entries(prior.discovery_entries, (entry,)),
+        project or prior.project,
+    )
+
+
 def _discover_partition(
     api: _ChatGPTAPI,
     collection_range: CollectionRange,
@@ -623,6 +835,7 @@ def _discover_partition(
     is_starred: bool,
     pass_number: int,
     reporter: ProgressReporter,
+    projects: dict[str, _Project] | None = None,
 ) -> tuple[dict[str, _Candidate], dict[str, Any]]:
     candidates: dict[str, _Candidate] = {}
     offset = 0
@@ -652,7 +865,8 @@ def _discover_partition(
             if previous_update is not None and updated > previous_update:
                 ordering_verified = False
             previous_update = updated
-            if not _ordinary(item) or not (
+            eligible, project = _conversation_membership(item, projects or {})
+            if not eligible or not (
                 collection_range.start <= updated < collection_range.end
             ):
                 continue
@@ -664,15 +878,7 @@ def _discover_partition(
                 },
                 "endpoint": _query_endpoint(endpoint, params),
             }
-            prior = candidates.get(source_id)
-            if prior is None:
-                candidates[source_id] = _Candidate(source_id, updated, (entry,))
-            else:
-                candidates[source_id] = _Candidate(
-                    source_id,
-                    prior.update_time,
-                    _unique_entries(prior.discovery_entries, (entry,)),
-                )
+            _record_candidate(candidates, source_id, updated, entry, project)
         reporter.emit(
             ProgressEvent(
                 kind="update",
@@ -706,14 +912,34 @@ def _discover_partition(
     }
 
 
+def _merge_candidates(
+    candidates: dict[str, _Candidate],
+    additions: dict[str, _Candidate],
+) -> None:
+    for source_id, candidate in additions.items():
+        prior = candidates.get(source_id)
+        if prior is None:
+            candidates[source_id] = candidate
+            continue
+        candidates[source_id] = _Candidate(
+            source_id,
+            prior.update_time,
+            _unique_entries(prior.discovery_entries, candidate.discovery_entries),
+            candidate.project or prior.project,
+        )
+
+
 def _discover(
     api: _ChatGPTAPI,
     collection_range: CollectionRange,
     reporter: ProgressReporter,
-) -> tuple[dict[str, _Candidate], list[dict[str, Any]], int]:
+) -> tuple[dict[str, _Candidate], list[dict[str, Any]], int, dict[str, Any]]:
+    projects, project_coverage = _discover_projects(api, reporter)
     candidates: dict[str, _Candidate] = {}
     coverage: list[dict[str, Any]] = []
+    passes = 0
     for pass_number in range(1, _MAX_DISCOVERY_PASSES + 1):
+        passes = pass_number
         before = set(candidates)
         for is_archived, is_starred in _DISCOVERY_PARTITIONS:
             partition_candidates, partition_coverage = _discover_partition(
@@ -723,23 +949,26 @@ def _discover(
                 is_starred,
                 pass_number,
                 reporter,
+                projects,
             )
             coverage.append(partition_coverage)
-            for source_id, candidate in partition_candidates.items():
-                prior = candidates.get(source_id)
-                if prior is None:
-                    candidates[source_id] = candidate
-                else:
-                    candidates[source_id] = _Candidate(
-                        source_id,
-                        prior.update_time,
-                        _unique_entries(
-                            prior.discovery_entries, candidate.discovery_entries
-                        ),
-                    )
+            _merge_candidates(candidates, partition_candidates)
         if pass_number > 1 and set(candidates) == before:
-            return candidates, coverage, pass_number
-    raise ChatGPTError("ChatGPT discovery did not stabilize; collection is incomplete")
+            break
+    else:
+        raise ChatGPTError(
+            "ChatGPT discovery did not stabilize; collection is incomplete"
+        )
+    for project in projects.values():
+        project_candidates, project_partition = _discover_project_conversations(
+            api,
+            project,
+            collection_range,
+            reporter,
+        )
+        project_coverage["projects"].append(project_partition)
+        _merge_candidates(candidates, project_candidates)
+    return candidates, coverage, passes, project_coverage
 
 
 def _page_info(value: dict[str, Any]) -> tuple[str | None, bool]:
@@ -813,6 +1042,18 @@ def _hydrate(run: CollectionRun, api: _ChatGPTAPI, candidate: _Candidate) -> Non
         )
         page_order += 1
     observation_to = _observed_at()
+    project = (
+        {
+            "source_id": candidate.project.source_id,
+            **(
+                {"name": candidate.project.name}
+                if candidate.project.name is not None
+                else {}
+            ),
+        }
+        if candidate.project is not None
+        else None
+    )
     snapshot = Snapshot(
         source_kind="chatgpt",
         object_kind="conversation",
@@ -843,11 +1084,12 @@ def _hydrate(run: CollectionRun, api: _ChatGPTAPI, candidate: _Candidate) -> Non
         selection_provenance=(
             {
                 "update_time": candidate.update_time.isoformat(),
-                "ordinary_predicate": [
-                    "gizmo_id is null",
+                "conversation_predicate": [
                     "is_temporary_chat === false",
                     "is_automation_conversation is absent or === false",
+                    "gizmo_id is null or identifies a discovered owned project",
                 ],
+                "project_membership": project,
                 "discovery_entries": list(candidate.discovery_entries),
             },
         ),
@@ -857,6 +1099,7 @@ def _hydrate(run: CollectionRun, api: _ChatGPTAPI, candidate: _Candidate) -> Non
             ),
             "branch_recovery": "not_complete",
             "message_pagination": "backward_before_start_cursor",
+            "project": project,
         },
     )
     snapshot_root = run.write_snapshot(snapshot)
@@ -890,6 +1133,8 @@ def _resolve_context_with_browser(browser_mode: str) -> ChatGPTContext:
                 "stealth-headless" if browser_mode == "headless" else "native-headed"
             ),
             "discovery_limit": _DISCOVERY_LIMIT,
+            "project_discovery_limit": _PROJECT_DISCOVERY_LIMIT,
+            "project_conversation_page_size": _PROJECT_CONVERSATION_LIMIT,
             "message_page_size": _NUM_TURNS,
         },
     )
@@ -911,11 +1156,27 @@ def _collect_api(
     reporter.emit(
         ProgressEvent(
             kind="start",
+            task_id="chatgpt.projects",
+            label="Discovering ChatGPT projects",
+        )
+    )
+    reporter.emit(
+        ProgressEvent(
+            kind="start",
             task_id="chatgpt.discover",
             label="Discovering ChatGPT conversations",
         )
     )
-    candidates, discovery, passes = _discover(api, run.collection_range, reporter)
+    candidates, discovery, passes, project_discovery = _discover(
+        api, run.collection_range, reporter
+    )
+    reporter.emit(
+        ProgressEvent(
+            kind="finish",
+            task_id="chatgpt.projects",
+            message=f"{project_discovery['listed_projects']} projects",
+        )
+    )
     reporter.emit(
         ProgressEvent(
             kind="finish",
@@ -961,6 +1222,9 @@ def _collect_api(
             message=f"{len(candidates)} conversations",
         )
     )
+    selected_projects = sum(
+        1 for candidate in candidates.values() if candidate.project is not None
+    )
     return CollectionResult(
         coverage={
             "discovery_endpoint": "/backend-api/conversations",
@@ -971,8 +1235,11 @@ def _collect_api(
             "discovery_limit": _DISCOVERY_LIMIT,
             "discovery_passes": passes,
             "discovery_pages": discovery,
+            "project_discovery": project_discovery,
             "pagination_complete": True,
             "selected_conversations": len(candidates),
+            "selected_ordinary_conversations": len(candidates) - selected_projects,
+            "selected_project_conversations": selected_projects,
             "offset_pagination_limitation": (
                 "Provider has no verified snapshot/cursor guarantee; repeated full "
                 "passes reduce mutable-update skip risk but cannot prove a stable "
@@ -984,8 +1251,12 @@ def _collect_api(
                 "records, "
                 "not complete branch recovery.",
                 "Canvas/textdocs are outside this collector's v1 representation.",
-                "Project and Custom GPT conversations are excluded when the provider "
-                "discovery item has a non-null gizmo_id.",
+                "Custom GPT conversations are excluded; a conversation is collected "
+                "only when it belongs to ordinary history or to an owned ChatGPT "
+                "Project discovered from the project index.",
+                "Project conversation listing exposes no archived or starred "
+                "partition, so archived or starred project conversation visibility "
+                "depends on the provider response.",
                 "Discovery update_time is validated for message/edit content changes "
                 "but is not known to advance for every conversation metadata "
                 "mutation.",
@@ -1099,10 +1370,13 @@ __all__ = [
     "ChatGPTError",
     "_Candidate",
     "_ChatGPTAPI",
+    "_Project",
     "_Response",
     "_Session",
     "_collect_api",
     "_discover",
+    "_discover_project_conversations",
+    "_discover_projects",
     "_hydrate",
     "authenticate",
     "collect",

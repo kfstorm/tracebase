@@ -321,6 +321,7 @@ def publish_chatgpt(
     messages: list[dict[str, object]] | None = None,
     older_pages: list[list[dict[str, object]]] | None = None,
     title: str = "Synthetic conversation",
+    project: dict[str, object] | None = None,
 ) -> None:
     current = run(archive, "chatgpt-run", "chatgpt")
     _write_chatgpt_snapshot(
@@ -329,6 +330,7 @@ def publish_chatgpt(
         messages or [chatgpt_message("chatgpt-current", 1767229200)],
         older_pages or [],
         title,
+        project,
     )
     current.publish({"selected_conversation_count": 1})
 
@@ -355,6 +357,7 @@ def _write_chatgpt_snapshot(
     detail_messages: list[dict[str, object]],
     older_pages: list[list[dict[str, object]]],
     title: str,
+    project: dict[str, object] | None = None,
 ) -> None:
     evidence_files = [
         {
@@ -384,6 +387,7 @@ def _write_chatgpt_snapshot(
             source_id,
             current.collection_range.as_manifest(),
             tuple(evidence_files),
+            metadata={"project": project},
         )
     )
     current.write_evidence(
@@ -1079,6 +1083,27 @@ def test_chatgpt_context_numbers_conversations_by_activity_title_and_source_id(
         for number in ("01", "02", "03")
     ] == ["# Beta", "# Alpha", "# Alpha"]
     assert "conversation-a" not in "\n".join(item.path for item in result.items)
+
+
+def test_chatgpt_context_renders_project_membership(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive")
+    archive.root.mkdir()
+    publish_chatgpt(
+        archive,
+        project={
+            "source_id": "g-p-synthetic-project",
+            "name": "Synthetic project",
+        },
+    )
+
+    output = tmp_path / "output"
+    generate_context(archive.root, request(), output)
+
+    overview = text(output, "chatgpt/conversation/01/overview.md")
+    assert "Project: Synthetic project" in overview
+    assert overview.index("Project: Synthetic project") < overview.index(
+        "## Attribution"
+    )
 
 
 @pytest.mark.parametrize(
