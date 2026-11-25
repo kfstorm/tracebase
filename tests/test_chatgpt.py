@@ -195,6 +195,25 @@ class DiscoveryAPI:
         return {"items": items, "cursor": next_cursor}
 
     @staticmethod
+    def _begin_ordinary_pass(endpoint: str, params: dict[str, str]) -> bool:
+        """Return whether a request starts a new ordinary discovery pass."""
+
+        return (
+            endpoint == "/backend-api/conversations"
+            and params["offset"] == "0"
+            and params["is_archived"] == "false"
+            and params["is_starred"] == "false"
+        )
+
+    def _reset_pages(self) -> None:
+        self.pages = {
+            (False, False): [],
+            (False, True): [],
+            (True, False): [],
+            (True, True): [],
+        }
+
+    @staticmethod
     def json(value: _Response) -> dict[str, object] | list[object]:
         return json.loads(value.body)
 
@@ -459,6 +478,29 @@ class ProjectDiscoveryAPI(DiscoveryAPI):
                 entry["gizmo_id"] = "g-p-project-one"
 
 
+def _is_project_endpoint(endpoint: str, kind: str) -> bool:
+    if kind == "sidebar":
+        return endpoint == "/backend-api/gizmos/snorlax/sidebar"
+    return endpoint.startswith("/backend-api/gizmos/") and endpoint.endswith(
+        "/conversations"
+    )
+
+
+class ProjectEndpointOverride(ProjectDiscoveryAPI):
+    """Serve a fixed payload for one kind of project discovery endpoint."""
+
+    def __init__(self, kind: str, payload: dict[str, object]) -> None:
+        super().__init__()
+        self.kind = kind
+        self.payload = payload
+
+    def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+        if _is_project_endpoint(endpoint, self.kind):
+            self.calls.append((endpoint, params))
+            return response(self.payload)
+        return super().request(endpoint, params)
+
+
 def test_project_discovery_includes_and_deduplicates_project_conversations() -> None:
     api = ProjectDiscoveryAPI()
 
@@ -529,7 +571,7 @@ def test_project_discovery_paginates_index_and_conversations() -> None:
         ],
     ]
 
-    candidates, _coverage, _passes, project_coverage = _discover(
+    candidates, _coverage, passes, project_coverage = _discover(
         api, RANGE, discovery_reporter()
     )
 
@@ -548,51 +590,39 @@ def test_project_discovery_paginates_index_and_conversations() -> None:
         for endpoint, params in api.calls
         if endpoint == "/backend-api/gizmos/g-p-project-one/conversations"
     ]
-    assert [params.get("cursor") for params in project_calls] == [None, "1"]
+    assert [params.get("cursor") for params in project_calls] == [None, "1"] * passes
 
 
 def test_project_discovery_rejects_stalled_pagination() -> None:
-    class StalledSidebar(ProjectDiscoveryAPI):
-        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
-            if endpoint == "/backend-api/gizmos/snorlax/sidebar":
-                self.calls.append((endpoint, params))
-                return response(
-                    {
-                        "items": [project_item("g-p-project-one", "Synthetic project")],
-                        "cursor": "stalled",
-                    }
-                )
-            return super().request(endpoint, params)
-
+    sidebar = ProjectEndpointOverride(
+        "sidebar",
+        {
+            "items": [project_item("g-p-project-one", "Synthetic project")],
+            "cursor": "stalled",
+        },
+    )
     with pytest.raises(ChatGPTError, match="project discovery did not progress"):
-        _discover(StalledSidebar(), RANGE, discovery_reporter())
+        _discover(sidebar, RANGE, discovery_reporter())
 
-    class StalledConversations(ProjectDiscoveryAPI):
-        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
-            if endpoint.endswith("/conversations") and endpoint.startswith(
-                "/backend-api/gizmos/"
-            ):
-                self.calls.append((endpoint, params))
-                return response(
-                    {
-                        "items": [
-                            item(
-                                "project-page",
-                                "2026-01-01T00:20:00Z",
-                                archived=False,
-                                starred=False,
-                                gizmo_id="g-p-project-one",
-                            )
-                        ],
-                        "cursor": "stalled",
-                    }
+    conversations = ProjectEndpointOverride(
+        "conversations",
+        {
+            "items": [
+                item(
+                    "project-page",
+                    "2026-01-01T00:20:00Z",
+                    archived=False,
+                    starred=False,
+                    gizmo_id="g-p-project-one",
                 )
-            return super().request(endpoint, params)
-
+            ],
+            "cursor": "stalled",
+        },
+    )
     with pytest.raises(
         ChatGPTError, match="project conversation discovery did not progress"
     ):
-        _discover(StalledConversations(), RANGE, discovery_reporter())
+        _discover(conversations, RANGE, discovery_reporter())
 
 
 def test_project_discovery_rejects_malformed_index_item() -> None:
@@ -611,6 +641,173 @@ def test_project_discovery_rejects_non_project_gizmo_type() -> None:
 
     with pytest.raises(ChatGPTError, match="not a project"):
         _discover(api, RANGE, discovery_reporter())
+
+
+def test_project_discovery_requires_explicit_pagination_end() -> None:
+    sidebar = ProjectEndpointOverride(
+        "sidebar",
+        {"items": [project_item("g-p-project-one", "Synthetic project")]},
+    )
+    with pytest.raises(
+        ChatGPTError, match="project discovery pagination response was invalid"
+    ):
+        _discover(sidebar, RANGE, discovery_reporter())
+
+    conversations = ProjectEndpointOverride("conversations", {"items": []})
+    with pytest.raises(
+        ChatGPTError,
+        match="project conversation discovery pagination response was invalid",
+    ):
+        _discover(conversations, RANGE, discovery_reporter())
+
+
+class MovingProjectAPI(DiscoveryAPI):
+    """Serve a different membership snapshot at the start of each pass."""
+
+    def __init__(self, memberships: list[dict[str, str | None]]) -> None:
+        super().__init__()
+        self.memberships = memberships
+        self.ordinary_passes = 0
+        self.project_sidebar_pages = [
+            [
+                project_item("g-p-alpha", "Alpha project"),
+                project_item("g-p-beta", "Beta project"),
+            ]
+        ]
+
+    def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+        if self._begin_ordinary_pass(endpoint, params):
+            self.ordinary_passes += 1
+            self._apply_membership()
+        return super().request(endpoint, params)
+
+    def _apply_membership(self) -> None:
+        snapshot = self.memberships[
+            min(self.ordinary_passes, len(self.memberships)) - 1
+        ]
+        self._reset_pages()
+        self.project_conversation_pages = {
+            "g-p-alpha": [[]],
+            "g-p-beta": [[]],
+        }
+        for source_id, project_id in snapshot.items():
+            entry = item(
+                source_id,
+                "2026-01-01T00:30:00Z",
+                archived=False,
+                starred=False,
+                gizmo_id=project_id,
+            )
+            if project_id is None:
+                self.pages[(False, False)].append(entry)
+            else:
+                self.project_conversation_pages[project_id][0].append(entry)
+
+
+def test_discovery_tracks_conversation_moved_into_project() -> None:
+    api = MovingProjectAPI([{"mover": None}, {"mover": "g-p-alpha"}])
+
+    candidates, _coverage, passes, _project_coverage = _discover(
+        api, RANGE, discovery_reporter()
+    )
+
+    assert passes == 3
+    assert candidates["mover"].project is not None
+    assert candidates["mover"].project.source_id == "g-p-alpha"
+    assert {entry.get("kind") for entry in candidates["mover"].discovery_entries} == {
+        None,
+        "project",
+    }
+
+
+def test_discovery_clears_project_membership_when_conversation_moves_out() -> None:
+    api = MovingProjectAPI([{"mover": "g-p-alpha"}, {"mover": None}])
+
+    candidates, _coverage, passes, _project_coverage = _discover(
+        api, RANGE, discovery_reporter()
+    )
+
+    assert passes == 3
+    assert candidates["mover"].project is None
+    entries = candidates["mover"].discovery_entries
+    assert {entry.get("kind") for entry in entries} == {None, "project"}
+    assert {
+        entry["project_id"] for entry in entries if entry.get("kind") == "project"
+    } == {"g-p-alpha"}
+
+
+def test_discovery_recovers_conversation_moved_between_listings() -> None:
+    class MidPassMoveAPI(ProjectDiscoveryAPI):
+        """Miss a conversation in pass 1, then expose it as ordinary history."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.ordinary_passes = 0
+            self.project_sidebar_pages = [[project_item("g-p-alpha", "Alpha project")]]
+            self.project_conversation_pages = {"g-p-alpha": [[]]}
+
+        def request(self, endpoint: str, params: dict[str, str]) -> _Response:
+            if self._begin_ordinary_pass(endpoint, params):
+                self.ordinary_passes += 1
+                self._reset_pages()
+                self.project_conversation_pages = {"g-p-alpha": [[]]}
+                if self.ordinary_passes > 1:
+                    self.pages[(False, False)].append(
+                        item(
+                            "mover",
+                            "2026-01-01T00:30:00Z",
+                            archived=False,
+                            starred=False,
+                        )
+                    )
+            return super().request(endpoint, params)
+
+    candidates, _coverage, passes, _project_coverage = _discover(
+        MidPassMoveAPI(), RANGE, discovery_reporter()
+    )
+
+    assert passes == 3
+    assert candidates["mover"].project is None
+
+
+def test_discovery_uses_latest_project_when_conversation_moves_between_projects() -> (
+    None
+):
+    api = MovingProjectAPI([{"mover": "g-p-alpha"}, {"mover": "g-p-beta"}])
+
+    candidates, _coverage, passes, _project_coverage = _discover(
+        api, RANGE, discovery_reporter()
+    )
+
+    assert passes == 3
+    assert candidates["mover"].project is not None
+    assert candidates["mover"].project.source_id == "g-p-beta"
+    assert {
+        entry["project_id"]
+        for entry in candidates["mover"].discovery_entries
+        if entry.get("kind") == "project"
+    } == {"g-p-alpha", "g-p-beta"}
+
+
+def test_project_discovery_deduplicates_repeated_observations() -> None:
+    api = ProjectDiscoveryAPI()
+
+    candidates, _coverage, passes, _project_coverage = _discover(
+        api, RANGE, discovery_reporter()
+    )
+
+    candidate = candidates["active-conversation"]
+    assert candidate.project is not None
+    assert candidate.project.source_id == "g-p-project-one"
+    project_entries = [
+        entry for entry in candidate.discovery_entries if entry.get("kind") == "project"
+    ]
+    assert len(project_entries) == 1
+    assert project_entries[0]["project_id"] == "g-p-project-one"
+    ordinary_entries = [
+        entry for entry in candidate.discovery_entries if entry.get("kind") is None
+    ]
+    assert len(ordinary_entries) == 2 * passes
 
 
 class HydrationAPI:

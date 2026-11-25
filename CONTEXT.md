@@ -102,10 +102,16 @@ retained when the provider supplies one. A conversation belongs to a Project
 only when provider discovery associates it with a discovered owned Project;
 conversations associated with other gizmo identities, including Custom GPTs,
 remain out of scope. Discovery deduplicates by conversation identity across
-ordinary history and Project discovery. Project conversation listing exposes no
-archived or starred partition, so archived or starred project conversation
-visibility depends on the provider response. Project instructions, project
-files, shared projects, and Custom GPT conversations are not collected.
+ordinary history and Project discovery. Repeated discovery passes cover both
+ordinary history and Project listings and continue until conversation identity
+and the latest observed Project membership stabilize, so a conversation moved
+between ordinary history and a Project during discovery is re-observed rather
+than keeping a stale association. Membership still reflects the last
+observation because the provider exposes no stable discovery snapshot. Project
+conversation listing exposes no archived or starred partition, so archived or
+starred project conversation visibility depends on the provider response.
+Project instructions, project files, shared projects, and Custom GPT
+conversations are not collected.
 
 ChatGPT Context identifies the selected conversation's recorded Project
 membership by Project name, or by provider project identity when no name was

@@ -638,7 +638,11 @@ def _project_page(
     items = value["items"]
     if not all(isinstance(item, dict) for item in items):
         raise ChatGPTError(f"ChatGPT {label} response was invalid")
-    cursor = value.get("cursor")
+    # The provider ends a cursor-paginated listing with an explicit null cursor.
+    # A missing field is an anomalous response, not a completed listing.
+    if "cursor" not in value:
+        raise ChatGPTError(f"ChatGPT {label} pagination response was invalid")
+    cursor = value["cursor"]
     if cursor is not None and (not isinstance(cursor, str) or not cursor):
         raise ChatGPTError(f"ChatGPT {label} pagination response was invalid")
     return items, cursor
@@ -824,7 +828,7 @@ def _record_candidate(
         source_id,
         prior.update_time,
         _unique_entries(prior.discovery_entries, (entry,)),
-        project or prior.project,
+        project,
     )
 
 
@@ -912,10 +916,26 @@ def _discover_partition(
     }
 
 
+def _discovery_state(
+    candidates: dict[str, _Candidate],
+) -> dict[str, _Project | None]:
+    """Identity and latest observed membership used to detect stabilization."""
+
+    return {source_id: candidate.project for source_id, candidate in candidates.items()}
+
+
 def _merge_candidates(
     candidates: dict[str, _Candidate],
     additions: dict[str, _Candidate],
 ) -> None:
+    """Merge observations made after the candidates already recorded.
+
+    Listings are merged in observation order, so an addition always supersedes
+    the membership recorded for an earlier observation. This clears membership
+    when a conversation has moved out of a Project instead of retaining a stale
+    association.
+    """
+
     for source_id, candidate in additions.items():
         prior = candidates.get(source_id)
         if prior is None:
@@ -925,7 +945,7 @@ def _merge_candidates(
             source_id,
             prior.update_time,
             _unique_entries(prior.discovery_entries, candidate.discovery_entries),
-            candidate.project or prior.project,
+            candidate.project,
         )
 
 
@@ -937,10 +957,11 @@ def _discover(
     projects, project_coverage = _discover_projects(api, reporter)
     candidates: dict[str, _Candidate] = {}
     coverage: list[dict[str, Any]] = []
+    project_partitions: dict[str, dict[str, Any]] = {}
     passes = 0
     for pass_number in range(1, _MAX_DISCOVERY_PASSES + 1):
         passes = pass_number
-        before = set(candidates)
+        before = _discovery_state(candidates)
         for is_archived, is_starred in _DISCOVERY_PARTITIONS:
             partition_candidates, partition_coverage = _discover_partition(
                 api,
@@ -953,21 +974,26 @@ def _discover(
             )
             coverage.append(partition_coverage)
             _merge_candidates(candidates, partition_candidates)
-        if pass_number > 1 and set(candidates) == before:
+        # Project listings follow ordinary partitions in every pass. A later
+        # ordinary pass then re-observes conversations that moved between
+        # ordinary history and a Project, so movement cannot silently leave a
+        # conversation undiscovered.
+        for project in projects.values():
+            project_candidates, project_partition = _discover_project_conversations(
+                api,
+                project,
+                collection_range,
+                reporter,
+            )
+            project_partitions[project.source_id] = project_partition
+            _merge_candidates(candidates, project_candidates)
+        if pass_number > 1 and _discovery_state(candidates) == before:
             break
     else:
         raise ChatGPTError(
             "ChatGPT discovery did not stabilize; collection is incomplete"
         )
-    for project in projects.values():
-        project_candidates, project_partition = _discover_project_conversations(
-            api,
-            project,
-            collection_range,
-            reporter,
-        )
-        project_coverage["projects"].append(project_partition)
-        _merge_candidates(candidates, project_candidates)
+    project_coverage["projects"] = list(project_partitions.values())
     return candidates, coverage, passes, project_coverage
 
 
@@ -1242,8 +1268,9 @@ def _collect_api(
             "selected_project_conversations": selected_projects,
             "offset_pagination_limitation": (
                 "Provider has no verified snapshot/cursor guarantee; repeated full "
-                "passes reduce mutable-update skip risk but cannot prove a stable "
-                "snapshot."
+                "passes over ordinary history and owned Projects reduce "
+                "mutable-update and membership-move skip risk but cannot prove a "
+                "stable snapshot."
             ),
             "source_limitations": [
                 "Deleted conversations unavailable to retrospective discovery.",
@@ -1257,6 +1284,9 @@ def _collect_api(
                 "Project conversation listing exposes no archived or starred "
                 "partition, so archived or starred project conversation visibility "
                 "depends on the provider response.",
+                "Project membership reflects the last discovery observation; a "
+                "conversation moved between ordinary history and a Project during "
+                "discovery is archived with the membership observed last.",
                 "Discovery update_time is validated for message/edit content changes "
                 "but is not known to advance for every conversation metadata "
                 "mutation.",

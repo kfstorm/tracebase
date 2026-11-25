@@ -152,6 +152,8 @@ personal Projects and includes eligible project conversations by default.
 Custom GPT conversations, project instructions, and project files remain
 excluded. Project conversation listing has no separate archived or starred
 partition, so Tracebase archives what the provider returns for each Project.
+If a conversation moves between ordinary history and a Project while a run is
+in progress, the run records the membership observed last.
 Conversations that have already been deleted or are no longer available from
 the provider cannot be recovered retrospectively.
 
